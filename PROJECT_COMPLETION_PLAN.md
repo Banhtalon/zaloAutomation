@@ -613,7 +613,7 @@ Mỗi giai đoạn phải cập nhật bảng sau:
 | 2026-07-29 | Phase 1 | Evidence source coverage | PASS | `zalo_scan_evidence.py` 90.4%; `rule_classifier.py` 86.8%; `zalo_evidence.py` 97.5%; `zalo_safety.py` 95.6% | Codex |
 | 2026-07-29 | Phase 1 | Full local quality gate | PASS | Ruff; Mypy 53 files; 152 tests; overall coverage 77.6%; schema/smoke/frontend/compile pass | Codex |
 | 2026-07-29 | Phase 1 | Pre-runtime database backup | PASS | `.backups/zaloAutomation-before-phase1-runtime-dryrun-20260729-184146.db`; integrity `ok`; 774,144 bytes | Codex |
-| 2026-07-29 | Phase 1 | External dry-run job `#128` | ESCALATED | Job `SUCCESS`, `dry_run=true`, `mutates_external=0`, audit violations `0`; 46 results all `INSUFFICIENT_EVIDENCE` because Zalo reported incomplete history sync; 0 screenshots, including GB38/GB40/GB41. No BCNB tick occurred. | Codex |
+| 2026-07-29 | Phase 1 | External dry-run job `#128` | ESCALATED | Job `SUCCESS`, `dry_run=true`, `mutates_external=0`, audit violations `0`; 43 groups are `INSUFFICIENT_EVIDENCE` and 3 are exempt at session 14, but all 46 lack Zalo scan evidence because Zalo reported incomplete history sync; 0 screenshots, including GB38/GB40/GB41. No BCNB tick occurred. | Codex |
 | | | | | | |
 
 ## 10. Definition of Done toàn dự án
