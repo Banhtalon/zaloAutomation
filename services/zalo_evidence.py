@@ -7,10 +7,12 @@ from typing import Any
 
 
 SUBMITTED_VERIFIED = "SUBMITTED_VERIFIED"
+SUBMITTED_LATE_VERIFIED = "SUBMITTED_LATE_VERIFIED"
 NOT_FOUND_VERIFIED = "NOT_FOUND_VERIFIED"
 INSUFFICIENT_EVIDENCE = "INSUFFICIENT_EVIDENCE"
 
 SUBMITTED_STATUS = "✅ Đã nộp – Có minh chứng"
+SUBMITTED_LATE_STATUS = "🟡 Đã nộp trễ – Có minh chứng"
 NOT_FOUND_STATUS = "❌ Chưa tìm thấy trong khoảng đã kiểm chứng – Có minh chứng"
 INSUFFICIENT_STATUS = "⚠️ Không đủ bằng chứng – Cần kiểm tra thủ công"
 
@@ -46,6 +48,8 @@ def build_scan_result(
     report_detail: str | None = None,
     submitted_for_bcnb: bool = False,
     extra_reasons: list[str] | None = None,
+    warnings: list[str] | None = None,
+    verified_report_state: str = SUBMITTED_VERIFIED,
 ) -> dict[str, Any]:
     reasons = list(extra_reasons or [])
     if not actual_group_name:
@@ -59,8 +63,12 @@ def build_scan_result(
         if images.get("report") is None:
             reasons.append("Không chụp được ảnh tin nhắn báo cáo.")
         if not reasons:
-            evidence_state = SUBMITTED_VERIFIED
-            status = SUBMITTED_STATUS
+            evidence_state = verified_report_state
+            status = (
+                SUBMITTED_LATE_STATUS
+                if verified_report_state == SUBMITTED_LATE_VERIFIED
+                else SUBMITTED_STATUS
+            )
     else:
         if oldest_message_date is None or newest_message_date is None:
             reasons.append("Không đọc được mốc ngày cũ nhất hoặc mới nhất.")
@@ -87,6 +95,7 @@ def build_scan_result(
         "classifier_result": classifier_result,
         "images": images,
         "validation_errors": reasons,
+        "warnings": list(warnings or []),
     }
     available_image = next(
         (

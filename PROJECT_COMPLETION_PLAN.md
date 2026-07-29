@@ -1,6 +1,6 @@
 # Kế hoạch hoàn thiện Zalo Automation
 
-**Trạng thái tài liệu:** COMPLETED — Giai đoạn 0; sẵn sàng Giai đoạn 1  
+**Trạng thái tài liệu:** EXECUTING — Giai đoạn 1; source-level acceptance đạt, external dry-run đang chờ  
 **Execution Gate:** ALLOWED cho Local/Dev từ 2026-07-29; không mở Production Gate  
 **Môi trường mặc định:** Local/Dev  
 **Số vòng sửa tối đa cho mỗi giai đoạn:** 2  
@@ -131,26 +131,26 @@ Human Gate: Production smoke
 
 ### 1.1 Tách phân loại nội dung và ngày gửi
 
-- [ ] Refactor classifier để trả:
+- [x] Refactor classifier để trả:
   - `is_report`.
   - `score`.
   - `content_dates`.
   - `matched_signals`.
-- [ ] Không dùng `content_dates` làm ngày gửi.
-- [ ] Đọc `ui_sent_at` từ timestamp/ARIA/DOM của Zalo.
+- [x] Không dùng `content_dates` làm ngày gửi.
+- [x] Đọc `ui_sent_at` từ timestamp/ARIA/DOM của Zalo.
 - [ ] Nếu chỉ có separator ngày, ánh xạ message theo timeline trong đúng chat container.
 - [ ] Chuẩn hóa timezone `Asia/Ho_Chi_Minh`.
-- [ ] Lưu cảnh báo `CONTENT_DATE_MISMATCH` khi ngày nội dung lệch ngày gửi.
+- [x] Lưu cảnh báo `CONTENT_DATE_MISMATCH` khi ngày nội dung lệch ngày gửi.
 
 ### 1.2 Kiểm tra đồng bộ và độ bao phủ
 
-- [ ] Phát hiện banner:
+- [x] Phát hiện banner:
   - “Zalo Web của bạn hiện chưa có đầy đủ tin nhắn gần đây”.
   - “Đồng bộ tin nhắn gần đây”.
   - “Nhấn để đồng bộ ngay”.
 - [ ] Có thể thử đồng bộ một lần và chờ postcondition.
-- [ ] Nếu banner không biến mất: `INSUFFICIENT_EVIDENCE`.
-- [ ] Tính:
+- [x] Nếu banner không biến mất: `INSUFFICIENT_EVIDENCE`.
+- [x] Tính:
 
 ```python
 required_start = min(
@@ -159,22 +159,22 @@ required_start = min(
 )
 ```
 
-- [ ] Chỉ coi đã tải đủ khi:
+- [x] Chỉ coi đã tải đủ khi:
   - Mốc cũ nhất đạt `required_start`.
   - Message count và mốc cũ nhất ổn định sau ít nhất hai lần cuộn.
   - Không có banner thiếu đồng bộ.
 
 ### 1.3 Trạng thái nghiệp vụ
 
-- [ ] `SUBMITTED_VERIFIED`: đủ điều kiện tích BCNB.
-- [ ] `SUBMITTED_LATE_VERIFIED`: có báo cáo nhưng quá hạn, không tích.
-- [ ] `NOT_FOUND_VERIFIED`: không tìm thấy trong khoảng đã kiểm chứng.
-- [ ] `INSUFFICIENT_EVIDENCE`: không được kết luận.
+- [x] `SUBMITTED_VERIFIED`: đủ điều kiện tích BCNB.
+- [x] `SUBMITTED_LATE_VERIFIED`: có báo cáo quá 6 ngày, không tích; 3–6 ngày vẫn nghiệm thu và ghi rõ trễ.
+- [x] `NOT_FOUND_VERIFIED`: không tìm thấy trong khoảng đã kiểm chứng.
+- [x] `INSUFFICIENT_EVIDENCE`: không được kết luận.
 - [ ] Buổi 14 dùng cùng audit/evidence model, ghi rõ `LESSON_14_EXEMPTION`.
 
 ### 1.4 Audit từng candidate
 
-- [ ] Lưu cho từng candidate:
+- [x] Lưu cho từng candidate:
   - `ui_sent_at`.
   - `content_dates`.
   - `class_date`.
@@ -182,24 +182,24 @@ required_start = min(
   - `decision`.
   - `rejection_reason`.
   - `message_fingerprint`.
-- [ ] Audit BCNB lưu SHA-256 ảnh, không chỉ đường dẫn.
+- [ ] Audit BCNB lưu SHA-256 ảnh, không chỉ đường dẫn. Chờ bổ sung payload audit BCNB ở vòng tiếp theo.
 
 ### Test bắt buộc
 
-- [ ] GB40: nội dung ghi `26/07/2025`, UI gửi `29/07/2026`, ngày học `26/07/2026` → được nghiệm thu, cảnh báo sai năm.
-- [ ] Nội dung đúng nhưng UI gửi quá hạn → `SUBMITTED_LATE_VERIFIED`.
-- [ ] Banner thiếu đồng bộ → `INSUFFICIENT_EVIDENCE`.
-- [ ] Không đọc được ngày UI → `INSUFFICIENT_EVIDENCE`.
-- [ ] Chưa cuộn đủ 10 ngày → `INSUFFICIENT_EVIDENCE`.
+- [x] GB40: nội dung ghi `26/07/2025`, UI gửi `29/07/2026`, ngày học `26/07/2026` → được nghiệm thu, cảnh báo sai năm.
+- [x] Nội dung đúng nhưng UI gửi quá hạn → `SUBMITTED_LATE_VERIFIED`.
+- [x] Banner thiếu đồng bộ → `INSUFFICIENT_EVIDENCE`.
+- [x] Không đọc được ngày UI → `INSUFFICIENT_EVIDENCE`.
+- [x] Chưa cuộn đủ 10 ngày → `INSUFFICIENT_EVIDENCE`.
 - [ ] Sai header nhóm → không phân loại.
 - [ ] Ảnh chụp thất bại → không được `VERIFIED`.
 - [ ] Hai mã lớp gần giống không được match nhầm.
 
 ### Acceptance Criteria
 
-- [ ] Không còn đường code dùng ngày nội dung làm ngày gửi.
-- [ ] Mọi negative result đều có proof of coverage.
-- [ ] Coverage `zalo_scan_evidence.py` và classifier ≥ 85%.
+- [x] Không còn đường code dùng ngày nội dung làm ngày gửi.
+- [x] Mọi negative result đều có proof of coverage.
+- [x] Coverage `zalo_scan_evidence.py` và classifier ≥ 85%.
 - [ ] Dry-run GB38, GB40, GB41 cho kết quả khớp kiểm tra thủ công.
 - [ ] Không có audit external write trong dry-run.
 
@@ -609,6 +609,9 @@ Mỗi giai đoạn phải cập nhật bảng sau:
 | 2026-07-29 | Phase 0 | Git checkpoint | PASS | fresh local repository; 128 tracked source/documentation files; no `.env`, database, session, runtime, evidence or backup staged; commit `4077a3ff0cc1248b5d66491c1effacaa5ebc3b3d` | Codex |
 | 2026-07-29 | Phase 0 | Clean environment install | PASS | 49 pinned packages installed in a fresh Python environment; `pip check` and core imports passed | Codex |
 | 2026-07-29 | Phase 0 | Existing whitespace debt | OPEN P3 | `git diff --cached --check` reports 183 pre-existing whitespace findings; deferred to a dedicated formatting-only checkpoint to avoid mixing a mechanical rewrite with the baseline | Codex |
+| 2026-07-29 | Phase 1 | GB40/UI date regression | PASS | 10 Zalo evidence tests plus classifier/safety/evidence tests; report content `26/07/2025` and UI date `29/07/2026` produce `SUBMITTED_LATE_ACCEPTED`, BCNB eligible, with `CONTENT_DATE_MISMATCH` warning | Codex |
+| 2026-07-29 | Phase 1 | Evidence source coverage | PASS | `zalo_scan_evidence.py` 90.4%; `rule_classifier.py` 86.8%; `zalo_evidence.py` 97.5%; `zalo_safety.py` 95.6% | Codex |
+| 2026-07-29 | Phase 1 | Full local quality gate | PASS | Ruff; Mypy 53 files; 152 tests; overall coverage 77.6%; schema/smoke/frontend/compile pass | Codex |
 | | | | | | |
 
 ## 10. Definition of Done toàn dự án
