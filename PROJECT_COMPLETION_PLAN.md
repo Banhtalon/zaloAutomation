@@ -1,6 +1,6 @@
 # Kế hoạch hoàn thiện Zalo Automation
 
-**Trạng thái tài liệu:** EXECUTING — Giai đoạn 0  
+**Trạng thái tài liệu:** COMPLETED — Giai đoạn 0; sẵn sàng Giai đoạn 1  
 **Execution Gate:** ALLOWED cho Local/Dev từ 2026-07-29; không mở Production Gate  
 **Môi trường mặc định:** Local/Dev  
 **Số vòng sửa tối đa cho mỗi giai đoạn:** 2  
@@ -109,7 +109,7 @@ Human Gate: Production smoke
 - [x] Kiểm tra thư mục `.git` hiện tại.
 - [ ] Chỉ sau khi người vận hành xác nhận, khởi tạo hoặc khôi phục Git repository.
 - [x] Thêm `.env`, `database.db*`, `zalo_session/`, ảnh, log, upload và backup vào ignore.
-- [ ] Tạo commit/checkpoint baseline sau khi quality gate đạt.
+- [x] Tạo commit/checkpoint baseline sau khi quality gate đạt.
 - [x] Pin phiên bản trong `requirements.txt` và `requirements-dev.txt`.
 - [x] Tạo file lock dependency hoặc quy trình cập nhật dependency có kiểm thử.
 
@@ -117,8 +117,8 @@ Human Gate: Production smoke
 
 - [x] Backup source có đường dẫn, số file, dung lượng và SHA-256.
 - [x] Backup database chạy `PRAGMA integrity_check` thành công sau khi restore thử ở file tạm.
-- [ ] `git status` chạy được và không đưa secret/runtime vào index. Chờ Human Gate khởi tạo/khôi phục Git.
-- [ ] Cài mới môi trường từ dependency đã pin thành công. Cần chạy ở môi trường sạch trong vòng tiếp theo.
+- [x] `git status` chạy được và không đưa secret/runtime vào index.
+- [x] Cài mới môi trường từ dependency đã pin thành công.
 - [x] `CHECK_QUALITY.ps1` đạt trên baseline.
 
 ### Human Gate
@@ -606,6 +606,9 @@ Mỗi giai đoạn phải cập nhật bảng sau:
 | 2026-07-29 | Phase 0 | SQLite backup/restore validation | PASS | `.backups/zaloAutomation-phase0-database-20260729-181336.db`; integrity `ok`; foreign keys `0`; SHA-256 `E43ECD8876640A3682DFB8D2C6EAD3BA9B531C7CE0DCEAE638A17D0872FD7666` | Codex |
 | 2026-07-29 | Phase 0 | Dependency lock | PASS | `requirements.txt` direct pins + `requirements.lock.txt` (49 lines); consistency check passed | Codex |
 | 2026-07-29 | Phase 0 | Quality gate | PASS | Ruff, Mypy 53 files, 143 tests, phase invariant gates, schema/active jobs, smoke, frontend contract and compile passed; coverage 75.1% | Codex |
+| 2026-07-29 | Phase 0 | Git checkpoint | PASS | fresh local repository; 128 tracked source/documentation files; no `.env`, database, session, runtime, evidence or backup staged; commit `4077a3ff0cc1248b5d66491c1effacaa5ebc3b3d` | Codex |
+| 2026-07-29 | Phase 0 | Clean environment install | PASS | 49 pinned packages installed in a fresh Python environment; `pip check` and core imports passed | Codex |
+| 2026-07-29 | Phase 0 | Existing whitespace debt | OPEN P3 | `git diff --cached --check` reports 183 pre-existing whitespace findings; deferred to a dedicated formatting-only checkpoint to avoid mixing a mechanical rewrite with the baseline | Codex |
 | | | | | | |
 
 ## 10. Definition of Done toàn dự án
