@@ -35,6 +35,12 @@ ZALO_INCOMPLETE_SYNC_BANNERS = (
     "Đồng bộ tin nhắn gần đây",
     "Nhấn để đồng bộ ngay",
 )
+ZALO_SYNC_ACTION_TEXTS = (
+    "Nhấn để đồng bộ ngay",
+    "Đồng bộ tin nhắn gần đây",
+)
+ZALO_SYNC_WAIT_SECONDS = 180.0
+ZALO_SYNC_VERIFY_OBSERVATIONS = 3
 
 
 def _required_window_start(class_date_str: str, today: datetime) -> datetime:
@@ -54,8 +60,7 @@ def _required_window_start(class_date_str: str, today: datetime) -> datetime:
 async def _message_date_header_from_zalo_ui(message):
     try:
         date_headers = message.locator(
-            'xpath=preceding::div[contains(@class, "chat-date") '
-            'or contains(@class, "block-date")]'
+            'xpath=preceding::div[contains(@class, "chat-date") or contains(@class, "block-date")]'
         )
         if await date_headers.count() == 0:
             return None
@@ -86,6 +91,146 @@ async def _zalo_sync_is_incomplete(page) -> bool:
         except Exception:
             continue
     return False
+
+
+async def _visible_zalo_sync_action(page):
+    if not hasattr(page, "get_by_text"):
+        return None
+    for action_text in ZALO_SYNC_ACTION_TEXTS:
+        try:
+            action = page.get_by_text(action_text, exact=False)
+            if await action.count() > 0 and await action.first.is_visible():
+                return action.first
+        except Exception:
+            continue
+    return None
+
+
+def _sync_result(
+    decision: str,
+    *,
+    attempted: bool,
+    verified: bool,
+    reload_verified: bool,
+    reason: str,
+) -> dict[str, Any]:
+    return {
+        "decision": decision,
+        "attempted": attempted,
+        "verified": verified,
+        "reload_verified": reload_verified,
+        "checked_at": now_business().isoformat(timespec="seconds"),
+        "reason": reason,
+    }
+
+
+def attach_zalo_sync_result(
+    result: dict[str, Any],
+    sync_result: dict[str, Any],
+) -> dict[str, Any]:
+    """Persist the session-level sync decision alongside each class result."""
+    evidence = result.setdefault("evidence", {})
+    persisted_sync = dict(sync_result)
+    classifier_decision = evidence.get("classifier_result", {}).get("decision")
+    if classifier_decision == "ZALO_SYNC_INCOMPLETE":
+        persisted_sync.update(
+            {
+                "decision": "SYNC_LOST_DURING_SCAN",
+                "verified": False,
+                "reload_verified": False,
+                "reason": ("Zalo hiển thị lại cảnh báo thiếu lịch sử trong lúc quét lớp."),
+            }
+        )
+    evidence["zalo_sync"] = persisted_sync
+    return result
+
+
+async def ensure_zalo_history_synced(
+    page,
+    *,
+    ensure_not_cancelled: Callable[[], Awaitable[None]],
+    wait_timeout_seconds: float = ZALO_SYNC_WAIT_SECONDS,
+    poll_interval_seconds: float = 1.0,
+    verify_observations: int = ZALO_SYNC_VERIFY_OBSERVATIONS,
+) -> dict[str, Any]:
+    """Try one Zalo history sync and verify that it survives a page reload."""
+    if not await _zalo_sync_is_incomplete(page):
+        return _sync_result(
+            "SYNC_NOT_REQUIRED",
+            attempted=False,
+            verified=True,
+            reload_verified=False,
+            reason="Zalo không hiển thị cảnh báo thiếu lịch sử sau khi tải trang.",
+        )
+
+    await ensure_not_cancelled()
+    action = await _visible_zalo_sync_action(page)
+    if action is None:
+        return _sync_result(
+            "SYNC_ACTION_NOT_FOUND",
+            attempted=False,
+            verified=False,
+            reload_verified=False,
+            reason="Có cảnh báo thiếu lịch sử nhưng không tìm thấy nút đồng bộ.",
+        )
+
+    try:
+        await action.click(timeout=5000)
+    except Exception as exc:
+        return _sync_result(
+            "SYNC_CLICK_FAILED",
+            attempted=True,
+            verified=False,
+            reload_verified=False,
+            reason=f"Không nhấn được nút đồng bộ Zalo: {exc}",
+        )
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + max(0.0, wait_timeout_seconds)
+    while await _zalo_sync_is_incomplete(page):
+        await ensure_not_cancelled()
+        if loop.time() >= deadline:
+            return _sync_result(
+                "SYNC_TIMEOUT",
+                attempted=True,
+                verified=False,
+                reload_verified=False,
+                reason="Cảnh báo thiếu lịch sử không biến mất trong thời gian chờ.",
+            )
+        await asyncio.sleep(max(0.0, poll_interval_seconds))
+
+    try:
+        await ensure_not_cancelled()
+        await page.reload(wait_until="domcontentloaded", timeout=120000)
+        await page.wait_for_selector("#contact-search-input", timeout=120000)
+        for observation in range(max(1, verify_observations)):
+            await ensure_not_cancelled()
+            if await _zalo_sync_is_incomplete(page):
+                return _sync_result(
+                    "SYNC_REAPPEARED",
+                    attempted=True,
+                    verified=False,
+                    reload_verified=False,
+                    reason="Cảnh báo thiếu lịch sử xuất hiện lại sau khi tải mới Zalo.",
+                )
+            if observation + 1 < max(1, verify_observations):
+                await asyncio.sleep(max(0.0, poll_interval_seconds))
+    except Exception as exc:
+        return _sync_result(
+            "SYNC_RELOAD_UNVERIFIED",
+            attempted=True,
+            verified=False,
+            reload_verified=False,
+            reason=f"Không xác minh được trạng thái đồng bộ sau khi tải mới: {exc}",
+        )
+
+    return _sync_result(
+        "SYNC_VERIFIED",
+        attempted=True,
+        verified=True,
+        reload_verified=True,
+        reason="Đã đồng bộ và cảnh báo không quay lại sau khi tải mới.",
+    )
 
 
 async def _capture_zalo_evidence(
@@ -244,13 +389,9 @@ async def scan_open_zalo_chat(
     previous_coverage_observation: tuple[int, str] | None = None
     for _scroll_idx in range(MAX_EVIDENCE_SCROLLS):
         await ensure_not_cancelled()
-        loaded_messages = await page.locator(
-            '[data-component="bubble-message"]'
-        ).all()
+        loaded_messages = await page.locator('[data-component="bubble-message"]').all()
         oldest_loaded_date = (
-            await _message_date_from_zalo_ui(loaded_messages[0], today)
-            if loaded_messages
-            else None
+            await _message_date_from_zalo_ui(loaded_messages[0], today) if loaded_messages else None
         )
         if (
             oldest_loaded_date is not None
@@ -265,8 +406,7 @@ async def scan_open_zalo_chat(
             previous_coverage_observation = observation
             if stable_coverage_observations >= 2:
                 log_message(
-                    "  -> Đã tải đủ cửa sổ kiểm chứng "
-                    f"{EVIDENCE_WINDOW_DAYS} ngày trên Zalo."
+                    f"  -> Đã tải đủ cửa sổ kiểm chứng {EVIDENCE_WINDOW_DAYS} ngày trên Zalo."
                 )
                 break
         await page.mouse.wheel(0, -2000)
@@ -280,9 +420,7 @@ async def scan_open_zalo_chat(
 
     messages = await page.locator('[data-component="bubble-message"]').all()
     messages_checked = len(messages)
-    oldest_message_date = (
-        await _message_date_from_zalo_ui(messages[0], today) if messages else None
-    )
+    oldest_message_date = await _message_date_from_zalo_ui(messages[0], today) if messages else None
     newest_message_date = (
         await _message_date_from_zalo_ui(messages[-1], today) if messages else None
     )
@@ -316,17 +454,14 @@ async def scan_open_zalo_chat(
         classifier_result["candidate_reports"] += 1
         ui_sent_at = await _message_date_from_zalo_ui(message, today)
         content_dates = [
-            content_date.date().isoformat()
-            for content_date in classification["content_dates"]
+            content_date.date().isoformat() for content_date in classification["content_dates"]
         ]
         candidate: dict[str, Any] = {
             "score": classification["score"],
             "matched_signals": classification["matched_signals"],
             "content_dates": content_dates,
             "ui_sent_at": ui_sent_at.date().isoformat() if ui_sent_at else None,
-            "message_fingerprint": hashlib.sha256(
-                raw_content.strip().encode("utf-8")
-            ).hexdigest(),
+            "message_fingerprint": hashlib.sha256(raw_content.strip().encode("utf-8")).hexdigest(),
         }
         if ui_sent_at is None:
             classifier_result["undated_report_candidates"] += 1
@@ -336,9 +471,7 @@ async def scan_open_zalo_chat(
 
         if content_dates and ui_sent_at.date().isoformat() not in content_dates:
             candidate["warning"] = "CONTENT_DATE_MISMATCH"
-            warnings.append(
-                "CONTENT_DATE_MISMATCH: ngày trong nội dung khác ngày gửi trên Zalo."
-            )
+            warnings.append("CONTENT_DATE_MISMATCH: ngày trong nội dung khác ngày gửi trên Zalo.")
 
         delay = None
         if class_date_str:
@@ -354,15 +487,11 @@ async def scan_open_zalo_chat(
                 submitted_for_bcnb = True
                 candidate["decision"] = "SUBMITTED_ON_TIME"
             elif 2 < delay <= BCNB_TICK_MAX_DELAY_DAYS:
-                report_detail = (
-                    f"Nộp {ui_sent_at.strftime('%d/%m')} – Trễ {delay} ngày"
-                )
+                report_detail = f"Nộp {ui_sent_at.strftime('%d/%m')} – Trễ {delay} ngày"
                 submitted_for_bcnb = True
                 candidate["decision"] = "SUBMITTED_LATE_ACCEPTED"
             elif delay > BCNB_TICK_MAX_DELAY_DAYS:
-                report_detail = (
-                    f"Nộp {ui_sent_at.strftime('%d/%m')} – Quá hạn {delay} ngày"
-                )
+                report_detail = f"Nộp {ui_sent_at.strftime('%d/%m')} – Quá hạn {delay} ngày"
                 verified_report_state = SUBMITTED_LATE_VERIFIED
                 candidate["decision"] = "SUBMITTED_LATE"
             else:
@@ -380,16 +509,12 @@ async def scan_open_zalo_chat(
             delta_days = (today - normalized_date).days
             if 0 <= delta_days <= 8:
                 report_detail = (
-                    f"Nộp {ui_sent_at.strftime('%d/%m')} – "
-                    f"Cách thời điểm quét {delta_days} ngày"
+                    f"Nộp {ui_sent_at.strftime('%d/%m')} – Cách thời điểm quét {delta_days} ngày"
                 )
                 submitted_for_bcnb = True
                 candidate["decision"] = "SUBMITTED_WITHOUT_CLASS_DATE"
             elif delta_days > 8:
-                report_detail = (
-                    f"Nộp {ui_sent_at.strftime('%d/%m')} – "
-                    f"Quá hạn {delta_days} ngày"
-                )
+                report_detail = f"Nộp {ui_sent_at.strftime('%d/%m')} – Quá hạn {delta_days} ngày"
                 verified_report_state = SUBMITTED_LATE_VERIFIED
                 candidate["decision"] = "SUBMITTED_LATE_WITHOUT_CLASS_DATE"
             else:
@@ -458,9 +583,7 @@ async def scan_open_zalo_chat(
 
     extra_reasons = []
     if not report_found and classifier_result["undated_report_candidates"]:
-        extra_reasons.append(
-            "Có tin nhắn giống báo cáo nhưng không đọc được ngày gửi."
-        )
+        extra_reasons.append("Có tin nhắn giống báo cáo nhưng không đọc được ngày gửi.")
 
     return build_scan_result(
         group=group_name,

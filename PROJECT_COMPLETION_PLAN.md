@@ -1,6 +1,6 @@
 # Kế hoạch hoàn thiện Zalo Automation
 
-**Trạng thái tài liệu:** EXECUTING — Giai đoạn 1; timezone, lesson-14 evidence/audit và SHA-256 audit đã được nghiệm thu; còn hạng mục tự đồng bộ Zalo theo checklist
+**Trạng thái tài liệu:** EXECUTING — Giai đoạn 1; timezone, lesson-14 evidence/audit, SHA-256 audit và tự đồng bộ Zalo đã được nghiệm thu; các hạng mục còn lại theo checklist
 **Execution Gate:** ALLOWED cho Local/Dev từ 2026-07-29; không mở Production Gate  
 **Môi trường mặc định:** Local/Dev  
 **Số vòng sửa tối đa cho mỗi giai đoạn:** 2  
@@ -148,7 +148,12 @@ Human Gate: Production smoke
   - “Zalo Web của bạn hiện chưa có đầy đủ tin nhắn gần đây”.
   - “Đồng bộ tin nhắn gần đây”.
   - “Nhấn để đồng bộ ngay”.
-- [ ] Có thể thử đồng bộ một lần và chờ postcondition.
+- [x] Có thể thử đồng bộ một lần và chờ postcondition.
+- [x] Sau khi banner biến mất, tải mới trang và quan sát ổn định trước khi cho phép quét.
+- [x] Lưu `zalo_sync.decision`, `verified`, `attempted`, `reload_verified`,
+  `checked_at` và `reason` trong evidence của từng lớp.
+- [x] Nếu banner quay lại hoặc không xác minh được sau reload:
+  `INSUFFICIENT_EVIDENCE`, không tìm/đọc chat và không tick BCNB.
 - [x] Nếu banner không biến mất: `INSUFFICIENT_EVIDENCE`.
 - [x] Tính:
 
@@ -637,6 +642,10 @@ Mỗi giai đoạn phải cập nhật bảng sau:
 | 2026-07-29 | Phase 1 | Pre-runtime database backups | PASS | `zaloAutomation-before-timezone-lesson14-audit-dryrun-20260729-204113.db`: 1,179,648 bytes, SHA-256 `5F18B483C7C7EB442BDCBE92D79C1136191DDDCEE4ACE89BD9F5446F0BE2B621`; `zaloAutomation-before-lesson14-audit-rerun-20260729-204833.db`: 1,269,760 bytes, SHA-256 `4A8468D09D5E9F334D9D03EFD996B8F644A9EBA267721D7693A28E2F75298A03`; integrity `ok`. | Codex |
 | 2026-07-29 | Phase 1 | Dry-run job `#136` first runtime round | PARTIAL | Timezone `+07:00`, three `LESSON_14_EXEMPTION` results and six hashed BCNB audits passed, but lesson-14 checkboxes were already checked so exemption external audits were absent. Triggered round-two no-op audit fix. | Codex |
 | 2026-07-29 | Phase 1 | Dry-run job `#137` final runtime round | PASS | Job `SUCCESS`, `dry_run=true`, `mutates_external=0`; all 46 `scanned_at` values use `+07:00`; three exemption results and exactly three lesson-14 audits contain `LESSON_14_EXEMPTION`; nine audits are `DRY_RUN`, before/after unchanged, and all nine `evidence_sha256` values are valid and match their files; 49/49 result images match SHA; integrity `ok`, FK/unresolved actions `0`. SB27 safely became `GROUP_IDENTITY_MISMATCH` when Zalo left SB26 open, proving fail-closed behavior. | Codex |
+| 2026-07-29 | Phase 1 | Source backup before Zalo auto-sync | PASS | `.backups/zaloAutomation-before-zalo-auto-sync-20260729-211441.zip`; 144 entries; 230,205 bytes; SHA-256 `4DD58854A6E04A02075738A7886D794516C4DB6E7A0DCCA9294C78A3900FB46C`. | Codex |
+| 2026-07-29 | Phase 1 | Zalo auto-sync red/green + quality gate | PASS | Initial focused test failed because `ensure_zalo_history_synced` did not exist; after implementation 30 focused tests and 172 full tests passed; Ruff, Mypy 54 files, coverage 77.6%, invariant/schema/smoke/frontend/compile gates passed. | Codex |
+| 2026-07-29 | Phase 1 | Pre-runtime database backup for job `#138` | PASS | `.backups/zaloAutomation-before-auto-sync-dryrun-20260729-212016.db`; 1,368,064 bytes; SHA-256 `78323AAF359EED21B46E22F9533C20D4A01E5869707D1358035B993CC695B3E4`; integrity `ok`, FK violations `0`. | Codex |
+| 2026-07-29 | Phase 1 | Zalo auto-sync dry-run job `#138` | PASS | Real Zalo preflight returned `SYNC_NOT_REQUIRED` because no banner was present on the freshly loaded page; 46/46 results persist `verified=true`; job `SUCCESS`, `dry_run=true`, `mutates_external=0`; 50/50 result images match SHA-256; nine audits are `DRY_RUN`, before/after unchanged, SHA valid; database integrity `ok`, FK/active jobs/unresolved actions `0`. Button-click, timeout and banner-reappeared branches are covered by regression tests because the live session had no banner. | Codex |
 | | | | | | |
 
 ## 10. Definition of Done toàn dự án
