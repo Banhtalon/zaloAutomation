@@ -115,7 +115,7 @@ def build_scan_result(
         "zalo_group_name": actual_group_name or "",
         "person": person,
         "status": status,
-        "status_detail": report_detail or ("; ".join(reasons) if reasons else ""),
+        "status_detail": "; ".join(reasons) if reasons else (report_detail or ""),
         "evidence_state": evidence_state,
         "submitted_for_bcnb": bool(
             evidence_state == SUBMITTED_VERIFIED and submitted_for_bcnb

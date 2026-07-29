@@ -31,6 +31,17 @@ class ZaloClassMatchingTests(unittest.TestCase):
         )
         self.assertFalse(open_chat_matches("MindX - VT-JSB14", ""))
 
+    def test_nearby_class_codes_never_match(self):
+        self.assertFalse(
+            class_code_matches_group("VT-C4K-GB4", "MindX - VT-C4K-GB40")
+        )
+        self.assertFalse(
+            open_chat_matches("MindX - VT-C4K-GB40", "MindX - VT-C4K-GB41")
+        )
+        self.assertFalse(
+            open_chat_matches("MindX - VT-C4K-PTI08", "MindX - VT-C4K-PTI09")
+        )
+
     def test_invalid_nonempty_class_date_fails_closed(self):
         with self.assertRaises(ValueError):
             report_delay_days(

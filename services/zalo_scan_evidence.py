@@ -19,7 +19,11 @@ from services.zalo_evidence import (
     build_image_evidence,
     build_scan_result,
 )
-from services.zalo_safety import parse_class_date, report_delay_days
+from services.zalo_safety import (
+    open_chat_matches,
+    parse_class_date,
+    report_delay_days,
+)
 
 
 EVIDENCE_WINDOW_DAYS = 10
@@ -121,6 +125,7 @@ def build_empty_evidence_result(
     scanned_at: datetime,
     today: datetime,
     reason: str,
+    classifier_decision: str = "NOT_EVALUATED",
 ) -> dict[str, Any]:
     return build_scan_result(
         group=group,
@@ -130,7 +135,7 @@ def build_empty_evidence_result(
         messages_checked=0,
         classifier_result={
             "engine": "rule_classifier_v2",
-            "decision": "NOT_EVALUATED",
+            "decision": classifier_decision,
             "report_found": False,
             "evaluated_messages": 0,
         },
@@ -162,6 +167,17 @@ async def scan_open_zalo_chat(
     ensure_not_cancelled: Callable[[], Awaitable[None]],
 ) -> dict[str, Any]:
     scanned_at = datetime.now()
+    if not open_chat_matches(group_name, actual_group_name):
+        return build_empty_evidence_result(
+            group=group_name,
+            person=person,
+            actual_group_name=actual_group_name or None,
+            scanned_at=scanned_at,
+            today=today,
+            reason="Tên nhóm Zalo thực tế không khớp cấu hình.",
+            classifier_decision="GROUP_IDENTITY_MISMATCH",
+        )
+
     try:
         required_window_start = _required_window_start(class_date_str, today)
     except (TypeError, ValueError) as exc:

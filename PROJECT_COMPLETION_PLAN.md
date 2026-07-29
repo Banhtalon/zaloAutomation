@@ -191,9 +191,9 @@ required_start = min(
 - [x] Banner thiếu đồng bộ → `INSUFFICIENT_EVIDENCE`.
 - [x] Không đọc được ngày UI → `INSUFFICIENT_EVIDENCE`.
 - [x] Chưa cuộn đủ 10 ngày → `INSUFFICIENT_EVIDENCE`.
-- [ ] Sai header nhóm → không phân loại.
-- [ ] Ảnh chụp thất bại → không được `VERIFIED`.
-- [ ] Hai mã lớp gần giống không được match nhầm.
+- [x] Sai header nhóm → không phân loại.
+- [x] Ảnh chụp thất bại → không được `VERIFIED`.
+- [x] Hai mã lớp gần giống không được match nhầm.
 
 ### Acceptance Criteria
 
@@ -626,6 +626,11 @@ Mỗi giai đoạn phải cập nhật bảng sau:
 | 2026-07-29 | Phase 1 | Pre-runtime database backup for job `#134` | PASS | `.backups/zaloAutomation-before-evidence-screenshot-dryrun-20260729-200321.db`; integrity `ok`; 1,003,520 bytes; SHA-256 `E7A398412D145600E88C565194BD86F2DBC07C0174A78173133FB1816B7068EC`. | Codex |
 | 2026-07-29 | Phase 1 | External dry-run job `#134` | PASS | Job `SUCCESS`, request `dry_run=true`, `execution_mode=dry-run`, `mutates_external=0`; 46 results: 42 `SUBMITTED_VERIFIED`, 2 `SUBMITTED_LATE_VERIFIED`, 2 `NOT_FOUND_VERIFIED`; 50/50 evidence files exist and match stored SHA-256; six audits are `DRY_RUN`, before/after unchanged; active jobs `0`; database integrity `ok`, FK violations `0`. GB38/GB40/GB41 all have report evidence. | Codex |
 | 2026-07-29 | Phase 1 | Negative evidence visual review after fix | PASS | Both negative groups show the real Zalo UI separator `T4 15/07/2026` in `job-134/oldest-d920d7411d.png` and `job-134/oldest-2c208fc694.png`; a third `oldest_message` image preserves the message at that boundary. Sample oldest SHA-256 `19B135D0C7C0861EF3054FCD4B58CA288C5D74EA886CEB91251611BE84B81602`. | Codex |
+| 2026-07-29 | Phase 1 | Source backup before exact group matching | PASS | `.backups/zaloAutomation-before-exact-group-match-20260729-201445.zip`; 142 entries; 225,705 bytes; SHA-256 `7D1AE7F28A82289AA682443CB6271FBEDC00EE4AD2CB4F627DAEA91B46041860`. | Codex |
+| 2026-07-29 | Phase 1 | Exact group matching red-green regression | PASS | Initial focused run reproduced two failures: GB40 was classified while actual header was GB41, and report screenshot failure still displayed “Nộp đúng hạn”. After the source fix, 26/26 focused tests passed; nearby `GB4/GB40`, `GB40/GB41` and `PTI08/PTI09` pairs fail closed. | Codex |
+| 2026-07-29 | Phase 1 | Exact group matching full quality gate | PASS | Ruff; Mypy 53 files; 156 tests; overall coverage 77.7%; `zalo_scan_evidence.py` 90.3%; `zalo_evidence.py` 97.6%; `zalo_safety.py` 95.6%; schema/smoke/frontend/compile pass. | Codex |
+| 2026-07-29 | Phase 1 | Pre-runtime database backup for job `#135` | PASS | `.backups/zaloAutomation-before-exact-group-dryrun-20260729-201922.db`; integrity `ok`; FK violations `0`; 1,093,632 bytes; SHA-256 `EB2D76E10F4AF059C0D6CD2D1B7E5247576F998827657FB57A49D085227BC905`. | Codex |
+| 2026-07-29 | Phase 1 | Exact group matching dry-run job `#135` | PASS | Job `SUCCESS`, request `dry_run=true`, `execution_mode=dry-run`, `mutates_external=0`; 46 results with identity mismatch count `0`; 42 `SUBMITTED_VERIFIED`, 2 `SUBMITTED_LATE_VERIFIED`, 2 `NOT_FOUND_VERIFIED`; 50/50 images exist and match SHA-256; six audits are `DRY_RUN` with before/after unchanged; active jobs `0`; database integrity `ok`, FK violations `0`. GB38, GB40, GB41 and PTI09 resolve to distinct verified groups. | Codex |
 | | | | | | |
 
 ## 10. Definition of Done toàn dự án

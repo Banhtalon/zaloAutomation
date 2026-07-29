@@ -241,6 +241,7 @@ async def _run_zalo_automation(
                             scanned_at=scanned_at,
                             today=today,
                             reason="Tên nhóm Zalo thực tế không khớp cấu hình.",
+                            classifier_decision="GROUP_IDENTITY_MISMATCH",
                         )
                     )
                     continue
@@ -254,6 +255,7 @@ async def _run_zalo_automation(
                         scanned_at=scanned_at,
                         today=today,
                         reason="Không xác minh được nhóm Zalo đang mở.",
+                        classifier_decision="GROUP_IDENTITY_UNVERIFIED",
                     )
                 )
                 continue

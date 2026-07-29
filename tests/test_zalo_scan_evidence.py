@@ -138,6 +138,41 @@ class FakeHiddenBannerPage:
 
 
 class ZaloScanEvidenceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_wrong_open_chat_header_fails_closed_before_classification(self):
+        messages = [
+            FakeMessage("Tin nhắn cũ thông thường " * 5, "18/07/2026"),
+            FakeMessage(
+                "Kính gửi phụ huynh. Báo cáo buổi học. Mã lớp: VT-C4K-GB40. "
+                "NỘI DUNG và NHẬN XÉT học viên.",
+                "Hôm nay",
+            ),
+        ]
+        page = FakePage(messages)
+        ensure_not_cancelled = AsyncMock()
+
+        with tempfile.TemporaryDirectory() as root:
+            result = await scan_open_zalo_chat(
+                page,
+                job_id=122,
+                screenshots_dir=root,
+                group_name="MindX - VT-C4K-GB40",
+                actual_group_name="MindX - VT-C4K-GB41",
+                person="Teacher",
+                class_date_str="29/07/2026",
+                today=datetime(2026, 7, 29),
+                ensure_not_cancelled=ensure_not_cancelled,
+            )
+
+        self.assertEqual(result["evidence_state"], INSUFFICIENT_EVIDENCE)
+        self.assertEqual(
+            result["evidence"]["classifier_result"]["decision"],
+            "GROUP_IDENTITY_MISMATCH",
+        )
+        self.assertIn("không khớp", result["status_detail"])
+        self.assertEqual(page.screenshots, [])
+        page.mouse.move.assert_not_awaited()
+        ensure_not_cancelled.assert_not_awaited()
+
     async def test_negative_result_requires_two_hashed_images_and_full_window(self):
         messages = [
             FakeMessage("Tin nhắn thông thường " * 5, "18/07/2026"),
@@ -322,6 +357,34 @@ class ZaloScanEvidenceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result["evidence_state"], INSUFFICIENT_EVIDENCE)
         self.assertIn("Không chụp được ảnh", result["status_detail"])
+
+    async def test_failed_report_screenshot_cannot_claim_submitted(self):
+        messages = [
+            FakeMessage("Tin nhắn cũ thông thường " * 5, "18/07/2026"),
+            FakeMessage(
+                "Kính gửi phụ huynh. Báo cáo buổi học. Mã lớp: VT-C4K-GB40. "
+                "NỘI DUNG và NHẬN XÉT học viên.",
+                "Hôm nay",
+            ),
+        ]
+        page = FakeFailingScreenshotPage(messages)
+
+        with tempfile.TemporaryDirectory() as root:
+            result = await scan_open_zalo_chat(
+                page,
+                job_id=130,
+                screenshots_dir=root,
+                group_name="MindX - VT-C4K-GB40",
+                actual_group_name="MindX - VT-C4K-GB40",
+                person="Teacher",
+                class_date_str="29/07/2026",
+                today=datetime(2026, 7, 29),
+                ensure_not_cancelled=AsyncMock(),
+            )
+
+        self.assertEqual(result["evidence_state"], INSUFFICIENT_EVIDENCE)
+        self.assertFalse(result["submitted_for_bcnb"])
+        self.assertIn("Không chụp được ảnh tin nhắn báo cáo", result["status_detail"])
 
     async def test_ui_date_helper_and_window_helpers_fail_closed(self):
         today = datetime(2026, 7, 29)
