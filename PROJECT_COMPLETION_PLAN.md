@@ -1,6 +1,6 @@
 # Kế hoạch hoàn thiện Zalo Automation
 
-**Trạng thái tài liệu:** ESCALATED — Giai đoạn 1; source-level acceptance đạt, hai external dry-run bị chặn fail-closed vì lịch sử Zalo vẫn báo chưa đồng bộ sau khi tải mới trang
+**Trạng thái tài liệu:** EXECUTING — Giai đoạn 1; đồng bộ Zalo và dry-run runtime đã hoạt động, còn phải sửa ảnh mốc cũ nhất để hiển thị rõ ngày UI trước khi acceptance đầy đủ
 **Execution Gate:** ALLOWED cho Local/Dev từ 2026-07-29; không mở Production Gate  
 **Môi trường mặc định:** Local/Dev  
 **Số vòng sửa tối đa cho mỗi giai đoạn:** 2  
@@ -616,6 +616,11 @@ Mỗi giai đoạn phải cập nhật bảng sau:
 | 2026-07-29 | Phase 1 | External dry-run job `#128` | ESCALATED | Job `SUCCESS`, `dry_run=true`, `mutates_external=0`, audit violations `0`; 43 groups are `INSUFFICIENT_EVIDENCE` and 3 are exempt at session 14, but all 46 lack Zalo scan evidence because Zalo reported incomplete history sync; 0 screenshots, including GB38/GB40/GB41. No BCNB tick occurred. | Codex |
 | 2026-07-29 | Phase 1 | Zalo history sync persistence | PARTIAL | Sync link clicked. Banner disappeared after 180 seconds but reappeared after page reload in the same `zalo_session`; screenshots `runtime/phase1-zalo-sync-persist-*.png`, SHA-256 before `5edb3f3932ef4ec1dca44e206174c42d090c258c5ee771c24c5aef7556a29974`, after `167f733188afa62b5d878c1ec565465646bc3a38c86ca2127089cd8ff2e596b9`. | Codex |
 | 2026-07-29 | Phase 1 | External dry-run job `#129` | ESCALATED | Job `SUCCESS`, `dry_run=true`, `mutates_external=0`, audit violations `0`; results unchanged: 43 `INSUFFICIENT_EVIDENCE`, 3 exempt, 0 report/latest/oldest images. GB38/GB40/GB41 remain manual-review only. No BCNB tick occurred. | Codex |
+| 2026-07-29 | Phase 1 | Phone-assisted Zalo sync preflight | PASS | Banner absent before and after reload in the persistent `zalo_session`; screenshot `runtime/phase1-zalo-phone-sync-after-reload.png`; SHA-256 `0787f6dc9595f5ad427f2bf825e7b73fcf7b0f4ce94d2b4acbf4e7135c38a048`. | Codex |
+| 2026-07-29 | Phase 1 | External dry-run job `#133` | PARTIAL | Job `SUCCESS`, `dry_run=true`, `mutates_external=0`; 46 results: 42 `SUBMITTED_VERIFIED`, 2 `SUBMITTED_LATE_VERIFIED`, 2 `NOT_FOUND_VERIFIED`; 48/48 evidence files exist and match stored SHA-256; six external audits are all `DRY_RUN`; no BCNB write. GB38/GB40/GB41 are submitted with report images. | Codex |
+| 2026-07-29 | Phase 1 | Negative evidence visual review | FAIL | Two `NOT_FOUND_VERIFIED` groups have both latest/oldest images and adequate recorded coverage, but the oldest screenshots do not visibly include the Zalo UI date separator; an in-message date is not accepted as proof of UI time. | Codex |
+| 2026-07-29 | Safety | Unexpected production-mode job `#132` | SAFE FAILURE / OPEN RISK | Pre-existing job used `dry_run=false`, `mutates_external=1` and failed safely with zero audit rows and zero unresolved actions. Root `.env` remains production, so normal UI scan is unsafe until configuration is deliberately changed. | Codex |
+| 2026-07-29 | Phase 1 | Pre-runtime database backup | PASS | `.backups/zaloAutomation-before-phone-sync-dryrun-20260729-194723.db`; integrity `ok`; 917,504 bytes; SHA-256 `F6F9F0A648E1522EA15070449D16CC2A4BBD939188964E73A92EAFBA4BB107A2`. | Codex |
 | | | | | | |
 
 ## 10. Definition of Done toàn dự án
