@@ -1,6 +1,6 @@
 # Kế hoạch hoàn thiện Zalo Automation
 
-**Trạng thái tài liệu:** EXECUTING — Giai đoạn 1; source-level acceptance đạt, external dry-run đã chạy nhưng bị chặn fail-closed do lịch sử Zalo chưa đồng bộ đầy đủ
+**Trạng thái tài liệu:** ESCALATED — Giai đoạn 1; source-level acceptance đạt, hai external dry-run bị chặn fail-closed vì lịch sử Zalo vẫn báo chưa đồng bộ sau khi tải mới trang
 **Execution Gate:** ALLOWED cho Local/Dev từ 2026-07-29; không mở Production Gate  
 **Môi trường mặc định:** Local/Dev  
 **Số vòng sửa tối đa cho mỗi giai đoạn:** 2  
@@ -614,6 +614,8 @@ Mỗi giai đoạn phải cập nhật bảng sau:
 | 2026-07-29 | Phase 1 | Full local quality gate | PASS | Ruff; Mypy 53 files; 152 tests; overall coverage 77.6%; schema/smoke/frontend/compile pass | Codex |
 | 2026-07-29 | Phase 1 | Pre-runtime database backup | PASS | `.backups/zaloAutomation-before-phase1-runtime-dryrun-20260729-184146.db`; integrity `ok`; 774,144 bytes | Codex |
 | 2026-07-29 | Phase 1 | External dry-run job `#128` | ESCALATED | Job `SUCCESS`, `dry_run=true`, `mutates_external=0`, audit violations `0`; 43 groups are `INSUFFICIENT_EVIDENCE` and 3 are exempt at session 14, but all 46 lack Zalo scan evidence because Zalo reported incomplete history sync; 0 screenshots, including GB38/GB40/GB41. No BCNB tick occurred. | Codex |
+| 2026-07-29 | Phase 1 | Zalo history sync persistence | PARTIAL | Sync link clicked. Banner disappeared after 180 seconds but reappeared after page reload in the same `zalo_session`; screenshots `runtime/phase1-zalo-sync-persist-*.png`, SHA-256 before `5edb3f3932ef4ec1dca44e206174c42d090c258c5ee771c24c5aef7556a29974`, after `167f733188afa62b5d878c1ec565465646bc3a38c86ca2127089cd8ff2e596b9`. | Codex |
+| 2026-07-29 | Phase 1 | External dry-run job `#129` | ESCALATED | Job `SUCCESS`, `dry_run=true`, `mutates_external=0`, audit violations `0`; results unchanged: 43 `INSUFFICIENT_EVIDENCE`, 3 exempt, 0 report/latest/oldest images. GB38/GB40/GB41 remain manual-review only. No BCNB tick occurred. | Codex |
 | | | | | | |
 
 ## 10. Definition of Done toàn dự án
