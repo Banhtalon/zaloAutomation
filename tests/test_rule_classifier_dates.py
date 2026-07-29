@@ -1,5 +1,6 @@
 import unittest
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from classifiers.rule_classifier import (
     check_is_report_and_extract_date,
@@ -26,6 +27,15 @@ class RuleClassifierDateTests(unittest.TestCase):
             parse_zalo_date_header("31/12", datetime(2026, 1, 2)),
             datetime(2025, 12, 31),
         )
+
+    def test_explicit_ui_date_preserves_business_timezone(self):
+        business_tz = ZoneInfo("Asia/Ho_Chi_Minh")
+        parsed = parse_zalo_date_header(
+            "T4 29/07/2026",
+            datetime(2026, 7, 29, tzinfo=business_tz),
+        )
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed.isoformat(), "2026-07-29T00:00:00+07:00")
 
     def test_report_without_a_date_keeps_date_unknown(self):
         is_report, report_date = check_is_report_and_extract_date(

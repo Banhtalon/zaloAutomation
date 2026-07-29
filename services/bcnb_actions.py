@@ -1,6 +1,7 @@
 """Audited BCNB checkbox writes with independent server read-back."""
 
 import asyncio
+import re
 
 from logger_utils import log_message
 from services.bcnb_safety import verify_checkbox_persisted
@@ -23,9 +24,18 @@ async def execute_verified_checkbox_action(
     reason: dict,
     lesson: str | None = None,
     evidence_path: str | None = None,
+    evidence_sha256: str | None = None,
     settle_seconds: float = 0.5,
 ) -> str:
     """Write once, then mark VERIFIED only after hard reload and fresh lookup."""
+    normalized_sha256 = str(evidence_sha256 or "").strip().upper() or None
+    if evidence_path and not (
+        normalized_sha256 and re.fullmatch(r"[A-F0-9]{64}", normalized_sha256)
+    ):
+        raise ValueError("Ảnh minh chứng BCNB phải có SHA-256 hợp lệ.")
+    if normalized_sha256 and not evidence_path:
+        raise ValueError("SHA-256 minh chứng BCNB phải đi kèm đường dẫn ảnh.")
+
     before_checked = await checkbox.is_checked()
     audit, created = await audit_repo.record_intent(
         action_key=action_key,
@@ -38,6 +48,7 @@ async def execute_verified_checkbox_action(
         intended_state={"checked": True},
         reason=reason,
         evidence_path=evidence_path,
+        evidence_sha256=normalized_sha256,
     )
 
     if not created:
@@ -61,6 +72,15 @@ async def execute_verified_checkbox_action(
                 audit["id"], outcome="VERIFIED", after_state={"checked": True}
             )
             return "VERIFIED"
+
+    if before_checked:
+        outcome = "DRY_RUN" if execution_mode != "production" else "VERIFIED"
+        await audit_repo.complete_action(
+            audit["id"],
+            outcome=outcome,
+            after_state={"checked": True},
+        )
+        return outcome
 
     if execution_mode != "production":
         await audit_repo.complete_action(

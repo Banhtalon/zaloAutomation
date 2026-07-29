@@ -1,5 +1,4 @@
 import asyncio
-from datetime import datetime
 import json
 import os
 import re
@@ -8,6 +7,7 @@ import unicodedata
 
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from googleform_autosubmit.config import Config
+from core.time_utils import business_day_start, now_business
 from logger_utils import log_message
 from repositories.audit_repository import AuditRepository
 from repositories.group_repository import GroupRepository
@@ -26,6 +26,11 @@ from services.zalo_safety import open_chat_matches
 from services.zalo_scan_evidence import (
     build_empty_evidence_result,
     scan_open_zalo_chat,
+)
+from services.zalo_evidence import (
+    LESSON_14_EXEMPTION,
+    apply_lesson_14_exemption,
+    get_evidence_reference,
 )
 
 
@@ -103,7 +108,7 @@ async def _run_zalo_automation(
         log_message(f"Lỗi: Không thể lấy danh sách nhóm ({e})")
         return
 
-    today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    today = business_day_start()
 
     external = external or ExternalGateways.production()
     async with external.browser.persistent_page() as page:
@@ -154,7 +159,7 @@ async def _run_zalo_automation(
             group_name = g.get('TenNhom')
             person = g.get('NguoiPhuTrach', 'Chưa xác định')
             class_date_str = g.get('NgayHoc', '').strip()
-            scanned_at = datetime.now()
+            scanned_at = now_business()
             
             log_message(f"Đang kiểm tra nhóm: {group_name} ({person})...")
             # --- TỐI ƯU 1: CHỐNG TRÔI NHÓM & SMART WAIT ---
@@ -350,27 +355,25 @@ async def _run_zalo_automation(
 
                 if is_buoi_14:
                     is_submitted = True
-                    if matched_result:
-                        matched_result['status'] = "✅ Miễn báo cáo (Buổi 14)"
-                        matched_result["submitted_for_bcnb"] = True
-                        log_message(f"Lớp {ma_lop_bcnb}: Buổi 14 được MIỄN BÁO CÁO. Tự động chuyển trạng thái.")
-                    else:
-                        # Đưa lớp buổi 14 vào danh sách hiển thị
-                        scan_results.append({
-                            "group": f"{ma_lop_bcnb} (Buổi 14)",
-                            "person": "Giáo viên",
-                            "status": "✅ Miễn báo cáo (Buổi 14)"
-                        })
+                    matched_result = apply_lesson_14_exemption(
+                        matched_result,
+                        class_code=ma_lop_bcnb,
+                        applied_at=now_business(),
+                    )
+                    if matched_result not in scan_results:
+                        scan_results.append(matched_result)
+                    log_message(
+                        f"Lớp {ma_lop_bcnb}: Buổi 14 được MIỄN BÁO CÁO. "
+                        "Đã ghi LESSON_14_EXEMPTION."
+                    )
 
                 if is_submitted:
                     checkbox = cells[report_index].locator('input[type="checkbox"]').first
                     if await checkbox.count() > 0:
                         is_checked = await checkbox.is_checked()
-                        if not is_checked:
-                            evidence_path = (
-                                matched_result.get("screenshot_path")
-                                if matched_result
-                                else None
+                        if not is_checked or is_buoi_14:
+                            evidence_path, evidence_sha256 = (
+                                get_evidence_reference(matched_result)
                             )
                             outcome = await execute_verified_checkbox_action(
                                 page=page,
@@ -400,8 +403,14 @@ async def _run_zalo_automation(
                                         else None
                                     ),
                                     "lesson_14_exemption": is_buoi_14,
+                                    "evidence_decision": (
+                                        LESSON_14_EXEMPTION
+                                        if is_buoi_14
+                                        else None
+                                    ),
                                 },
                                 evidence_path=evidence_path,
+                                evidence_sha256=evidence_sha256,
                                 settle_seconds=0.7,
                             )
                             if outcome == "DRY_RUN":

@@ -25,9 +25,15 @@ try:
         )
     }
     expected_tables = {"job_events", "external_action_audit", "job_uploads"}
-    if missing or not expected_tables.issubset(tables):
+    audit_columns = {
+        row[1]
+        for row in connection.execute("PRAGMA table_info(external_action_audit)")
+    }
+    missing_audit_columns = {"evidence_sha256"} - audit_columns
+    if missing or missing_audit_columns or not expected_tables.issubset(tables):
         raise SystemExit(
             f"schema-invalid missing_columns={sorted(missing)} "
+            f"missing_audit_columns={sorted(missing_audit_columns)} "
             f"missing_tables={sorted(expected_tables - tables)}"
         )
     active_jobs = connection.execute(

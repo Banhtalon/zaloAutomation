@@ -1,6 +1,6 @@
 # Kế hoạch hoàn thiện Zalo Automation
 
-**Trạng thái tài liệu:** EXECUTING — Giai đoạn 1; runtime dry-run và ảnh negative evidence đã được nghiệm thu, các hạng mục Phase 1 còn mở tiếp tục theo checklist
+**Trạng thái tài liệu:** EXECUTING — Giai đoạn 1; timezone, lesson-14 evidence/audit và SHA-256 audit đã được nghiệm thu; còn hạng mục tự đồng bộ Zalo theo checklist
 **Execution Gate:** ALLOWED cho Local/Dev từ 2026-07-29; không mở Production Gate  
 **Môi trường mặc định:** Local/Dev  
 **Số vòng sửa tối đa cho mỗi giai đoạn:** 2  
@@ -139,7 +139,7 @@ Human Gate: Production smoke
 - [x] Không dùng `content_dates` làm ngày gửi.
 - [x] Đọc `ui_sent_at` từ timestamp/ARIA/DOM của Zalo.
 - [x] Nếu chỉ có separator ngày, ánh xạ message theo timeline trong đúng chat container.
-- [ ] Chuẩn hóa timezone `Asia/Ho_Chi_Minh`.
+- [x] Chuẩn hóa timezone `Asia/Ho_Chi_Minh`.
 - [x] Lưu cảnh báo `CONTENT_DATE_MISMATCH` khi ngày nội dung lệch ngày gửi.
 
 ### 1.2 Kiểm tra đồng bộ và độ bao phủ
@@ -170,7 +170,7 @@ required_start = min(
 - [x] `SUBMITTED_LATE_VERIFIED`: có báo cáo quá 6 ngày, không tích; 3–6 ngày vẫn nghiệm thu và ghi rõ trễ.
 - [x] `NOT_FOUND_VERIFIED`: không tìm thấy trong khoảng đã kiểm chứng.
 - [x] `INSUFFICIENT_EVIDENCE`: không được kết luận.
-- [ ] Buổi 14 dùng cùng audit/evidence model, ghi rõ `LESSON_14_EXEMPTION`.
+- [x] Buổi 14 dùng cùng audit/evidence model, ghi rõ `LESSON_14_EXEMPTION`.
 
 ### 1.4 Audit từng candidate
 
@@ -182,7 +182,7 @@ required_start = min(
   - `decision`.
   - `rejection_reason`.
   - `message_fingerprint`.
-- [ ] Audit BCNB lưu SHA-256 ảnh, không chỉ đường dẫn. Chờ bổ sung payload audit BCNB ở vòng tiếp theo.
+- [x] Audit BCNB lưu SHA-256 ảnh trực tiếp trong cột `evidence_sha256`, đồng thời giữ đường dẫn.
 
 ### Test bắt buộc
 
@@ -631,6 +631,12 @@ Mỗi giai đoạn phải cập nhật bảng sau:
 | 2026-07-29 | Phase 1 | Exact group matching full quality gate | PASS | Ruff; Mypy 53 files; 156 tests; overall coverage 77.7%; `zalo_scan_evidence.py` 90.3%; `zalo_evidence.py` 97.6%; `zalo_safety.py` 95.6%; schema/smoke/frontend/compile pass. | Codex |
 | 2026-07-29 | Phase 1 | Pre-runtime database backup for job `#135` | PASS | `.backups/zaloAutomation-before-exact-group-dryrun-20260729-201922.db`; integrity `ok`; FK violations `0`; 1,093,632 bytes; SHA-256 `EB2D76E10F4AF059C0D6CD2D1B7E5247576F998827657FB57A49D085227BC905`. | Codex |
 | 2026-07-29 | Phase 1 | Exact group matching dry-run job `#135` | PASS | Job `SUCCESS`, request `dry_run=true`, `execution_mode=dry-run`, `mutates_external=0`; 46 results with identity mismatch count `0`; 42 `SUBMITTED_VERIFIED`, 2 `SUBMITTED_LATE_VERIFIED`, 2 `NOT_FOUND_VERIFIED`; 50/50 images exist and match SHA-256; six audits are `DRY_RUN` with before/after unchanged; active jobs `0`; database integrity `ok`, FK violations `0`. GB38, GB40, GB41 and PTI09 resolve to distinct verified groups. | Codex |
+| 2026-07-29 | Phase 1 | Source backup before timezone/lesson-14/SHA change | PASS | `.backups/zaloAutomation-before-timezone-lesson14-audit-20260729-203506.zip`; 142 entries; 226,493 bytes; SHA-256 `CF4D836492F49B0AF43436F72FC88F10D4F953169044A3FA034BCF505E1FE360`. | Codex |
+| 2026-07-29 | Phase 1 | Timezone and audit red-green regression | PASS | Initial focused run failed on missing `core.time_utils`, missing `LESSON_14_EXEMPTION`, unsupported `evidence_sha256`, and absent fail-closed validation. After implementation, focused tests passed; `tzdata==2026.3` provides IANA `Asia/Ho_Chi_Minh` on Windows. | Codex |
+| 2026-07-29 | Phase 1 | Timezone/lesson-14/SHA full quality gate | PASS | Ruff; Mypy 54 files; 165 tests; overall coverage 77.9%; schema migration, invariant gates, app smoke, frontend and compile pass. | Codex |
+| 2026-07-29 | Phase 1 | Pre-runtime database backups | PASS | `zaloAutomation-before-timezone-lesson14-audit-dryrun-20260729-204113.db`: 1,179,648 bytes, SHA-256 `5F18B483C7C7EB442BDCBE92D79C1136191DDDCEE4ACE89BD9F5446F0BE2B621`; `zaloAutomation-before-lesson14-audit-rerun-20260729-204833.db`: 1,269,760 bytes, SHA-256 `4A8468D09D5E9F334D9D03EFD996B8F644A9EBA267721D7693A28E2F75298A03`; integrity `ok`. | Codex |
+| 2026-07-29 | Phase 1 | Dry-run job `#136` first runtime round | PARTIAL | Timezone `+07:00`, three `LESSON_14_EXEMPTION` results and six hashed BCNB audits passed, but lesson-14 checkboxes were already checked so exemption external audits were absent. Triggered round-two no-op audit fix. | Codex |
+| 2026-07-29 | Phase 1 | Dry-run job `#137` final runtime round | PASS | Job `SUCCESS`, `dry_run=true`, `mutates_external=0`; all 46 `scanned_at` values use `+07:00`; three exemption results and exactly three lesson-14 audits contain `LESSON_14_EXEMPTION`; nine audits are `DRY_RUN`, before/after unchanged, and all nine `evidence_sha256` values are valid and match their files; 49/49 result images match SHA; integrity `ok`, FK/unresolved actions `0`. SB27 safely became `GROUP_IDENTITY_MISMATCH` when Zalo left SB26 open, proving fail-closed behavior. | Codex |
 | | | | | | |
 
 ## 10. Definition of Done toàn dự án

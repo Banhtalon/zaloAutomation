@@ -92,6 +92,79 @@ class BcnbActionTests(unittest.IsolatedAsyncioTestCase):
         outcomes = [call.kwargs["outcome"] for call in audit_repo.complete_action.await_args_list]
         self.assertEqual(outcomes, ["UNKNOWN"])
 
+    async def test_evidence_path_without_sha256_is_rejected_before_intent(self):
+        page, checkbox, audit_repo, job_repo = self.make_dependencies()
+        with self.assertRaises(ValueError):
+            await execute_verified_checkbox_action(
+                page=page,
+                checkbox=checkbox,
+                audit_repo=audit_repo,
+                job_repo=job_repo,
+                job_id=3,
+                action_key="test-action",
+                action_type="BCNB_REPORT_TICK",
+                class_code="VT-JSB14",
+                column_kind="report",
+                week=27,
+                year=2026,
+                lesson="14",
+                execution_mode="dry-run",
+                reason={"test": True},
+                evidence_path="/static/proof.png",
+            )
+        audit_repo.record_intent.assert_not_awaited()
+
+    async def test_sha256_is_written_directly_to_bcnb_audit(self):
+        page, checkbox, audit_repo, job_repo = self.make_dependencies()
+        await execute_verified_checkbox_action(
+            page=page,
+            checkbox=checkbox,
+            audit_repo=audit_repo,
+            job_repo=job_repo,
+            job_id=3,
+            action_key="test-action",
+            action_type="BCNB_REPORT_TICK",
+            class_code="VT-JSB14",
+            column_kind="report",
+            week=27,
+            year=2026,
+            lesson="14",
+            execution_mode="dry-run",
+            reason={"test": True},
+            evidence_path="/static/proof.png",
+            evidence_sha256="B" * 64,
+        )
+        self.assertEqual(
+            audit_repo.record_intent.await_args.kwargs["evidence_sha256"],
+            "B" * 64,
+        )
+
+    async def test_already_checked_production_state_is_audited_without_clicking(self):
+        page, checkbox, audit_repo, job_repo = self.make_dependencies()
+        checkbox.is_checked.return_value = True
+        result = await execute_verified_checkbox_action(
+            page=page,
+            checkbox=checkbox,
+            audit_repo=audit_repo,
+            job_repo=job_repo,
+            job_id=3,
+            action_key="lesson-14-observation",
+            action_type="BCNB_REPORT_TICK",
+            class_code="VT-JSB14",
+            column_kind="report",
+            week=27,
+            year=2026,
+            lesson="14",
+            execution_mode="production",
+            reason={"lesson_14_exemption": True},
+        )
+        self.assertEqual(result, "VERIFIED")
+        checkbox.check.assert_not_awaited()
+        self.assertEqual(
+            audit_repo.complete_action.await_args.kwargs,
+            {"outcome": "VERIFIED", "after_state": {"checked": True}},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

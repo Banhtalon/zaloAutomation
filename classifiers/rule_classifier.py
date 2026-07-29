@@ -5,9 +5,9 @@ from typing import Any
 
 
 def _date_without_year(day: int, month: int, today: datetime) -> datetime:
-    candidate = datetime(today.year, month, day)
+    candidate = datetime(today.year, month, day, tzinfo=today.tzinfo)
     if candidate.date() > today.date():
-        candidate = datetime(today.year - 1, month, day)
+        candidate = datetime(today.year - 1, month, day, tzinfo=today.tzinfo)
     return candidate
 
 
@@ -29,7 +29,7 @@ def parse_zalo_date_header(date_text: str, today: datetime) -> datetime | None:
                 year = int(match[2])
                 if year < 100:
                     year += 2000
-                return datetime(year, month, day)
+                return datetime(year, month, day, tzinfo=today.tzinfo)
             return _date_without_year(day, month, today)
         except (TypeError, ValueError):
             return None
@@ -50,7 +50,14 @@ def _extract_content_dates(raw_content: str, today: datetime) -> list[datetime]:
             year = int(year_text)
             if year < 100:
                 year += 2000
-            add(datetime(year, int(month_text), int(day_text)))
+            add(
+                datetime(
+                    year,
+                    int(month_text),
+                    int(day_text),
+                    tzinfo=today.tzinfo,
+                )
+            )
         except (TypeError, ValueError):
             continue
 

@@ -272,6 +272,7 @@ def init_db(path: str | None = None):
             after_json TEXT,
             outcome TEXT NOT NULL DEFAULT 'INTENT_RECORDED',
             evidence_path TEXT,
+            evidence_sha256 TEXT,
             error_message TEXT,
             created_at DATETIME NOT NULL,
             completed_at DATETIME,
@@ -284,6 +285,12 @@ def init_db(path: str | None = None):
     )
     cursor.execute(
         "CREATE INDEX IF NOT EXISTS idx_action_audit_created_at ON external_action_audit(created_at)"
+    )
+    _ensure_column(
+        cursor,
+        "external_action_audit",
+        "evidence_sha256",
+        "TEXT",
     )
 
     cursor.execute(

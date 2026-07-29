@@ -31,9 +31,12 @@ class AuditRepositoryTests(unittest.IsolatedAsyncioTestCase):
             mode="dry-run",
             before_state={"checked": False},
             intended_state={"checked": True},
+            evidence_path="/static/proof.png",
+            evidence_sha256="A" * 64,
         )
         self.assertTrue(created)
         self.assertEqual(intent["outcome"], "INTENT_RECORDED")
+        self.assertEqual(intent["evidence_sha256"], "A" * 64)
 
         duplicate, duplicate_created = await self.audit.record_intent(
             action_key="action-1",
@@ -53,6 +56,8 @@ class AuditRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(actions), 1)
         self.assertEqual(actions[0]["outcome"], "DRY_RUN")
         self.assertEqual(actions[0]["before_state"], {"checked": False})
+        self.assertEqual(actions[0]["evidence_path"], "/static/proof.png")
+        self.assertEqual(actions[0]["evidence_sha256"], "A" * 64)
 
 
 if __name__ == "__main__":

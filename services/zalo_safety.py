@@ -1,6 +1,6 @@
 """Pure identity checks used before any Zalo-derived external action."""
 
-from datetime import datetime
+from datetime import datetime, tzinfo as TzInfo
 import re
 import unicodedata
 
@@ -38,14 +38,23 @@ def report_delay_days(
     default_year: int,
 ) -> int | None:
     """Return report delay; only an absent class date may use legacy fallback."""
-    class_day = parse_class_date(class_date, default_year=default_year)
+    class_day = parse_class_date(
+        class_date,
+        default_year=default_year,
+        timezone_info=message_date.tzinfo,
+    )
     if class_day is None:
         return None
     message_day = message_date.replace(hour=0, minute=0, second=0, microsecond=0)
     return (message_day - class_day).days
 
 
-def parse_class_date(class_date: str, *, default_year: int) -> datetime | None:
+def parse_class_date(
+    class_date: str,
+    *,
+    default_year: int,
+    timezone_info: TzInfo | None = None,
+) -> datetime | None:
     """Parse BCNB's class date without silently accepting a malformed value."""
     value = (class_date or "").strip()
     if not value:
@@ -55,4 +64,4 @@ def parse_class_date(class_date: str, *, default_year: int) -> datetime | None:
         raise ValueError("Ngày học phải có định dạng dd/mm hoặc dd/mm/yyyy.")
     day, month = int(parts[0]), int(parts[1])
     year = int(parts[2]) if len(parts) == 3 else int(default_year)
-    return datetime(year, month, day)
+    return datetime(year, month, day, tzinfo=timezone_info)

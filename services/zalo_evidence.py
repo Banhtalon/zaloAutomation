@@ -10,11 +10,89 @@ SUBMITTED_VERIFIED = "SUBMITTED_VERIFIED"
 SUBMITTED_LATE_VERIFIED = "SUBMITTED_LATE_VERIFIED"
 NOT_FOUND_VERIFIED = "NOT_FOUND_VERIFIED"
 INSUFFICIENT_EVIDENCE = "INSUFFICIENT_EVIDENCE"
+LESSON_14_EXEMPTION = "LESSON_14_EXEMPTION"
 
 SUBMITTED_STATUS = "✅ Đã nộp – Có minh chứng"
 SUBMITTED_LATE_STATUS = "🟡 Đã nộp trễ – Có minh chứng"
 NOT_FOUND_STATUS = "❌ Chưa tìm thấy trong khoảng đã kiểm chứng – Có minh chứng"
 INSUFFICIENT_STATUS = "⚠️ Không đủ bằng chứng – Cần kiểm tra thủ công"
+LESSON_14_STATUS = "✅ Miễn báo cáo (Buổi 14)"
+
+
+def get_evidence_reference(
+    result: dict[str, Any] | None,
+) -> tuple[str | None, str | None]:
+    """Return the selected evidence path and its stored digest."""
+    if not result:
+        return None, None
+    evidence_path = str(result.get("screenshot_path") or "").strip()
+    if not evidence_path:
+        return None, None
+    images = result.get("evidence", {}).get("images", {}) or {}
+    for image in images.values():
+        if image and image.get("path") == evidence_path:
+            digest = str(image.get("sha256") or "").strip().upper()
+            return evidence_path, digest or None
+    return evidence_path, None
+
+
+def apply_lesson_14_exemption(
+    result: dict[str, Any] | None,
+    *,
+    class_code: str,
+    applied_at: datetime,
+) -> dict[str, Any]:
+    """Apply the lesson-14 rule while preserving the source evidence state."""
+    if result is None:
+        result = {
+            "group": f"{class_code} (Buổi 14)",
+            "zalo_group_name": "",
+            "person": "Giáo viên",
+            "screenshot_path": "",
+            "timestamp": applied_at.strftime("%Y-%m-%d %H:%M:%S"),
+            "evidence": {
+                "actual_group_name": None,
+                "scanned_at": applied_at.isoformat(timespec="seconds"),
+                "messages_checked": 0,
+                "oldest_message_date": None,
+                "newest_message_date": None,
+                "required_window_start": None,
+                "required_window_end": None,
+                "classifier_result": {
+                    "engine": "business_rule_v1",
+                    "decision": LESSON_14_EXEMPTION,
+                    "report_found": False,
+                    "evaluated_messages": 0,
+                },
+                "images": {
+                    "report": None,
+                    "latest": None,
+                    "oldest": None,
+                    "oldest_message": None,
+                },
+                "validation_errors": [],
+                "warnings": [],
+            },
+        }
+
+    source_state = result.get("evidence_state")
+    evidence = result.setdefault("evidence", {})
+    evidence["business_rule"] = {
+        "decision": LESSON_14_EXEMPTION,
+        "class_code": class_code,
+        "lesson": 14,
+        "applied_at": applied_at.isoformat(timespec="seconds"),
+        "source_evidence_state": source_state,
+    }
+    result.update(
+        {
+            "status": LESSON_14_STATUS,
+            "status_detail": "Buổi 14 – miễn báo cáo theo quy tắc nghiệp vụ.",
+            "evidence_state": LESSON_14_EXEMPTION,
+            "submitted_for_bcnb": True,
+        }
+    )
+    return result
 
 
 def build_image_evidence(public_path: str, file_path: str) -> dict[str, str] | None:

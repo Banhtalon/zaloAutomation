@@ -5,10 +5,13 @@ import unittest
 
 from services.zalo_evidence import (
     INSUFFICIENT_EVIDENCE,
+    LESSON_14_EXEMPTION,
     NOT_FOUND_VERIFIED,
     SUBMITTED_VERIFIED,
+    apply_lesson_14_exemption,
     build_image_evidence,
     build_scan_result,
+    get_evidence_reference,
 )
 
 
@@ -119,6 +122,55 @@ class ZaloEvidenceTests(unittest.TestCase):
             evidence = build_image_evidence("/proof.png", path)
         self.assertIsNotNone(evidence)
         self.assertEqual(len(evidence["sha256"]), 64)
+
+    def test_lesson_14_exemption_has_explicit_auditable_evidence(self):
+        result = build_scan_result(**self.base)
+        exempted = apply_lesson_14_exemption(
+            result,
+            class_code="VT-C4K-PTI08",
+            applied_at=datetime.fromisoformat("2026-07-29T20:00:00+07:00"),
+        )
+
+        self.assertIs(exempted, result)
+        self.assertEqual(exempted["evidence_state"], LESSON_14_EXEMPTION)
+        self.assertTrue(exempted["submitted_for_bcnb"])
+        self.assertEqual(
+            exempted["evidence"]["business_rule"]["decision"],
+            LESSON_14_EXEMPTION,
+        )
+        self.assertEqual(
+            exempted["evidence"]["business_rule"]["source_evidence_state"],
+            NOT_FOUND_VERIFIED,
+        )
+        self.assertEqual(
+            exempted["evidence"]["business_rule"]["applied_at"],
+            "2026-07-29T20:00:00+07:00",
+        )
+
+    def test_evidence_reference_returns_path_and_matching_sha(self):
+        result = build_scan_result(**self.base)
+        self.assertEqual(
+            get_evidence_reference(result),
+            ("/latest.png", "A"),
+        )
+
+    def test_lesson_14_without_zalo_match_still_has_complete_business_rule(self):
+        exempted = apply_lesson_14_exemption(
+            None,
+            class_code="VT-C4K-PTI08",
+            applied_at=datetime.fromisoformat("2026-07-29T20:00:00+07:00"),
+        )
+        self.assertEqual(exempted["evidence_state"], LESSON_14_EXEMPTION)
+        self.assertTrue(exempted["submitted_for_bcnb"])
+        self.assertEqual(
+            exempted["evidence"]["classifier_result"]["decision"],
+            LESSON_14_EXEMPTION,
+        )
+        self.assertEqual(
+            exempted["evidence"]["business_rule"]["class_code"],
+            "VT-C4K-PTI08",
+        )
+        self.assertEqual(get_evidence_reference(exempted), (None, None))
 
 
 if __name__ == "__main__":

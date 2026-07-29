@@ -12,6 +12,7 @@ from classifiers.rule_classifier import (
     classify_report_content,
     parse_zalo_date_header,
 )
+from core.time_utils import now_business
 from logger_utils import log_message
 from services.zalo_evidence import (
     SUBMITTED_LATE_VERIFIED,
@@ -41,7 +42,11 @@ def _required_window_start(class_date_str: str, today: datetime) -> datetime:
     standard_window = today - timedelta(days=EVIDENCE_WINDOW_DAYS)
     if not (class_date_str or "").strip():
         return standard_window
-    class_date = parse_class_date(class_date_str, default_year=today.year)
+    class_date = parse_class_date(
+        class_date_str,
+        default_year=today.year,
+        timezone_info=today.tzinfo,
+    )
     assert class_date is not None
     return min(standard_window, class_date - timedelta(days=2))
 
@@ -166,7 +171,7 @@ async def scan_open_zalo_chat(
     today: datetime,
     ensure_not_cancelled: Callable[[], Awaitable[None]],
 ) -> dict[str, Any]:
-    scanned_at = datetime.now()
+    scanned_at = now_business()
     if not open_chat_matches(group_name, actual_group_name):
         return build_empty_evidence_result(
             group=group_name,

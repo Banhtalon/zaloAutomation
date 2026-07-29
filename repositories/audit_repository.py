@@ -38,6 +38,7 @@ class AuditRepository:
         intended_state=None,
         reason=None,
         evidence_path: str | None = None,
+        evidence_sha256: str | None = None,
     ) -> tuple[dict, bool]:
         """Commit intent before an external write; return existing row on duplicate."""
         async with get_db_connection() as db:
@@ -59,8 +60,8 @@ class AuditRepository:
                 INSERT INTO external_action_audit (
                     action_key, job_id, action_type, target_type, target_id,
                     mode, reason_json, before_json, intended_json,
-                    outcome, evidence_path, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'INTENT_RECORDED', ?, ?)
+                    outcome, evidence_path, evidence_sha256, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'INTENT_RECORDED', ?, ?, ?)
                 """,
                 (
                     action_key,
@@ -73,6 +74,7 @@ class AuditRepository:
                     _dump(before_state),
                     _dump(intended_state),
                     evidence_path,
+                    evidence_sha256,
                     _now(),
                 ),
             )
@@ -91,13 +93,16 @@ class AuditRepository:
         after_state=None,
         error_message: str | None = None,
         evidence_path: str | None = None,
+        evidence_sha256: str | None = None,
     ) -> None:
         async with get_db_connection() as db:
             await db.execute(
                 """
                 UPDATE external_action_audit
                 SET outcome = ?, after_json = ?, error_message = ?,
-                    evidence_path = COALESCE(?, evidence_path), completed_at = ?
+                    evidence_path = COALESCE(?, evidence_path),
+                    evidence_sha256 = COALESCE(?, evidence_sha256),
+                    completed_at = ?
                 WHERE id = ? AND outcome = 'INTENT_RECORDED'
                 """,
                 (
@@ -105,6 +110,7 @@ class AuditRepository:
                     _dump(after_state),
                     error_message,
                     evidence_path,
+                    evidence_sha256,
                     _now(),
                     audit_id,
                 ),
@@ -118,7 +124,7 @@ class AuditRepository:
                 SELECT id, action_key, job_id, action_type, target_type,
                        target_id, mode, reason_json, before_json,
                        intended_json, after_json, outcome, evidence_path,
-                       error_message, created_at, completed_at
+                       evidence_sha256, error_message, created_at, completed_at
                 FROM external_action_audit WHERE id = ?
                 """,
                 (audit_id,),
@@ -134,7 +140,7 @@ class AuditRepository:
                 SELECT id, action_key, job_id, action_type, target_type,
                        target_id, mode, reason_json, before_json,
                        intended_json, after_json, outcome, evidence_path,
-                       error_message, created_at, completed_at
+                       evidence_sha256, error_message, created_at, completed_at
                 FROM external_action_audit
                 WHERE job_id = ? ORDER BY id DESC LIMIT ?
                 """,
@@ -159,7 +165,8 @@ class AuditRepository:
             "after_state": _load(row[10]),
             "outcome": row[11],
             "evidence_path": row[12],
-            "error_message": row[13],
-            "created_at": row[14],
-            "completed_at": row[15],
+            "evidence_sha256": row[13],
+            "error_message": row[14],
+            "created_at": row[15],
+            "completed_at": row[16],
         }
