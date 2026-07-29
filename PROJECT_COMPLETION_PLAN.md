@@ -1,6 +1,6 @@
 # Kế hoạch hoàn thiện Zalo Automation
 
-**Trạng thái tài liệu:** EXECUTING — Giai đoạn 1; source-level acceptance đạt, external dry-run đang chờ  
+**Trạng thái tài liệu:** EXECUTING — Giai đoạn 1; source-level acceptance đạt, external dry-run đã chạy nhưng bị chặn fail-closed do lịch sử Zalo chưa đồng bộ đầy đủ
 **Execution Gate:** ALLOWED cho Local/Dev từ 2026-07-29; không mở Production Gate  
 **Môi trường mặc định:** Local/Dev  
 **Số vòng sửa tối đa cho mỗi giai đoạn:** 2  
@@ -612,6 +612,8 @@ Mỗi giai đoạn phải cập nhật bảng sau:
 | 2026-07-29 | Phase 1 | GB40/UI date regression | PASS | 10 Zalo evidence tests plus classifier/safety/evidence tests; report content `26/07/2025` and UI date `29/07/2026` produce `SUBMITTED_LATE_ACCEPTED`, BCNB eligible, with `CONTENT_DATE_MISMATCH` warning | Codex |
 | 2026-07-29 | Phase 1 | Evidence source coverage | PASS | `zalo_scan_evidence.py` 90.4%; `rule_classifier.py` 86.8%; `zalo_evidence.py` 97.5%; `zalo_safety.py` 95.6% | Codex |
 | 2026-07-29 | Phase 1 | Full local quality gate | PASS | Ruff; Mypy 53 files; 152 tests; overall coverage 77.6%; schema/smoke/frontend/compile pass | Codex |
+| 2026-07-29 | Phase 1 | Pre-runtime database backup | PASS | `.backups/zaloAutomation-before-phase1-runtime-dryrun-20260729-184146.db`; integrity `ok`; 774,144 bytes | Codex |
+| 2026-07-29 | Phase 1 | External dry-run job `#128` | ESCALATED | Job `SUCCESS`, `dry_run=true`, `mutates_external=0`, audit violations `0`; 46 results all `INSUFFICIENT_EVIDENCE` because Zalo reported incomplete history sync; 0 screenshots, including GB38/GB40/GB41. No BCNB tick occurred. | Codex |
 | | | | | | |
 
 ## 10. Definition of Done toàn dự án
