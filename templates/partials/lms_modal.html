@@ -1,0 +1,57 @@
+    <!-- LMS MODAL -->
+    <div id="lmsModal" class="safe-area-modal fixed inset-0 z-50 hidden flex items-center justify-center bg-black/60 backdrop-blur-sm transition-opacity" role="dialog" aria-modal="true" aria-labelledby="lmsModalTitle">
+        <div class="modal-card bg-gray-900 border border-gray-700 rounded-2xl p-6 w-full max-w-lg shadow-2xl mx-4 transform scale-95 transition-transform duration-200 relative">
+            <button type="button" aria-label="Đóng cửa sổ LMS" onclick="closeLmsModal()" class="absolute top-4 right-4 text-gray-400 hover:text-white">
+                <i class="fa-solid fa-xmark text-xl"></i>
+            </button>
+            <h3 id="lmsModalTitle" class="text-xl font-bold text-white mb-2 flex items-center text-balance">
+                <i class="fa-solid fa-robot text-purple-400 mr-2"></i> Tự động Tick LMS
+            </h3>
+            <p class="text-gray-400 text-sm mb-6 text-pretty">Tải ảnh danh sách lớp <span class="text-rose-400 font-bold">CHƯA</span> nhận xét LMS. Hệ thống chỉ lập kế hoạch; bạn sẽ xem lại tuần và từng mã lớp trước khi xác nhận.</p>
+            
+            <!-- Dropzone -->
+            <div id="lmsUploadStep">
+                <div id="lmsDropzone" role="button" tabindex="0" aria-label="Chọn ảnh danh sách lớp chưa nhận xét LMS" onclick="document.getElementById('lmsFileInput').click()" onkeydown="if(event.key === 'Enter' || event.key === ' ') { event.preventDefault(); document.getElementById('lmsFileInput').click(); }" class="border-2 border-dashed border-gray-600 rounded-xl p-8 text-center hover:border-purple-500 hover:bg-purple-500/5 transition-all cursor-pointer relative overflow-hidden group">
+                    <input type="file" id="lmsFileInput" class="hidden" accept="image/png,image/jpeg,image/webp" onclick="event.stopPropagation()" onchange="if(this.files && this.files.length > 0) handleLmsFile(this.files[0])">
+                    <div id="lmsDropzoneText" class="pointer-events-none">
+                        <i class="fa-solid fa-cloud-arrow-up text-4xl text-gray-500 group-hover:text-purple-400 mb-3 transition-colors"></i>
+                        <p class="text-gray-300 font-medium text-pretty">Click để chọn ảnh, dán (Ctrl+V) hoặc kéo thả</p>
+                        <p class="text-gray-500 text-xs mt-1 text-pretty">Hỗ trợ PNG, JPG, JPEG, WEBP — tối đa 8 MB</p>
+                    </div>
+                    <img id="lmsImagePreview" class="hidden absolute inset-0 w-full h-full object-contain bg-gray-900/90" src="">
+                </div>
+            </div>
+
+            <div id="lmsReviewStep" class="hidden space-y-4">
+                <div class="flex items-center justify-between rounded-xl border border-purple-500/30 bg-purple-500/10 px-4 py-3">
+                    <span class="text-sm text-gray-300">Tuần kiểm tra</span>
+                    <span id="lmsReviewWeek" class="font-mono font-bold text-purple-300"></span>
+                </div>
+                <div id="lmsDryRunNotice" class="hidden rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-xs text-amber-200">
+                    Chế độ DRY-RUN đang bật: hệ thống chỉ mô phỏng, không thay đổi BCNB.
+                </div>
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 max-h-60 overflow-y-auto">
+                    <div class="rounded-xl border border-rose-500/20 bg-rose-500/5 p-3">
+                        <p class="text-xs font-bold uppercase tracking-wide text-rose-300 mb-2">Không tick</p>
+                        <div id="lmsMissingClasses" class="space-y-1 text-xs font-mono text-gray-300"></div>
+                    </div>
+                    <div class="rounded-xl border border-emerald-500/20 bg-emerald-500/5 p-3">
+                        <p class="text-xs font-bold uppercase tracking-wide text-emerald-300 mb-2">Dự kiến tick</p>
+                        <div id="lmsTickClasses" class="space-y-1 text-xs font-mono text-gray-300"></div>
+                    </div>
+                </div>
+                <div id="lmsReviewWarning" class="hidden rounded-lg border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-xs text-rose-200"></div>
+            </div>
+            
+            <div class="mt-6 flex justify-end space-x-3">
+                <button onclick="closeLmsModal()" class="px-5 py-2.5 text-sm font-medium text-gray-300 hover:bg-white/10 rounded-xl transition-all">Hủy</button>
+                <button id="btnBackLms" onclick="resetLmsModal()" class="hidden px-5 py-2.5 text-sm font-medium text-gray-300 hover:bg-white/10 rounded-xl transition-all">Chọn ảnh khác</button>
+                <button id="btnStartLms" onclick="startLmsAnalysis()" disabled class="px-5 py-2.5 text-sm font-bold text-white bg-purple-600 rounded-xl hover:bg-purple-500 disabled:opacity-50 disabled:cursor-not-allowed transition-all">
+                    Phân tích ảnh
+                </button>
+                <button id="btnConfirmLms" onclick="confirmLmsTick()" class="hidden px-5 py-2.5 text-sm font-bold text-white bg-emerald-600 rounded-xl hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed transition-all">
+                    Xác nhận kế hoạch
+                </button>
+            </div>
+        </div>
+    </div>

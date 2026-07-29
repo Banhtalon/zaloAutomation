@@ -1,0 +1,59 @@
+[tool.ruff]
+target-version = "py314"
+line-length = 100
+exclude = [
+    ".backups",
+    ".mypy_cache",
+    ".ruff_cache",
+    "runtime",
+    "venv",
+    "zalo_session",
+]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
+
+[tool.mypy]
+python_version = "3.14"
+files = [
+    "api",
+    "classifiers",
+    "core",
+    "db",
+    "googleform_autosubmit",
+    "models",
+    "repositories",
+    "services",
+    "main.py",
+    "logger_utils.py",
+]
+exclude = "(?x)(^venv/|^\\.backups/|^runtime/|^zalo_session/)"
+explicit_package_bases = true
+ignore_missing_imports = true
+check_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+show_error_codes = true
+
+[tool.coverage.run]
+branch = true
+source = ["."]
+omit = [
+    ".backups/*",
+    "runtime/*",
+    "scripts/*",
+    "tests/*",
+    "venv/*",
+    "zalo_session/*",
+]
+
+[tool.coverage.report]
+fail_under = 70.0
+precision = 1
+show_missing = true
+skip_covered = true
+exclude_also = [
+    "if __name__ == .__main__.:",
+    "raise NotImplementedError",
+]

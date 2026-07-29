@@ -1,0 +1,34 @@
+# Secrets and local configuration
+.env
+
+# Python/runtime
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+.coverage
+.mypy_cache/
+.ruff_cache/
+coverage.xml
+htmlcov/
+
+# Browser profiles and generated data
+zalo_session/
+database.db
+database.db-*
+groups_dump.json
+jobs_dump.json
+static/screenshots/
+googleform_autosubmit/uploads/
+temp_lms/
+runtime/
+*.log
+
+# Local backups
+.backups/
+
+# Editors/OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

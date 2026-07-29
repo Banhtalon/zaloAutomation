@@ -1,0 +1,42 @@
+<!-- SIDEBAR -->
+<aside class="app-sidebar glass-panel flex flex-col justify-between shrink-0 z-20" aria-label="Điều hướng chính">
+    <div>
+        <div class="brand-row h-20 flex items-center px-5 mb-3">
+            <div class="brand-mark w-10 h-10 rounded-xl bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center mr-3">
+                <i class="fa-solid fa-rocket text-white text-lg" aria-hidden="true"></i>
+            </div>
+            <span class="brand-name font-extrabold text-xl tracking-tight">MindX <span class="font-medium">Auto</span></span>
+        </div>
+
+        <nav class="px-3 space-y-2" role="tablist" aria-label="Các khu vực của hệ thống">
+            <button type="button" onclick="switchTab('dashboard')" id="btn-dashboard"
+                class="tab-btn w-full flex items-center px-4 py-3 rounded-xl font-semibold active"
+                role="tab" aria-selected="true" aria-controls="tab-dashboard" title="Zalo Auto">
+                <i class="fa-solid fa-moon w-6 text-blue-500" aria-hidden="true"></i>
+                <span class="nav-label">Zalo Auto</span>
+            </button>
+            <button type="button" onclick="switchTab('googleform')" id="btn-googleform"
+                class="tab-btn w-full flex items-center px-4 py-3 rounded-xl font-semibold"
+                role="tab" aria-selected="false" aria-controls="tab-googleform" title="Nộp Google Form">
+                <i class="fa-solid fa-file-lines w-6 text-slate-400" aria-hidden="true"></i>
+                <span class="nav-label">Nộp Google Form</span>
+            </button>
+            <button type="button" onclick="switchTab('groups')" id="btn-groups"
+                class="tab-btn w-full flex items-center px-4 py-3 rounded-xl font-semibold"
+                role="tab" aria-selected="false" aria-controls="tab-groups" title="Cấu hình Nhóm">
+                <i class="fa-solid fa-gear w-6 text-slate-400" aria-hidden="true"></i>
+                <span class="nav-label">Cấu hình Nhóm</span>
+            </button>
+            <button type="button" onclick="switchTab('logs')" id="btn-logs"
+                class="tab-btn w-full flex items-center px-4 py-3 rounded-xl font-semibold"
+                role="tab" aria-selected="false" aria-controls="tab-logs" title="Nhật ký">
+                <i class="fa-solid fa-list-ul w-6 text-slate-400" aria-hidden="true"></i>
+                <span class="nav-label">Nhật ký</span>
+            </button>
+        </nav>
+    </div>
+
+    <div class="app-sidebar-footer p-6 text-[10px] text-center tracking-[0.18em] uppercase">
+        Hệ thống tự động V2.0
+    </div>
+</aside>

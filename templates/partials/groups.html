@@ -1,0 +1,64 @@
+            <!-- TAB 3: GROUPS CONFIG -->
+            <div id="tab-groups" class="tab-content flex-1 flex-col space-y-6">
+                <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 flex-1">
+                    
+                    <!-- LEFT COLUMN: ACTIVE GROUPS -->
+                    <div class="glass-panel p-6 flex flex-col">
+                        <div class="flex items-center justify-between mb-6 shrink-0">
+                            <div>
+                                <h2 class="text-lg font-bold text-white tracking-wide text-balance">Danh sách Lớp Đang hoạt động</h2>
+                            </div>
+                            <div class="relative w-64 glass-panel rounded-lg overflow-hidden flex items-center">
+                                <i class="fa-solid fa-search text-gray-400 pl-3"></i>
+                                <input type="text" id="groupSearchInput" onkeyup="filterGroups()"
+                                    class="bg-transparent border-none text-gray-200 text-sm focus:ring-0 block w-full p-2 outline-none"
+                                    placeholder="Tìm kiếm...">
+                            </div>
+                        </div>
+
+                        <div class="overflow-y-auto flex-1 border border-glassborder rounded-xl bg-black/20 shadow-inner">
+                            <table class="w-full text-sm text-left text-gray-300 tabular-nums">
+                                <thead class="text-[10px] text-gray-400 uppercase bg-black/40 sticky top-0 z-10 border-b border-glassborder">
+                                    <tr>
+                                        <th class="px-4 py-3 w-10">#</th>
+                                        <th class="px-4 py-3">Tên Nhóm</th>
+                                        <th class="px-4 py-3">Người Phụ Trách</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="groups-table-body" class="divide-y divide-glassborder">
+                                    <tr><td colspan="3" class="px-6 py-10 text-center text-gray-500 border-none">Đang tải dữ liệu...</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <!-- RIGHT COLUMN: INACTIVE CLASS LIFECYCLE -->
+                    <div class="glass-panel p-6 flex flex-col">
+                        <div class="flex items-center justify-between mb-6 shrink-0">
+                            <div>
+                                <h2 class="text-lg font-bold text-rose-300 tracking-wide flex items-center text-balance">
+                                    <i class="fa-solid fa-clock-rotate-left mr-2"></i> Lớp tạm nghỉ / đã kết thúc
+                                </h2>
+                                <p class="mt-1 text-xs text-gray-500">Vắng trên BCNB không tự động được xem là kết thúc.</p>
+                            </div>
+                            <button type="button" aria-label="Làm mới danh sách lớp tạm ẩn" onclick="fetchIgnoredGroups()" class="text-gray-400 hover:text-white px-3 py-1 rounded-md glass-panel"><i class="fa-solid fa-rotate-right"></i></button>
+                        </div>
+
+                        <div class="overflow-y-auto flex-1 border border-rose-500/20 rounded-xl bg-black/20 shadow-inner">
+                            <table class="w-full text-sm text-left text-gray-300 tabular-nums">
+                                <thead class="text-[10px] text-rose-400/70 uppercase bg-black/40 sticky top-0 z-10 border-b border-rose-500/20">
+                                    <tr>
+                                        <th class="px-4 py-3 w-10">#</th>
+                                        <th class="px-4 py-3">Tên Nhóm</th>
+                                        <th class="px-4 py-3 w-36">Trạng thái</th>
+                                        <th class="px-4 py-3 text-center w-40">Thao tác</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="ignored-groups-table-body" class="divide-y divide-glassborder">
+                                    <tr><td colspan="4" class="px-6 py-10 text-center text-gray-500 border-none">Chưa có lớp tạm nghỉ hoặc kết thúc.</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>

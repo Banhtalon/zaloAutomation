@@ -1,0 +1,9 @@
+    <!-- Image Modal -->
+    <div id="image-modal" class="safe-area-modal fixed inset-0 bg-gray-900 bg-opacity-80 hidden flex items-center justify-center z-50 transition-opacity" onclick="closeImageModal()" role="dialog" aria-modal="true" aria-label="Xem ảnh bằng chứng">
+        <div class="relative max-w-5xl max-h-dvh p-4" onclick="event.stopPropagation()">
+            <button type="button" aria-label="Đóng ảnh báo cáo" onclick="closeImageModal()" class="absolute -top-4 -right-4 m-4 text-white hover:text-gray-300 focus:outline-none bg-red-600 rounded-full w-8 h-8 flex items-center justify-center">
+                <i class="fa-solid fa-xmark"></i>
+            </button>
+            <img id="modal-image" src="" class="max-w-full max-h-[90vh] object-contain rounded-lg shadow-2xl border border-gray-700">
+        </div>
+    </div>

@@ -1,0 +1,93 @@
+<!-- TAB 1: ZALO AUTO -->
+<div id="tab-dashboard" class="tab-content active flex-1 flex-col space-y-5" role="tabpanel" aria-labelledby="btn-dashboard">
+    <div class="metrics-grid grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 shrink-0">
+        <div class="metric-card glass-panel glow-card-blue flex items-center">
+            <div class="metric-card__icon rounded-full bg-blue-100 text-blue-600 flex items-center justify-center text-lg mr-4">
+                <i class="fa-solid fa-users" aria-hidden="true"></i>
+            </div>
+            <div>
+                <p class="metric-card__label uppercase">Tổng nhóm</p>
+                <h3 class="metric-card__value font-extrabold mt-1 tabular-nums" id="count-total">0</h3>
+            </div>
+        </div>
+        <div class="metric-card glass-panel glow-card-green flex items-center">
+            <div class="metric-card__icon rounded-full bg-emerald-100 text-emerald-600 flex items-center justify-center text-lg mr-4">
+                <i class="fa-solid fa-check" aria-hidden="true"></i>
+            </div>
+            <div>
+                <p class="metric-card__label uppercase">Hoàn thành</p>
+                <h3 class="metric-card__value font-extrabold mt-1 tabular-nums" id="count-success">0</h3>
+            </div>
+        </div>
+        <div class="metric-card glass-panel glow-card-amber flex items-center">
+            <div class="metric-card__icon rounded-full bg-amber-100 text-amber-600 flex items-center justify-center text-lg mr-4">
+                <i class="fa-solid fa-shield-halved" aria-hidden="true"></i>
+            </div>
+            <div>
+                <p class="metric-card__label uppercase">Miễn báo cáo</p>
+                <h3 class="metric-card__value font-extrabold mt-1 tabular-nums" id="count-exempt">0</h3>
+            </div>
+        </div>
+        <div class="metric-card glass-panel glow-card-rose flex items-center">
+            <div class="metric-card__icon rounded-full bg-rose-100 text-rose-600 flex items-center justify-center text-lg mr-4">
+                <i class="fa-solid fa-triangle-exclamation" aria-hidden="true"></i>
+            </div>
+            <div>
+                <p class="metric-card__label uppercase">Trễ / Chưa nộp</p>
+                <h3 class="metric-card__value font-extrabold mt-1 tabular-nums" id="count-failed">0</h3>
+            </div>
+        </div>
+    </div>
+
+    <div class="dashboard-action-bar flex flex-wrap items-center justify-between shrink-0">
+        <label class="search-box glass-panel rounded-xl flex items-center overflow-hidden" for="searchInput">
+            <span class="pl-4 text-slate-400" aria-hidden="true"><i class="fa-solid fa-search"></i></span>
+            <span class="sr-only">Tìm theo nhóm hoặc giáo viên</span>
+            <input type="search" id="searchInput" class="bg-transparent border-none text-sm focus:ring-0 block w-full p-3 outline-none" placeholder="Tìm theo nhóm, giáo viên...">
+        </label>
+
+        <div class="dashboard-actions">
+            <button type="button" onclick="openLmsModal()" class="action-button action-button--lms">
+                <i class="fa-solid fa-check-double" aria-hidden="true"></i> Tick LMS
+            </button>
+            <button type="button" id="btn-filter-unreported" onclick="toggleUnreportedFilter()" class="action-button action-button--filter">
+                <i class="fa-solid fa-filter" aria-hidden="true"></i> Lọc lỗi
+            </button>
+            <button type="button" onclick="startAutoDiscover()" class="action-button action-button--discover">
+                <i class="fa-solid fa-satellite-dish" aria-hidden="true"></i> Dò tìm
+            </button>
+            <button type="button" onclick="startScan()" class="action-button action-button--scan">
+                <i class="fa-solid fa-bolt" aria-hidden="true"></i> Bắt đầu Quét
+            </button>
+        </div>
+    </div>
+
+    <div class="data-panel glass-panel flex-1 flex flex-col overflow-hidden">
+        <div class="table-scroll flex-1">
+            <table class="data-table w-full text-sm text-left tabular-nums">
+                <thead class="text-[10px] uppercase tracking-widest sticky top-0 z-10 border-b">
+                    <tr>
+                        <th class="px-6 py-4">Tên nhóm Zalo</th>
+                        <th class="px-6 py-4">Người phụ trách</th>
+                        <th class="px-6 py-4">Thời gian quét</th>
+                        <th class="px-6 py-4">Trạng thái báo cáo</th>
+                        <th class="px-6 py-4 text-center">Thao tác</th>
+                    </tr>
+                </thead>
+                <tbody id="results-table" class="divide-y bg-transparent">
+                    <tr>
+                        <td colspan="5" class="border-none">
+                            <div class="empty-state flex flex-col items-center justify-center px-6 py-12 text-center">
+                                <div class="empty-state__icon flex items-center justify-center mb-6">
+                                    <i class="fa-regular fa-folder-open text-4xl" aria-hidden="true"></i>
+                                </div>
+                                <p class="font-semibold text-slate-700">Chưa có dữ liệu</p>
+                                <p class="mt-1 text-sm text-slate-500">Hãy bấm “Bắt đầu Quét” để kiểm tra báo cáo.</p>
+                            </div>
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
