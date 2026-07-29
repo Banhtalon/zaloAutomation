@@ -24,6 +24,7 @@ class FakeDateHeaders:
     def __init__(self, value):
         self.value = value
         self.last = self
+        self.scroll_into_view_if_needed = AsyncMock()
 
     async def count(self):
         return 1
@@ -36,13 +37,14 @@ class FakeMessage:
     def __init__(self, text, date_header):
         self.text = text
         self.date_header = date_header
+        self.date_headers = FakeDateHeaders(date_header)
         self.scroll_into_view_if_needed = AsyncMock()
 
     async def inner_text(self):
         return self.text
 
     def locator(self, _selector):
-        return FakeDateHeaders(self.date_header)
+        return self.date_headers
 
 
 class FakeListLocator:
@@ -161,8 +163,12 @@ class ZaloScanEvidenceTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(os.path.isfile(os.path.join(root, os.path.basename(images["latest"]["path"]))))
             self.assertEqual(len(images["latest"]["sha256"]), 64)
             self.assertEqual(len(images["oldest"]["sha256"]), 64)
+            self.assertEqual(images["oldest"]["ui_date_text"], "18/07/2026")
+            self.assertEqual(len(images["oldest_message"]["sha256"]), 64)
 
-        self.assertEqual(len(page.screenshots), 2)
+        self.assertEqual(len(page.screenshots), 3)
+        messages[0].date_headers.scroll_into_view_if_needed.assert_awaited()
+        messages[0].scroll_into_view_if_needed.assert_awaited()
         ensure_not_cancelled.assert_awaited()
 
     async def test_gb40_uses_zalo_ui_date_not_stale_date_in_report_content(self):

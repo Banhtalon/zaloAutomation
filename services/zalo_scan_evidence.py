@@ -42,7 +42,7 @@ def _required_window_start(class_date_str: str, today: datetime) -> datetime:
     return min(standard_window, class_date - timedelta(days=2))
 
 
-async def _message_date_from_zalo_ui(message, today: datetime) -> datetime | None:
+async def _message_date_header_from_zalo_ui(message):
     try:
         date_headers = message.locator(
             'xpath=preceding::div[contains(@class, "chat-date") '
@@ -50,7 +50,17 @@ async def _message_date_from_zalo_ui(message, today: datetime) -> datetime | Non
         )
         if await date_headers.count() == 0:
             return None
-        return parse_zalo_date_header(await date_headers.last.inner_text(), today)
+        return date_headers.last
+    except Exception:
+        return None
+
+
+async def _message_date_from_zalo_ui(message, today: datetime) -> datetime | None:
+    date_header = await _message_date_header_from_zalo_ui(message)
+    if date_header is None:
+        return None
+    try:
+        return parse_zalo_date_header(await date_header.inner_text(), today)
     except Exception:
         return None
 
@@ -76,17 +86,25 @@ async def _capture_zalo_evidence(
     job_id: int,
     screenshots_dir: str,
     label: str,
+    date_header=None,
+    require_date_header: bool = False,
 ) -> dict[str, str] | None:
-    if target_message is None:
+    if target_message is None or (require_date_header and date_header is None):
         return None
     filename = f"{label}-{uuid.uuid4().hex[:10]}.png"
     file_path = os.path.join(screenshots_dir, filename)
     public_path = f"/static/screenshots/job-{job_id}/{filename}"
     try:
-        await target_message.scroll_into_view_if_needed(timeout=2000)
+        scroll_target = date_header if date_header is not None else target_message
+        await scroll_target.scroll_into_view_if_needed(timeout=2000)
         await asyncio.sleep(0.4)
         await page.screenshot(path=file_path)
-        return build_image_evidence(public_path, file_path)
+        evidence = build_image_evidence(public_path, file_path)
+        if evidence is not None and date_header is not None:
+            ui_date_text = (await date_header.inner_text()).strip()
+            if ui_date_text:
+                evidence["ui_date_text"] = ui_date_text
+        return evidence
     except Exception as exc:
         log_message(
             f"Không chụp được ảnh minh chứng Zalo ({label}): {exc}",
@@ -120,7 +138,12 @@ def build_empty_evidence_result(
         required_window_end=today,
         oldest_message_date=None,
         newest_message_date=None,
-        images={"report": None, "latest": None, "oldest": None},
+        images={
+            "report": None,
+            "latest": None,
+            "oldest": None,
+            "oldest_message": None,
+        },
         report_found=False,
         extra_reasons=[reason],
     )
@@ -158,7 +181,12 @@ async def scan_open_zalo_chat(
             required_window_end=today,
             oldest_message_date=None,
             newest_message_date=None,
-            images={"report": None, "latest": None, "oldest": None},
+            images={
+                "report": None,
+                "latest": None,
+                "oldest": None,
+                "oldest_message": None,
+            },
             report_found=False,
             extra_reasons=[f"Ngày học không hợp lệ: {exc}"],
         )
@@ -180,7 +208,12 @@ async def scan_open_zalo_chat(
             required_window_end=today,
             oldest_message_date=None,
             newest_message_date=None,
-            images={"report": None, "latest": None, "oldest": None},
+            images={
+                "report": None,
+                "latest": None,
+                "oldest": None,
+                "oldest_message": None,
+            },
             report_found=False,
             extra_reasons=["Zalo thông báo lịch sử tin nhắn chưa đồng bộ đầy đủ."],
         )
@@ -360,24 +393,30 @@ async def scan_open_zalo_chat(
         "report": None,
         "latest": None,
         "oldest": None,
+        "oldest_message": None,
     }
     if report_found:
+        report_date_header = await _message_date_header_from_zalo_ui(matched_message)
         images["report"] = await _capture_zalo_evidence(
             page,
             matched_message,
             job_id=job_id,
             screenshots_dir=screenshots_dir,
             label="report",
+            date_header=report_date_header,
         )
     else:
         latest_message = messages[-1] if messages else None
         oldest_message = messages[0] if messages else None
+        latest_date_header = await _message_date_header_from_zalo_ui(latest_message)
+        oldest_date_header = await _message_date_header_from_zalo_ui(oldest_message)
         images["latest"] = await _capture_zalo_evidence(
             page,
             latest_message,
             job_id=job_id,
             screenshots_dir=screenshots_dir,
             label="latest",
+            date_header=latest_date_header,
         )
         images["oldest"] = await _capture_zalo_evidence(
             page,
@@ -385,6 +424,15 @@ async def scan_open_zalo_chat(
             job_id=job_id,
             screenshots_dir=screenshots_dir,
             label="oldest",
+            date_header=oldest_date_header,
+            require_date_header=True,
+        )
+        images["oldest_message"] = await _capture_zalo_evidence(
+            page,
+            oldest_message,
+            job_id=job_id,
+            screenshots_dir=screenshots_dir,
+            label="oldest-message",
         )
 
     extra_reasons = []

@@ -78,8 +78,13 @@ def build_scan_result(
             reasons.append("Chưa tải đủ khoảng thời gian kiểm tra tối thiểu.")
         if images.get("latest") is None:
             reasons.append("Không chụp được ảnh tin nhắn mới nhất.")
-        if images.get("oldest") is None:
+        oldest_image = images.get("oldest")
+        if oldest_image is None:
             reasons.append("Không chụp được ảnh mốc tin nhắn cũ nhất.")
+        elif not oldest_image.get("ui_date_text"):
+            reasons.append(
+                "Ảnh mốc cũ nhất không xác nhận được separator ngày của giao diện Zalo."
+            )
         if not reasons:
             evidence_state = NOT_FOUND_VERIFIED
             status = NOT_FOUND_STATUS
@@ -100,7 +105,7 @@ def build_scan_result(
     available_image = next(
         (
             item["path"]
-            for key in ("report", "latest", "oldest")
+            for key in ("report", "latest", "oldest", "oldest_message")
             if (item := images.get(key)) is not None
         ),
         "",

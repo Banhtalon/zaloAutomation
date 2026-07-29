@@ -364,7 +364,8 @@
                 const imageOptions = [
                     ['report', 'Ảnh báo cáo'],
                     ['latest', 'Tin mới nhất'],
-                    ['oldest', 'Mốc cũ nhất'],
+                    ['oldest', 'Mốc ngày cũ nhất'],
+                    ['oldest_message', 'Tin ở mốc cũ nhất'],
                 ];
                 let imageCount = 0;
                 imageOptions.forEach(([key, label]) => {

@@ -1,6 +1,6 @@
 # Kế hoạch hoàn thiện Zalo Automation
 
-**Trạng thái tài liệu:** EXECUTING — Giai đoạn 1; đồng bộ Zalo và dry-run runtime đã hoạt động, còn phải sửa ảnh mốc cũ nhất để hiển thị rõ ngày UI trước khi acceptance đầy đủ
+**Trạng thái tài liệu:** EXECUTING — Giai đoạn 1; runtime dry-run và ảnh negative evidence đã được nghiệm thu, các hạng mục Phase 1 còn mở tiếp tục theo checklist
 **Execution Gate:** ALLOWED cho Local/Dev từ 2026-07-29; không mở Production Gate  
 **Môi trường mặc định:** Local/Dev  
 **Số vòng sửa tối đa cho mỗi giai đoạn:** 2  
@@ -138,7 +138,7 @@ Human Gate: Production smoke
   - `matched_signals`.
 - [x] Không dùng `content_dates` làm ngày gửi.
 - [x] Đọc `ui_sent_at` từ timestamp/ARIA/DOM của Zalo.
-- [ ] Nếu chỉ có separator ngày, ánh xạ message theo timeline trong đúng chat container.
+- [x] Nếu chỉ có separator ngày, ánh xạ message theo timeline trong đúng chat container.
 - [ ] Chuẩn hóa timezone `Asia/Ho_Chi_Minh`.
 - [x] Lưu cảnh báo `CONTENT_DATE_MISMATCH` khi ngày nội dung lệch ngày gửi.
 
@@ -200,8 +200,8 @@ required_start = min(
 - [x] Không còn đường code dùng ngày nội dung làm ngày gửi.
 - [x] Mọi negative result đều có proof of coverage.
 - [x] Coverage `zalo_scan_evidence.py` và classifier ≥ 85%.
-- [ ] Dry-run GB38, GB40, GB41 cho kết quả khớp kiểm tra thủ công.
-- [ ] Không có audit external write trong dry-run.
+- [x] Dry-run GB38, GB40, GB41 cho kết quả khớp kiểm tra thủ công.
+- [x] Không có audit external write trong dry-run.
 
 ---
 
@@ -621,6 +621,11 @@ Mỗi giai đoạn phải cập nhật bảng sau:
 | 2026-07-29 | Phase 1 | Negative evidence visual review | FAIL | Two `NOT_FOUND_VERIFIED` groups have both latest/oldest images and adequate recorded coverage, but the oldest screenshots do not visibly include the Zalo UI date separator; an in-message date is not accepted as proof of UI time. | Codex |
 | 2026-07-29 | Safety | Unexpected production-mode job `#132` | SAFE FAILURE / OPEN RISK | Pre-existing job used `dry_run=false`, `mutates_external=1` and failed safely with zero audit rows and zero unresolved actions. Root `.env` remains production, so normal UI scan is unsafe until configuration is deliberately changed. | Codex |
 | 2026-07-29 | Phase 1 | Pre-runtime database backup | PASS | `.backups/zaloAutomation-before-phone-sync-dryrun-20260729-194723.db`; integrity `ok`; 917,504 bytes; SHA-256 `F6F9F0A648E1522EA15070449D16CC2A4BBD939188964E73A92EAFBA4BB107A2`. | Codex |
+| 2026-07-29 | Phase 1 | Source backup before date-separator capture change | PASS | `.backups/zaloAutomation-before-evidence-date-screenshot-20260729-195806.zip`; 224,764 bytes; SHA-256 `BA6954AF6EF6BE75ABCF5EEEAEB44D8D4DB691DAA13722BAD4C43410A4DC16EC`. | Codex |
+| 2026-07-29 | Phase 1 | Date-separator capture quality gate | PASS | Ruff; Mypy 53 files; 153 tests; overall coverage 77.7%; `zalo_scan_evidence.py` 90.1%; `zalo_evidence.py` 97.6%; schema/smoke/frontend/compile pass. | Codex |
+| 2026-07-29 | Phase 1 | Pre-runtime database backup for job `#134` | PASS | `.backups/zaloAutomation-before-evidence-screenshot-dryrun-20260729-200321.db`; integrity `ok`; 1,003,520 bytes; SHA-256 `E7A398412D145600E88C565194BD86F2DBC07C0174A78173133FB1816B7068EC`. | Codex |
+| 2026-07-29 | Phase 1 | External dry-run job `#134` | PASS | Job `SUCCESS`, request `dry_run=true`, `execution_mode=dry-run`, `mutates_external=0`; 46 results: 42 `SUBMITTED_VERIFIED`, 2 `SUBMITTED_LATE_VERIFIED`, 2 `NOT_FOUND_VERIFIED`; 50/50 evidence files exist and match stored SHA-256; six audits are `DRY_RUN`, before/after unchanged; active jobs `0`; database integrity `ok`, FK violations `0`. GB38/GB40/GB41 all have report evidence. | Codex |
+| 2026-07-29 | Phase 1 | Negative evidence visual review after fix | PASS | Both negative groups show the real Zalo UI separator `T4 15/07/2026` in `job-134/oldest-d920d7411d.png` and `job-134/oldest-2c208fc694.png`; a third `oldest_message` image preserves the message at that boundary. Sample oldest SHA-256 `19B135D0C7C0861EF3054FCD4B58CA288C5D74EA886CEB91251611BE84B81602`. | Codex |
 | | | | | | |
 
 ## 10. Definition of Done toàn dự án

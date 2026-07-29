@@ -29,7 +29,15 @@ class ZaloEvidenceTests(unittest.TestCase):
             "images": {
                 "report": None,
                 "latest": {"path": "/latest.png", "sha256": "A"},
-                "oldest": {"path": "/oldest.png", "sha256": "B"},
+                "oldest": {
+                    "path": "/oldest.png",
+                    "sha256": "B",
+                    "ui_date_text": "18/07/2026",
+                },
+                "oldest_message": {
+                    "path": "/oldest-message.png",
+                    "sha256": "C",
+                },
             },
             "report_found": False,
         }
@@ -53,6 +61,16 @@ class ZaloEvidenceTests(unittest.TestCase):
         result = build_scan_result(**payload)
         self.assertEqual(result["evidence_state"], INSUFFICIENT_EVIDENCE)
         self.assertIn("mốc tin nhắn cũ nhất", result["status_detail"])
+
+    def test_oldest_image_without_ui_date_separator_fails_closed(self):
+        payload = dict(self.base)
+        payload["images"] = dict(
+            self.base["images"],
+            oldest={"path": "/oldest.png", "sha256": "B"},
+        )
+        result = build_scan_result(**payload)
+        self.assertEqual(result["evidence_state"], INSUFFICIENT_EVIDENCE)
+        self.assertIn("separator ngày", result["status_detail"])
 
     def test_ambiguous_undated_candidate_fails_closed(self):
         payload = dict(self.base)
