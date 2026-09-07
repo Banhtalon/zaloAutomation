@@ -1,0 +1,47 @@
+{
+  "schema_version": "qq.workflow.project-profile.v9",
+  "project": "zaloAutomation / MindX Auto",
+  "canonical_version": "9.0.0",
+  "routing_mode": "MANUAL",
+  "control_plane": {
+    "authoritative_task_state": "External Controller snapshot outside the candidate checkout, pinned by an Owner-approved task record",
+    "manifest_digest_anchor_required": true
+  },
+  "owner_technical_review_required": false,
+  "attempt_ladder": [
+    "default-implementer-1",
+    "default-implementer-2-clean-slate",
+    "senior-implementer-clean-slate",
+    "final-escalation-implementer-clean-slate",
+    "technical-operator-stop"
+  ],
+  "manual_bindings": {
+    "planner": "manual-owner-selected-planner",
+    "default_implementer": "manual-owner-selected-implementer",
+    "final_escalation_implementer": "manual-owner-selected-senior-implementer",
+    "qualified_reviewer": "manual-qualified-reviewer",
+    "technical_operator": "authorized-technical-operator"
+  },
+  "evidence_tiers": [
+    "LOCAL_HERMETIC",
+    "CI",
+    "HOSTED",
+    "LIVE",
+    "PRODUCTION"
+  ],
+  "project_context": {
+    "language": "Python 3.x",
+    "framework": "FastAPI",
+    "browser_automation": "Playwright",
+    "ai_provider": "Google Gemini",
+    "database": "SQLite",
+    "frontend": "Jinja2, CSS, JavaScript",
+    "quality_entrypoint": "CHECK_QUALITY.ps1",
+    "migration_scope": "Workflow/configuration/documentation only; product runtime and live state remain unchanged"
+  },
+  "acceptance_boundaries": {
+    "local_source": "Canonical v9 tests, project deterministic gates, and hermetic pilots only",
+    "hosted_live": "Not established by local migration evidence",
+    "production": "Not run and not authorized"
+  }
+}

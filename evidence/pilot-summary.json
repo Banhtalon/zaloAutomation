@@ -1,0 +1,208 @@
+{
+  "schema_version": "qq.workflow.pilot-summary.v9",
+  "generated_at": "2026-09-07T03:34:13.480Z",
+  "evidence_tier": "LOCAL_HERMETIC",
+  "scenarios": {
+    "green": {
+      "decision": {
+        "schema_version": "qq.workflow.risk-decision.v9",
+        "declared": "GREEN",
+        "prior_effective": "GREEN",
+        "observed": "GREEN",
+        "effective": "GREEN",
+        "complexity": "XL",
+        "matches": [],
+        "required_roles": [],
+        "action": "CONTINUE_WITH_CONTROLS",
+        "paths": [
+          "notes.md"
+        ],
+        "candidate_head": "eab0a0c7bc114f50a340eddfd975143bf8975417",
+        "base_sha": "235f540e8053b65a71dec71eb1cb1966bcdb8b73"
+      },
+      "verification": {
+        "schema_version": "qq.workflow.verification-evidence.v9",
+        "task_id": "TASK-FIXTURE",
+        "scope_revision": 1,
+        "base_sha": "235f540e8053b65a71dec71eb1cb1966bcdb8b73",
+        "candidate_head": "eab0a0c7bc114f50a340eddfd975143bf8975417",
+        "controller_digest": "sha256:d48e37e2c9a5201f93f38de08aede0dfa5fc813105d288f207f1dacc220e3d5f",
+        "risk": {
+          "schema_version": "qq.workflow.risk-decision.v9",
+          "declared": "GREEN",
+          "prior_effective": "GREEN",
+          "observed": "GREEN",
+          "effective": "GREEN",
+          "complexity": "XL",
+          "matches": [],
+          "required_roles": [],
+          "action": "CONTINUE_WITH_CONTROLS",
+          "paths": [
+            "notes.md"
+          ],
+          "candidate_head": "eab0a0c7bc114f50a340eddfd975143bf8975417",
+          "base_sha": "235f540e8053b65a71dec71eb1cb1966bcdb8b73"
+        },
+        "evidence_tier": "LOCAL_HERMETIC",
+        "manifest_sha256": "sha256:56e15fbc3a8c3f87801139fec2cf408d1e191b3308f1263cf060768a6ac6adda",
+        "started_at": "2026-09-07T03:34:10.652Z",
+        "finished_at": "2026-09-07T03:34:10.865Z",
+        "gate_results": [
+          {
+            "id": "pass",
+            "argv_display": [
+              "C:\\Program Files\\nodejs\\node.exe",
+              "<arg>",
+              "<arg>"
+            ],
+            "exit_code": 0,
+            "timed_out": false,
+            "duration_ms": 42,
+            "stdout": "pilot-pass",
+            "stderr": "",
+            "redaction_applied": true,
+            "verdict": "PASS"
+          }
+        ],
+        "verdict": "PASS"
+      },
+      "pass": true
+    },
+    "yellow": {
+      "decision": {
+        "schema_version": "qq.workflow.risk-decision.v9",
+        "declared": "GREEN",
+        "prior_effective": "GREEN",
+        "observed": "YELLOW",
+        "effective": "YELLOW",
+        "complexity": "S",
+        "matches": [
+          {
+            "id": "workflow-control-plane",
+            "risk": "YELLOW",
+            "reason": "Workflow policy, evidence, or deterministic gate control changed",
+            "matched_paths": [
+              "scripts/check.mjs"
+            ],
+            "matched_patterns": [],
+            "required_roles": [
+              "QUALIFIED_REVIEWER"
+            ]
+          }
+        ],
+        "required_roles": [
+          "QUALIFIED_REVIEWER"
+        ],
+        "action": "CONTINUE_WITH_CONTROLS",
+        "paths": [
+          "scripts/check.mjs"
+        ],
+        "candidate_head": "2836a0535f34db090437d8abf012ae3f766777ab",
+        "base_sha": "37db04220a237dc89bdda08ff1a329dbc091f476"
+      },
+      "verification": {
+        "schema_version": "qq.workflow.verification-evidence.v9",
+        "task_id": "TASK-FIXTURE",
+        "scope_revision": 1,
+        "base_sha": "37db04220a237dc89bdda08ff1a329dbc091f476",
+        "candidate_head": "2836a0535f34db090437d8abf012ae3f766777ab",
+        "controller_digest": "sha256:b94f49b70baeec8b4a141a48a0e12cda8b0362422deb4c3c2424bfa65f936449",
+        "risk": {
+          "schema_version": "qq.workflow.risk-decision.v9",
+          "declared": "YELLOW",
+          "prior_effective": "YELLOW",
+          "observed": "YELLOW",
+          "effective": "YELLOW",
+          "complexity": "S",
+          "matches": [
+            {
+              "id": "workflow-control-plane",
+              "risk": "YELLOW",
+              "reason": "Workflow policy, evidence, or deterministic gate control changed",
+              "matched_paths": [
+                "scripts/check.mjs"
+              ],
+              "matched_patterns": [],
+              "required_roles": [
+                "QUALIFIED_REVIEWER"
+              ]
+            }
+          ],
+          "required_roles": [
+            "QUALIFIED_REVIEWER"
+          ],
+          "action": "CONTINUE_WITH_CONTROLS",
+          "paths": [
+            "scripts/check.mjs"
+          ],
+          "candidate_head": "2836a0535f34db090437d8abf012ae3f766777ab",
+          "base_sha": "37db04220a237dc89bdda08ff1a329dbc091f476"
+        },
+        "evidence_tier": "LOCAL_HERMETIC",
+        "manifest_sha256": "sha256:513bc9922d3d88f573eaae6f0b4a6f6d244d0d42b59fadc9a354e909cdd927c5",
+        "started_at": "2026-09-07T03:34:11.991Z",
+        "finished_at": "2026-09-07T03:34:12.204Z",
+        "gate_results": [
+          {
+            "id": "pass",
+            "argv_display": [
+              "C:\\Program Files\\nodejs\\node.exe",
+              "<arg>",
+              "<arg>"
+            ],
+            "exit_code": 0,
+            "timed_out": false,
+            "duration_ms": 42,
+            "stdout": "pilot-pass",
+            "stderr": "",
+            "redaction_applied": true,
+            "verdict": "PASS"
+          }
+        ],
+        "verdict": "PASS"
+      },
+      "pass": true
+    },
+    "escalation": {
+      "decision": {
+        "schema_version": "qq.workflow.risk-decision.v9",
+        "declared": "GREEN",
+        "prior_effective": "GREEN",
+        "observed": "RED",
+        "effective": "RED",
+        "complexity": "S",
+        "matches": [
+          {
+            "id": "authentication-or-permission",
+            "risk": "RED",
+            "reason": "Authentication, authorization, credential, or session boundary changed",
+            "matched_paths": [
+              "auth/login.ts"
+            ],
+            "matched_patterns": [],
+            "required_roles": [
+              "QUALIFIED_REVIEWER",
+              "TECHNICAL_OPERATOR"
+            ]
+          }
+        ],
+        "required_roles": [
+          "QUALIFIED_REVIEWER",
+          "TECHNICAL_OPERATOR"
+        ],
+        "action": "STOP_AND_ESCALATE",
+        "paths": [
+          "auth/login.ts"
+        ],
+        "candidate_head": "db729255d7c5c10f4eeff0ae186a1ccbd4bf6289",
+        "base_sha": "0c527d59111d863ea1aacd8aa18414b6f79b51bd"
+      },
+      "verification_invoked": true,
+      "gates_executed": false,
+      "pass": true
+    }
+  },
+  "routing_automation_present": false,
+  "adoption_decision": "PENDING_INDEPENDENT_REVIEW",
+  "verdict": "PASS"
+}

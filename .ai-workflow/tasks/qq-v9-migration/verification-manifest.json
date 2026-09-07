@@ -1,0 +1,59 @@
+{
+  "schema_version": "qq.workflow.verification-manifest.v9",
+  "task_id": "TASK-QQ-V9-MIGRATION",
+  "scope_revision": 1,
+  "base_sha": "ec8b50e1a259b6264724f13a7f7d8c01095ed15c",
+  "evidence_tier": "LOCAL_HERMETIC",
+  "acceptance_criteria": [
+    {
+      "id": "AC1",
+      "text": "Canonical QQ AI Workflow v9 artifacts are present and manual routing is explicit"
+    },
+    {
+      "id": "AC2",
+      "text": "Project profile and risk rules cover this FastAPI/Python/Playwright/Gemini/SQLite project without lowering risk"
+    },
+    {
+      "id": "AC3",
+      "text": "Deterministic workflow tests and GREEN/YELLOW/RED hermetic pilots pass"
+    },
+    {
+      "id": "AC4",
+      "text": "The migration preserves product progress and does not perform database, browser, live, deployment, or destructive actions"
+    }
+  ],
+  "gates": [
+    {
+      "id": "canonical-workflow-tests",
+      "argv": ["node", "--test", "test/workflow.test.mjs"],
+      "timeout_seconds": 180,
+      "required": true
+    },
+    {
+      "id": "project-profile-risk-validation",
+      "argv": [
+        "node",
+        "--input-type=module",
+        "-e",
+        "import fs from 'node:fs'; const p=JSON.parse(fs.readFileSync('.ai-workflow/PROJECT_PROFILE.json','utf8')); const r=JSON.parse(fs.readFileSync('.ai-workflow/RISK_RULES.json','utf8')); if(p.canonical_version!=='9.0.0'||p.routing_mode!=='MANUAL'||p.project_context.framework!=='FastAPI'||p.project_context.database!=='SQLite'||!Array.isArray(r.rules)||r.rules.length<8||!r.rules.some(x=>x.id==='authentication-or-permission'&&x.risk==='RED')||!r.rules.some(x=>x.id==='database-or-migration'&&x.risk==='RED')||!r.rules.some(x=>x.id==='deployment-control'&&x.risk==='RED')||!r.rules.some(x=>x.id==='external-service-boundary'&&x.risk==='RED')||!r.rules.some(x=>x.id==='user-data-and-privacy'&&x.risk==='RED')) process.exit(1); console.log('PROFILE_RISK_VALID')"
+      ],
+      "timeout_seconds": 30,
+      "required": true
+    },
+    {
+      "id": "project-isolated-quality",
+      "argv": [
+        "powershell.exe",
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "CHECK_QUALITY.ps1",
+        "-Isolated"
+      ],
+      "timeout_seconds": 1200,
+      "required": true
+    }
+  ]
+}

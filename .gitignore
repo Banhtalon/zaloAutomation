@@ -1,5 +1,10 @@
 # Secrets and local configuration
 .env
+.env.*
+!.env.example
+!deploy/staging/.env.staging.example
+.env.staging
+deploy/staging/.env
 
 # Python/runtime
 __pycache__/
@@ -10,6 +15,7 @@ venv/
 .mypy_cache/
 .ruff_cache/
 coverage.xml
+coverage*.json
 htmlcov/
 
 # Browser profiles and generated data
@@ -32,3 +38,7 @@ runtime/
 .idea/
 .DS_Store
 Thumbs.db
+
+# QQ AI Workflow runtime state
+node_modules/
+.ai-workflow/runtime/
