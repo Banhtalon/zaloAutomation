@@ -1,10 +1,11 @@
 # Lịch sử phiên bản — Zalo Automation
 
-> Dự án hiện chưa có một release Git sạch tương ứng chính xác với toàn bộ
-> working tree. `APP_VERSION` mặc định trong cấu hình là `4.0.0`; các mốc dưới
-> đây là lịch sử năng lực, không phải tuyên bố production acceptance.
+> Dự án đã có checkpoint Git local tại commit `624143f` và gói ZIP mã nguồn sạch
+> sinh từ `git archive` (`F:\FINAL_PROJECT\zaloAutomation-git-checkpoint-624143f.zip`).
+> Commit này chưa được push lên remote. `APP_VERSION` mặc định trong cấu hình là `4.0.0`;
+> các mốc dưới đây là lịch sử năng lực, không phải tuyên bố production acceptance.
 
-## Working tree hiện tại — 2026-09-18
+## Checkpoint hiện tại — 2026-09-18 (Commit `624143f`)
 
 - Ứng dụng local FastAPI với dashboard bốn khu vực.
 - 43 API route, 6 loại background job và 19 bảng SQLite.
@@ -14,6 +15,7 @@
 - Viewer/Operator/Admin, CSRF, host/origin guard và production preflight.
 - Backup/restore drill, migration checksum, evidence retention và audit.
 - Quality gate gồm Ruff, mypy, coverage, unittest, schema, smoke và frontend.
+- Thư mục `scratch/` chứa ảnh debug của Owner được `.gitignore` bỏ qua.
 
 ## Các mốc lịch sử
 

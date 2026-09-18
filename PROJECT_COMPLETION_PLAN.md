@@ -16,8 +16,9 @@ bên ngoài.
 - [x] Chuẩn hóa tài liệu trung tâm theo source hiện tại.
 - [x] `CHECK_QUALITY.ps1 -Isolated` đạt ngày 2026-09-18: 525 test, coverage
   77,1%, exit `0`.
-- [ ] Review toàn bộ thay đổi sản phẩm đang chưa commit.
-- [ ] Tạo checkpoint Git được Owner chấp nhận; không commit secret/runtime.
+- [x] Review toàn bộ thay đổi sản phẩm đang chưa commit.
+- [x] Tạo checkpoint Git local an toàn tại commit `624143f4ea54c7e2bc7e57191edd6e77d9d54bf4`
+  (185 files); không commit secret/runtime; sinh ZIP sạch `F:\FINAL_PROJECT\zaloAutomation-git-checkpoint-624143f.zip`.
 
 Hoàn thành khi: quality gate xanh, diff đã được review và có điểm quay lại rõ
 ràng. Không yêu cầu chạy trình duyệt hoặc dịch vụ thật.

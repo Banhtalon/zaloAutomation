@@ -13,8 +13,10 @@
 - Dispatcher không có job đang chạy tại thời điểm kiểm tra.
 - Mã nguồn có 74 file Python production, 43 route, 19 bảng SQLite, 6 loại job,
   55 file test và 525 hàm test được khai báo.
-- Git ở commit `495e4ec`, branch `chore/adopt-qq-ai-workflow-v9`, đang có lượng
-  thay đổi lớn chưa commit. Không reset, clean hoặc ghi đè các thay đổi này.
+- Git ở commit `624143f`, branch `chore/adopt-qq-ai-workflow-v9`, chưa push trong
+  task này. Checkpoint mã nguồn đã được đóng gói an toàn; dự án không còn khối thay
+  đổi mã nguồn lớn chưa commit. Thư mục `scratch/` là thư mục debug cục bộ được
+  `.gitignore` bỏ qua.
 
 ## Chức năng đã có trong source
 
@@ -52,10 +54,18 @@ Ngày 2026-09-18:
 
 ## Blocker và rủi ro mở
 
-1. **Working tree chưa sạch:** trước lúc chuẩn hóa có 207 mục thay đổi, gồm cả
-   thay đổi sản phẩm lớn. Chưa có bản phát hành Git sạch để làm mốc phục hồi.
-2. **Nghiệm thu thật chưa đầy đủ:** chưa xác nhận lại trọn vẹn Zalo, BCNB,
-   Google Form và LMS bằng mục tiêu nhỏ được Owner duyệt sau thay đổi gần nhất.
+1. **Checkpoint Git local đã được thiết lập:** Commit `624143f` đã đóng gói toàn bộ
+   185 file thay đổi (59 thêm mới, 90 sửa, 36 xóa). Đã tạo file ZIP mã nguồn sạch
+   bằng `git archive`: `F:\FINAL_PROJECT\zaloAutomation-git-checkpoint-624143f.zip`
+   (SHA-256: `c504574463efecd9dfbaf126dfddec7455a6b9211d149578566c20c6677bccfa`).
+   Thư mục `scratch/` là dữ liệu debug cục bộ đã được `.gitignore` bỏ qua mà không
+   ảnh hưởng 2 ảnh debug của Owner.
+2. **Nghiệm thu thật chưa đầy đủ:** Dự án chưa được nghiệm thu production thật.
+   Các giới hạn chưa kiểm chứng bao gồm:
+   - Chưa chạy Zalo Web trên hồ sơ người dùng thật;
+   - Chưa ghi dữ liệu thật vào BCNB (`BCNB_DRY_RUN=false`);
+   - Chưa submit Google Form thật;
+   - Chưa gọi Gemini bằng tài nguyên mạng thật trong môi trường live.
 3. **Zalo phụ thuộc dữ liệu đồng bộ trên máy:** khi lịch sử Web thiếu, hệ thống
    phải trả `INSUFFICIENT_EVIDENCE`; người vận hành cần đồng bộ rồi chạy lại.
 4. **Chỉ một instance:** SQLite, session và profile browser chưa hỗ trợ nhiều
@@ -84,8 +94,8 @@ Ngày 2026-09-18:
 
 ## Bước an toàn tiếp theo
 
-1. Review riêng phần thay đổi sản phẩm đang tồn tại và tạo checkpoint Git có thể
-   quay lại; không trộn với dữ liệu runtime.
+1. Phát triển hoặc kiểm thử tiếp từ checkpoint Git sạch `624143f`. Tuyệt đối không
+   push lên remote nếu chưa có yêu cầu từ Owner.
 2. Chạy tiếp acceptance local dry-run cho module Google Form OCR / Auto-Submit và
    LMS preview nếu cần trước khi chuyển sang canary.
 3. Chỉ sau đó mới xin Owner duyệt một canary thật có target cụ thể và rollback.

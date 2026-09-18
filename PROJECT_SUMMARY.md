@@ -162,7 +162,9 @@ dùng API backup của SQLite, kiểm tra hash/integrity và có restore drill.
   Form và LMS sau các thay đổi gần nhất.
 - Cấu hình production trên một máy không đồng nghĩa hệ thống đã được duyệt để
   chạy production hoặc đưa lên Internet.
-- Working tree đang chứa lượng thay đổi lớn chưa được gom thành bản phát hành
-  sạch; cần review và tạo checkpoint Git trước thay đổi sản phẩm tiếp theo.
+- Mã nguồn hiện tại đã có checkpoint Git `624143f` sạch; có thể dùng checkpoint
+  này làm điểm bắt đầu an toàn cho AI hoặc kỹ sư khác. Checkpoint Git không đồng
+  nghĩa với production acceptance; AI tiếp theo vẫn phải đọc `PROJECT_SUMMARY.md`,
+  `PROJECT_STATE.md` và `PROJECT_DECISIONS.md` trước khi phát triển feature.
 - Bộ phân loại đang dùng luật; không có `llm_classifier.py` hoặc
   `embedding_classifier.py`. Đây là chủ ý hiện tại, không phải file bị thiếu.

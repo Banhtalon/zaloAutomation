@@ -28,6 +28,7 @@ static/screenshots/
 googleform_autosubmit/uploads/
 temp_lms/
 runtime/
+scratch/
 *.log
 
 # Local backups
