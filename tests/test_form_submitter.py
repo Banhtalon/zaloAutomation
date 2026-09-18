@@ -421,6 +421,96 @@ class FormSubmitterTests(unittest.IsolatedAsyncioTestCase):
 
         await submitter._execute_submission(Page(), "Student", "VT-CODE")
 
+    async def test_select_dropdown_field_type(self):
+        class Listbox:
+            def __init__(self):
+                self.clicked = False
+
+            @property
+            def first(self):
+                return self
+
+            async def count(self):
+                return 1
+
+            async def scroll_into_view_if_needed(self):
+                return None
+
+            async def click(self):
+                self.clicked = True
+
+        class Option:
+            def __init__(self):
+                self.clicked = False
+
+            @property
+            def first(self):
+                return self
+
+            async def count(self):
+                return 1
+
+            async def scroll_into_view_if_needed(self):
+                return None
+
+            async def click(self):
+                self.clicked = True
+
+            async def wait_for(self, **_kwargs):
+                return None
+
+        class Container:
+            def __init__(self):
+                self.listbox = Listbox()
+
+            @property
+            def first(self):
+                return self
+
+            def filter(self, **_kwargs):
+                return self
+
+            async def count(self):
+                return 1
+
+            async def is_visible(self):
+                return True
+
+            async def scroll_into_view_if_needed(self):
+                return None
+
+            def locator(self, _selector):
+                return self.listbox
+
+        class Page:
+            def __init__(self):
+                self.container = Container()
+                self.option = Option()
+                self.role_calls = []
+
+            def locator(self, _selector):
+                return self.container
+
+            def get_by_role(self, role, **kwargs):
+                self.role_calls.append((role, kwargs))
+                return self.option
+
+        page = Page()
+        submitter = FormSubmitter({})
+        await submitter.fill_field(
+            page,
+            "Cơ sở trường MindX mà em đang học",
+            {"type": "select", "value": "Vũng Tàu - 205A Lê Hồng Phong"},
+        )
+
+        self.assertTrue(page.container.listbox.clicked)
+        self.assertTrue(page.option.clicked)
+        self.assertEqual(
+            page.role_calls,
+            [("option", {"name": "Vũng Tàu - 205A Lê Hồng Phong", "exact": True})],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
+

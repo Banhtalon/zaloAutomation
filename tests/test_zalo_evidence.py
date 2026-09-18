@@ -144,7 +144,7 @@ class ZaloEvidenceTests(unittest.TestCase):
         )
         self.assertEqual(
             exempted["evidence"]["business_rule"]["applied_at"],
-            "2026-07-29T20:00:00+07:00",
+            "2026-07-29T13:00:00+00:00",
         )
 
     def test_evidence_reference_returns_path_and_matching_sha(self):

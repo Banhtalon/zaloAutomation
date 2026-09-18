@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from datetime import datetime
+
+from core.time_utils import to_business, utc_iso
 import hashlib
+import mimetypes
 import os
 from typing import Any
 
@@ -49,10 +52,10 @@ def apply_lesson_14_exemption(
             "zalo_group_name": "",
             "person": "Giáo viên",
             "screenshot_path": "",
-            "timestamp": applied_at.strftime("%Y-%m-%d %H:%M:%S"),
+            "timestamp": utc_iso(applied_at),
             "evidence": {
                 "actual_group_name": None,
-                "scanned_at": applied_at.isoformat(timespec="seconds"),
+                "scanned_at": utc_iso(applied_at),
                 "messages_checked": 0,
                 "oldest_message_date": None,
                 "newest_message_date": None,
@@ -81,7 +84,7 @@ def apply_lesson_14_exemption(
         "decision": LESSON_14_EXEMPTION,
         "class_code": class_code,
         "lesson": 14,
-        "applied_at": applied_at.isoformat(timespec="seconds"),
+        "applied_at": utc_iso(applied_at),
         "source_evidence_state": source_state,
     }
     result.update(
@@ -95,18 +98,43 @@ def apply_lesson_14_exemption(
     return result
 
 
-def build_image_evidence(public_path: str, file_path: str) -> dict[str, str] | None:
+def build_image_evidence(
+    public_path: str,
+    file_path: str,
+    *,
+    capture_type: str = "zalo_chat",
+) -> dict[str, Any] | None:
     if not public_path or not os.path.isfile(file_path):
         return None
     digest = hashlib.sha256()
     with open(file_path, "rb") as evidence_file:
         for chunk in iter(lambda: evidence_file.read(1024 * 1024), b""):
             digest.update(chunk)
-    return {"path": public_path, "sha256": digest.hexdigest().upper()}
+    return {
+        "path": public_path,
+        "sha256": digest.hexdigest().upper(),
+        "size_bytes": os.path.getsize(file_path),
+        "mime_type": mimetypes.guess_type(file_path)[0] or "image/png",
+        "created_at": utc_iso(),
+        "capture_type": capture_type,
+    }
 
 
 def _iso_date(value: datetime | None) -> str | None:
     return value.date().isoformat() if value is not None else None
+
+
+def _has_unresolved_date_candidate(classifier_result: dict[str, Any]) -> bool:
+    """Prevent an ambiguous report from being presented as a verified absence."""
+    return any(
+        candidate.get("decision")
+        in {
+            "BEFORE_CLASS_DATE",
+            "FUTURE_UI_SENT_AT",
+            "TARGET_SESSION_AMBIGUOUS",
+        }
+        for candidate in classifier_result.get("candidates", [])
+    )
 
 
 def build_scan_result(
@@ -121,13 +149,14 @@ def build_scan_result(
     required_window_end: datetime,
     oldest_message_date: datetime | None,
     newest_message_date: datetime | None,
-    images: dict[str, dict[str, str] | None],
+    images: dict[str, dict[str, Any] | None],
     report_found: bool,
     report_detail: str | None = None,
     submitted_for_bcnb: bool = False,
     extra_reasons: list[str] | None = None,
     warnings: list[str] | None = None,
     verified_report_state: str = SUBMITTED_VERIFIED,
+    date_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     reasons = list(extra_reasons or [])
     if not actual_group_name:
@@ -139,7 +168,9 @@ def build_scan_result(
     status = INSUFFICIENT_STATUS
     if report_found:
         if images.get("report") is None:
-            reasons.append("Không chụp được ảnh tin nhắn báo cáo.")
+            reasons.append(
+                "Không chụp được ảnh tin nhắn báo cáo; đã nhận diện report nhưng không tạo được evidence."
+            )
         if not reasons:
             evidence_state = verified_report_state
             status = (
@@ -148,6 +179,10 @@ def build_scan_result(
                 else SUBMITTED_STATUS
             )
     else:
+        if _has_unresolved_date_candidate(classifier_result):
+            reasons.append(
+                "Có ứng viên báo cáo nhưng chưa xác định được buổi học tham chiếu; cần kiểm tra thủ công."
+            )
         if oldest_message_date is None or newest_message_date is None:
             reasons.append("Không đọc được mốc ngày cũ nhất hoặc mới nhất.")
         elif oldest_message_date.date() > newest_message_date.date():
@@ -169,13 +204,14 @@ def build_scan_result(
 
     evidence = {
         "actual_group_name": actual_group_name,
-        "scanned_at": scanned_at.isoformat(timespec="seconds"),
+        "scanned_at": utc_iso(scanned_at),
         "messages_checked": messages_checked,
         "oldest_message_date": _iso_date(oldest_message_date),
         "newest_message_date": _iso_date(newest_message_date),
         "required_window_start": required_window_start.date().isoformat(),
         "required_window_end": required_window_end.date().isoformat(),
         "classifier_result": classifier_result,
+        "date_context": dict(date_context or {}),
         "images": images,
         "validation_errors": reasons,
         "warnings": list(warnings or []),
@@ -196,9 +232,10 @@ def build_scan_result(
         "status_detail": "; ".join(reasons) if reasons else (report_detail or ""),
         "evidence_state": evidence_state,
         "submitted_for_bcnb": bool(
-            evidence_state == SUBMITTED_VERIFIED and submitted_for_bcnb
+            evidence_state in {SUBMITTED_VERIFIED, SUBMITTED_LATE_VERIFIED}
+            and submitted_for_bcnb
         ),
         "screenshot_path": available_image,
         "evidence": evidence,
-        "timestamp": scanned_at.strftime("%Y-%m-%d %H:%M:%S"),
+        "timestamp": to_business(scanned_at).strftime("%Y-%m-%d %H:%M:%S ICT"),
     }

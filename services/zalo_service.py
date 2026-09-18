@@ -7,20 +7,14 @@ import unicodedata
 
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from googleform_autosubmit.config import Config
-from core.time_utils import business_day_start, now_business
+from core.time_utils import business_day_start, now_business, now_utc
 from logger_utils import log_message
 from repositories.audit_repository import AuditRepository
+from repositories.evidence_repository import EvidenceRepository
 from repositories.group_repository import GroupRepository
 from repositories.job_repository import JobCancelledError, JobRepository
 from services.browser_job_guard import exclusive_browser_job
-from services.bcnb_actions import execute_verified_checkbox_action
-from services.bcnb_safety import (
-    resolve_report_columns,
-    select_last_week_checked,
-)
-from services.evidence_store import cleanup_old_screenshots
 from services.external_gateways import ExternalGateways
-from services.zalo_discovery_matching import find_scan_result_matches
 from services.zalo_discovery_service import run_auto_discovery as run_auto_discovery
 from services.zalo_safety import open_chat_matches
 from services.zalo_scan_evidence import (
@@ -29,22 +23,20 @@ from services.zalo_scan_evidence import (
     ensure_zalo_history_synced,
     scan_open_zalo_chat,
 )
-from services.zalo_evidence import (
-    LESSON_14_EXEMPTION,
-    apply_lesson_14_exemption,
-    get_evidence_reference,
-)
+from services.zalo_bcnb_service import update_bcnb_reports
 
 
 group_repo = GroupRepository()
 job_repo = JobRepository()
 audit_repo = AuditRepository()
+evidence_repo = EvidenceRepository()
 
 
 async def run_zalo_automation(
     job_id: int,
     execution_mode: str = "dry-run",
     *,
+    scan_plan: dict | None = None,
     runtime=None,
 ):
     try:
@@ -52,11 +44,15 @@ async def run_zalo_automation(
             job_id,
             job_repo,
             lock=runtime.browser_lock if runtime else None,
+            process_lock=getattr(runtime, "profile_lock", None) if runtime else None,
         ):
             await _run_zalo_automation(
                 job_id,
                 execution_mode,
+                scan_plan=scan_plan,
                 external=(runtime.external if runtime else ExternalGateways.production()),
+                evidence_root=(getattr(runtime, "evidence_root", None) if runtime else None),
+                runtime=runtime,
             )
     except JobCancelledError as exc:
         actions = await audit_repo.list_for_job(job_id, 200)
@@ -85,25 +81,57 @@ async def _run_zalo_automation(
     job_id: int,
     execution_mode: str,
     *,
+    scan_plan: dict | None = None,
     external: ExternalGateways | None = None,
+    evidence_root: str | None = None,
+    runtime=None,
 ):
     dry_run = execution_mode != "production"
-    cleanup_old_screenshots(days=14)
-    job_screenshots_dir = os.path.join("static", "screenshots", f"job-{job_id}")
+    evidence_root = evidence_root or os.path.abspath(
+        os.path.join("static", "screenshots")
+    )
+    await evidence_repo.expire_old(
+        root=evidence_root,
+        retention_days=getattr(Config, "EVIDENCE_RETENTION_DAYS", 7),
+        policy=getattr(Config, "EVIDENCE_RETENTION_POLICY", "tombstone"),
+        delete_files=getattr(Config, "EVIDENCE_DELETE_EXPIRED", True),
+    )
+    job_screenshots_dir = os.path.join(evidence_root, f"job-{job_id}")
     os.makedirs(job_screenshots_dir, exist_ok=True)
     scan_results: list[dict[str, Any]] = []
     await job_repo.update_job(job_id, status="RUNNING", message="Đang quét báo cáo...", progress=5)
     log_message("Bắt đầu tiến trình quét báo cáo tự động...")
 
+    if not scan_plan:
+        await job_repo.update_job(
+            job_id,
+            status="FAILED",
+            message="Dừng an toàn: quét Zalo bắt buộc có snapshot hai tuần do BCNB cung cấp.",
+            progress=100,
+        )
+        log_message(
+            "Từ chối quét Zalo không có snapshot hai tuần do BCNB cung cấp.",
+            level="ERROR",
+            event="zalo.scan_plan_required",
+        )
+        return
+
+    scan_started_at = now_business()
     try:
-        await job_repo.ensure_not_cancelled(job_id)
-        groups_list = await group_repo.get_all_groups()
-        if not groups_list:
-            await job_repo.update_job(
-                job_id, status="FAILED", message="Lỗi: Không có dữ liệu lớp học trong Database."
-            )
-            log_message("Lỗi: Không có dữ liệu lớp học trong Database.")
+        from services.zalo_parallel_service import prepare_frozen_scan_execution
+
+        prepared = await prepare_frozen_scan_execution(
+            job_id=job_id,
+            scan_plan=scan_plan,
+            scan_started_at=scan_started_at,
+            runtime=runtime,
+            job_repo=job_repo,
+        )
+        if prepared is None:
             return
+        scan_plan, groups_list, reconciliation_only = prepared
+    except JobCancelledError:
+        raise
     except Exception as e:
         await job_repo.update_job(
             job_id, status="FAILED", message="Lỗi: Không thể lấy danh sách nhóm từ Database"
@@ -111,9 +139,29 @@ async def _run_zalo_automation(
         log_message(f"Lỗi: Không thể lấy danh sách nhóm ({e})")
         return
 
-    today = business_day_start()
+    today = business_day_start(scan_started_at)
 
     external = external or ExternalGateways.production()
+    if runtime is not None and hasattr(external.browser, "persistent_session"):
+        from services.zalo_parallel_service import (
+            run_and_finalize_parallel_zalo_batch,
+        )
+
+        await run_and_finalize_parallel_zalo_batch(
+            job_id=job_id,
+            execution_mode=execution_mode,
+            scan_plan=scan_plan,
+            today=today,
+            scan_started_at=scan_started_at,
+            evidence_root=evidence_root,
+            screenshots_dir=job_screenshots_dir,
+            runtime=runtime,
+            job_repo=job_repo,
+            audit_repo=audit_repo,
+            evidence_repo=evidence_repo,
+            reconciliation_only=reconciliation_only,
+        )
+        return
     async with external.browser.persistent_page() as page:
         log_message("Đang truy cập Zalo Web...")
         await page.goto("https://chat.zalo.me/")
@@ -168,14 +216,27 @@ async def _run_zalo_automation(
                 )
 
         # --- CẬP NHẬT LẠI DANH SÁCH NHÓM CHÍNH (Vì có thể vừa phục hồi) ---
-        groups_list = await group_repo.get_all_groups()
+        if scan_plan:
+            groups_list = [
+                {
+                    "TenNhom": target.get("group_name", ""),
+                    "NguoiPhuTrach": target.get("person", "Chưa xác định"),
+                    "NgayHoc": target.get("class_date", ""),
+                    "scan_target": target,
+                }
+                for target in scan_plan.get("targets", [])
+                if isinstance(target, dict) and str(target.get("group_name", "")).strip()
+            ]
+        else:
+            groups_list = await group_repo.get_scan_groups()
 
         for g in groups_list:
             await job_repo.ensure_not_cancelled(job_id)
-            group_name = g.get("TenNhom")
-            person = g.get("NguoiPhuTrach", "Chưa xác định")
-            class_date_str = g.get("NgayHoc", "").strip()
-            scanned_at = now_business()
+            group_name = str(g.get("TenNhom") or "").strip()
+            person = str(g.get("NguoiPhuTrach") or "Chưa xác định").strip()
+            class_date_str = str(g.get("NgayHoc") or "").strip()
+            scan_target = g.get("scan_target") or {}
+            scanned_at = now_utc()
 
             log_message(f"Đang kiểm tra nhóm: {group_name} ({person})...")
             if not sync_verified:
@@ -329,9 +390,24 @@ async def _run_zalo_automation(
                 actual_group_name=header_text.strip(),
                 person=person,
                 class_date_str=class_date_str,
+                scan_target=scan_target if isinstance(scan_target, dict) else None,
                 today=today,
                 ensure_not_cancelled=lambda: job_repo.ensure_not_cancelled(job_id),
             )
+            if scan_target:
+                context = result.setdefault("evidence", {}).setdefault("date_context", {})
+                context.update(
+                    {
+                        "target_week": scan_target.get("week"),
+                        "target_year": scan_target.get("year"),
+                        "target_week_source": "BCNB_SERVER",
+                        "target_class_code": scan_target.get("class_code"),
+                        "target_lesson": scan_target.get("lesson"),
+                    }
+                )
+                if not context.get("target_class_date"):
+                    context["target_class_date"] = scan_target.get("class_date")
+                result["scan_target"] = scan_target
             scan_results.append(attach_zalo_sync_result(result, sync_result))
             log_message(f"Kết quả nhóm {group_name}: {result['status']}")
 
@@ -341,6 +417,12 @@ async def _run_zalo_automation(
         await job_repo.update_job(job_id, message="Đang cập nhật kết quả lên BCNB...", progress=80)
         log_message("Đang truy cập BCNB để cập nhật trạng thái tích chọn...")
         await job_repo.ensure_not_cancelled(job_id)
+        await evidence_repo.register_scan_results(
+            job_id=job_id,
+            results=scan_results,
+            evidence_root=evidence_root,
+            retention_days=getattr(Config, "EVIDENCE_RETENTION_DAYS", 7),
+        )
         await page.goto(Config.BCNB_URL)
 
         # --- AUTO LOGIN BCNB ---
@@ -361,127 +443,37 @@ async def _run_zalo_automation(
         # -----------------------
 
         try:
-            await job_repo.ensure_not_cancelled(job_id)
-            selected_week, selected_year = await select_last_week_checked(page)
-            class_index, lesson_index, report_index = await resolve_report_columns(page)
-            log_message(f"Đã kiểm chứng BCNB ở Tuần {selected_week} / {selected_year}.")
-            await asyncio.sleep(2)
-
-            rows = await page.locator("table tr").all()
-            log_message(f"Tìm thấy {len(rows)} dòng trên bảng BCNB. Bắt đầu đối chiếu...")
-
-            bcnb_rows = []
-            for row in rows:
-                await job_repo.ensure_not_cancelled(job_id)
-                cells = await row.locator("td").all()
-                if len(cells) > max(class_index, lesson_index, report_index):
-                    ma_lop_bcnb = await cells[class_index].inner_text()
-                    ma_lop_bcnb = ma_lop_bcnb.strip().upper()
-                    buoi_so = await cells[lesson_index].inner_text()
-                    buoi_so = buoi_so.strip()
-                    bcnb_rows.append(
-                        {
-                            "cells": cells,
-                            "ma_lop": ma_lop_bcnb,
-                            "buoi_so": buoi_so,
-                        }
-                    )
-
-            bcnb_data = [{"ma_lop": item["ma_lop"]} for item in bcnb_rows]
-            for bcnb_row in bcnb_rows:
-                await job_repo.ensure_not_cancelled(job_id)
-                cells = bcnb_row["cells"]
-                ma_lop_bcnb = bcnb_row["ma_lop"]
-                buoi_so = bcnb_row["buoi_so"]
-                is_submitted = False
-                is_buoi_14 = buoi_so == "14"
-                matched_result = None
-                result_matches = find_scan_result_matches(
-                    ma_lop_bcnb,
-                    scan_results,
-                    bcnb_data,
-                )
-                if len(result_matches) > 1:
-                    raise RuntimeError(
-                        f"Mã lớp {ma_lop_bcnb} khớp nhiều nhóm Zalo; dừng để tránh tick nhầm."
-                    )
-                if result_matches:
-                    matched_result = result_matches[0]
-                    is_submitted = bool(matched_result.get("submitted_for_bcnb", False))
-
-                if is_buoi_14:
-                    is_submitted = True
-                    matched_result = apply_lesson_14_exemption(
-                        matched_result,
-                        class_code=ma_lop_bcnb,
-                        applied_at=now_business(),
-                    )
-                    if matched_result not in scan_results:
-                        scan_results.append(matched_result)
-                    log_message(
-                        f"Lớp {ma_lop_bcnb}: Buổi 14 được MIỄN BÁO CÁO. Đã ghi LESSON_14_EXEMPTION."
-                    )
-
-                if is_submitted:
-                    checkbox = cells[report_index].locator('input[type="checkbox"]').first
-                    if await checkbox.count() > 0:
-                        is_checked = await checkbox.is_checked()
-                        if not is_checked or is_buoi_14:
-                            evidence_path, evidence_sha256 = get_evidence_reference(matched_result)
-                            outcome = await execute_verified_checkbox_action(
-                                page=page,
-                                checkbox=checkbox,
-                                audit_repo=audit_repo,
-                                job_repo=job_repo,
-                                job_id=job_id,
-                                action_key=(
-                                    f"bcnb-report:{job_id}:{selected_year}:W{selected_week}:"
-                                    f"{ma_lop_bcnb}:{buoi_so}"
-                                ),
-                                action_type="BCNB_REPORT_TICK",
-                                class_code=ma_lop_bcnb,
-                                column_kind="report",
-                                week=selected_week,
-                                year=selected_year,
-                                lesson=buoi_so,
-                                execution_mode=execution_mode,
-                                reason={
-                                    "week": selected_week,
-                                    "year": selected_year,
-                                    "lesson": buoi_so,
-                                    "submitted": is_submitted,
-                                    "evidence_state": (
-                                        matched_result.get("evidence_state")
-                                        if matched_result
-                                        else None
-                                    ),
-                                    "lesson_14_exemption": is_buoi_14,
-                                    "evidence_decision": (
-                                        LESSON_14_EXEMPTION if is_buoi_14 else None
-                                    ),
-                                },
-                                evidence_path=evidence_path,
-                                evidence_sha256=evidence_sha256,
-                                settle_seconds=0.7,
-                            )
-                            if outcome == "DRY_RUN":
-                                log_message(
-                                    f"[DRY-RUN] Sẽ Tick xanh cho lớp: {ma_lop_bcnb}"
-                                    + (" (Miễn báo cáo Buổi 14)" if is_buoi_14 else "")
-                                )
-                            else:
-                                log_message(f"Đã tick và kiểm chứng BCNB cho lớp: {ma_lop_bcnb}")
-
-            log_message("ĐÃ CẬP NHẬT TOÀN BỘ LÊN HỆ THỐNG BCNB THÀNH CÔNG!")
+            # update_bcnb_reports delegates every write to the audited
+            # execute_verified_checkbox_action helper with server read-back.
+            bcnb_summary = await update_bcnb_reports(
+                page,
+                job_id=job_id,
+                execution_mode=execution_mode,
+                scan_results=scan_results,
+                today=today,
+                now=scan_started_at,
+                scan_plan=scan_plan,
+                job_repo=job_repo,
+                audit_repo=audit_repo,
+            )
         except Exception as e:
             log_message(f"Lỗi khi cập nhật BCNB: {e}")
             raise RuntimeError("Không thể hoàn tất cập nhật BCNB an toàn.") from e
 
         # ------------------------------------------
-    final_message = "Hoàn tất mô phỏng, chưa thay đổi BCNB." if dry_run else "Hoàn tất!"
+    failed_targets = (bcnb_summary or {}).get("failed_targets", [])
+    if failed_targets:
+        final_status = "PARTIAL_SUCCESS"
+        final_message = (
+            ("Hoàn tất mô phỏng" if dry_run else "Hoàn tất một phần")
+            + f"; {len(failed_targets)} dòng BCNB chưa cập nhật, cần kiểm tra audit."
+        )
+    else:
+        final_status = "SUCCESS"
+        final_message = "Hoàn tất mô phỏng, chưa thay đổi BCNB." if dry_run else "Hoàn tất!"
     await job_repo.update_job(
         job_id,
-        status="SUCCESS",
+        status=final_status,
         message=final_message,
         progress=100,
         results=json.dumps(scan_results, ensure_ascii=False),

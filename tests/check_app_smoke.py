@@ -78,6 +78,10 @@ with tempfile.TemporaryDirectory() as temp_dir:
             "/api/health/live": {"get"},
             "/api/health/ready": {"get"},
             "/api/metrics/jobs": {"get"},
+            "/api/auth/login": {"post"},
+            "/api/auth/me": {"get"},
+            "/api/auth/logout": {"post"},
+            "/api/evidence/{job_id}/{filename}": {"get"},
         }
         missing = set(required) - set(paths)
         if missing:

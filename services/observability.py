@@ -1,6 +1,6 @@
 """Local health/readiness checks and aggregate-only operational metrics."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from contextlib import closing
 from pathlib import Path
 import shutil
@@ -9,9 +9,10 @@ from statistics import median
 from time import monotonic
 import uuid
 
+from core.time_utils import now_utc, parse_timestamp, utc_iso
 import db.database as database
 from googleform_autosubmit.config import Config
-_STARTED_AT = datetime.now(timezone.utc)
+_STARTED_AT = now_utc()
 _STARTED_MONOTONIC = monotonic()
 _INSTANCE_ID = uuid.uuid4().hex[:12]
 
@@ -127,8 +128,7 @@ def _parse_time(value: str | None):
     if not value:
         return None
     try:
-        parsed = datetime.fromisoformat(value)
-        return parsed.replace(tzinfo=parsed.tzinfo or timezone.utc)
+        return parse_timestamp(value)
     except (TypeError, ValueError):
         return None
 
@@ -158,9 +158,7 @@ def collect_job_metrics(
         settings.database_path if settings else database.current_db_path()
     )
     log_path = log_dir or (settings.log_dir if settings else Config.LOG_DIR)
-    cutoff = (datetime.now(timezone.utc) - timedelta(hours=window_hours)).isoformat(
-        timespec="seconds"
-    )
+    cutoff = utc_iso(now_utc() - timedelta(hours=window_hours))
     with closing(sqlite3.connect(db_path, timeout=3)) as connection:
         jobs = connection.execute(
             """
@@ -214,7 +212,7 @@ def collect_job_metrics(
     else:
         dispatcher_state = dispatcher.status()
     return {
-        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "generated_at": utc_iso(),
         "window_hours": window_hours,
         "jobs": {
             "total": sum(count for _job_type, _status, count in jobs),

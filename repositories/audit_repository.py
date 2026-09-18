@@ -1,12 +1,12 @@
 import json
-from datetime import datetime, timezone
+from core.time_utils import utc_iso
 from typing import Any
 
 from db.database import get_db_connection
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return utc_iso()
 
 
 def _dump(value: Any) -> str | None:
@@ -53,6 +53,14 @@ class AuditRepository:
                 row = await self.get_by_id(existing[0])
                 if row is None:
                     raise RuntimeError("Không đọc lại được audit action đã tồn tại.")
+                if evidence_path:
+                    from repositories.evidence_repository import EvidenceRepository
+
+                    await EvidenceRepository().link_audit(
+                        audit_id=int(existing[0]),
+                        public_path=evidence_path,
+                        evidence_sha256=evidence_sha256,
+                    )
                 return row, False
 
             cursor = await db.execute(
@@ -83,6 +91,15 @@ class AuditRepository:
         row = await self.get_by_id(audit_id)
         if row is None:
             raise RuntimeError("Không đọc lại được audit action vừa tạo.")
+        if evidence_path:
+            from repositories.evidence_repository import EvidenceRepository
+
+            await EvidenceRepository().link_audit(
+                audit_id=int(audit_id),
+                public_path=evidence_path,
+                evidence_sha256=evidence_sha256,
+            )
+            row = await self.get_by_id(int(audit_id)) or row
         return row, True
 
     async def complete_action(
@@ -116,6 +133,30 @@ class AuditRepository:
                 ),
             )
             await db.commit()
+        if evidence_path:
+            from repositories.evidence_repository import EvidenceRepository
+
+            row = await self.get_by_id(audit_id)
+            if row is not None:
+                await EvidenceRepository().link_audit(
+                    audit_id=audit_id,
+                    public_path=evidence_path,
+                    evidence_sha256=evidence_sha256,
+                )
+
+    async def reconcile_verified(self, audit_id: int) -> None:
+        """Resolve an interrupted/unknown intent after fresh server readback."""
+        async with get_db_connection() as db:
+            await db.execute(
+                """
+                UPDATE external_action_audit
+                SET outcome = 'VERIFIED', after_json = ?, error_message = NULL,
+                    completed_at = ?
+                WHERE id = ? AND outcome IN ('INTENT_RECORDED', 'UNKNOWN')
+                """,
+                (_dump({"checked": True, "reconciled": True}), _now(), audit_id),
+            )
+            await db.commit()
 
     async def get_by_id(self, audit_id: int) -> dict | None:
         async with get_db_connection() as db:
@@ -124,10 +165,29 @@ class AuditRepository:
                 SELECT id, action_key, job_id, action_type, target_type,
                        target_id, mode, reason_json, before_json,
                        intended_json, after_json, outcome, evidence_path,
-                       evidence_sha256, error_message, created_at, completed_at
+                       evidence_sha256, evidence_artifact_id, evidence_status,
+                       evidence_size_bytes, evidence_mime_type, evidence_created_at,
+                       evidence_capture_type, error_message, created_at, completed_at
                 FROM external_action_audit WHERE id = ?
                 """,
                 (audit_id,),
+            ) as cursor:
+                row = await cursor.fetchone()
+        return self._row(row) if row else None
+
+    async def get_by_action_key(self, action_key: str) -> dict | None:
+        async with get_db_connection() as db:
+            async with db.execute(
+                """
+                SELECT id, action_key, job_id, action_type, target_type,
+                       target_id, mode, reason_json, before_json,
+                       intended_json, after_json, outcome, evidence_path,
+                       evidence_sha256, evidence_artifact_id, evidence_status,
+                       evidence_size_bytes, evidence_mime_type, evidence_created_at,
+                       evidence_capture_type, error_message, created_at, completed_at
+                FROM external_action_audit WHERE action_key = ?
+                """,
+                (action_key,),
             ) as cursor:
                 row = await cursor.fetchone()
         return self._row(row) if row else None
@@ -140,7 +200,9 @@ class AuditRepository:
                 SELECT id, action_key, job_id, action_type, target_type,
                        target_id, mode, reason_json, before_json,
                        intended_json, after_json, outcome, evidence_path,
-                       evidence_sha256, error_message, created_at, completed_at
+                       evidence_sha256, evidence_artifact_id, evidence_status,
+                       evidence_size_bytes, evidence_mime_type, evidence_created_at,
+                       evidence_capture_type, error_message, created_at, completed_at
                 FROM external_action_audit
                 WHERE job_id = ? ORDER BY id DESC LIMIT ?
                 """,
@@ -166,7 +228,13 @@ class AuditRepository:
             "outcome": row[11],
             "evidence_path": row[12],
             "evidence_sha256": row[13],
-            "error_message": row[14],
-            "created_at": row[15],
-            "completed_at": row[16],
+            "evidence_artifact_id": row[14],
+            "evidence_status": row[15],
+            "evidence_size_bytes": row[16],
+            "evidence_mime_type": row[17],
+            "evidence_created_at": row[18],
+            "evidence_capture_type": row[19],
+            "error_message": row[20],
+            "created_at": row[21],
+            "completed_at": row[22],
         }

@@ -3,6 +3,8 @@ from datetime import datetime
 
 from services.zalo_safety import (
     class_code_matches_group,
+    extract_report_content_lesson_number,
+    infer_previous_lesson_date,
     open_chat_matches,
     report_delay_days,
 )
@@ -66,6 +68,26 @@ class ZaloClassMatchingTests(unittest.TestCase):
             ),
             2,
         )
+
+    def test_infer_previous_lesson_date_requires_a_recent_content_date(self):
+        previous = infer_previous_lesson_date(
+            [datetime(2025, 7, 26), datetime(2026, 7, 26), datetime(2026, 8, 2)],
+            next_class_date=datetime(2026, 8, 2),
+            message_date=datetime(2026, 7, 29),
+        )
+        self.assertEqual(previous, datetime(2026, 7, 26))
+        self.assertIsNone(
+            infer_previous_lesson_date(
+                [datetime(2026, 7, 15)],
+                next_class_date=datetime(2026, 8, 2),
+                message_date=datetime(2026, 7, 29),
+            )
+        )
+
+    def test_content_lesson_marker_is_separate_from_buoi_number(self):
+        text = "Update sau buổi học số 5 - 26/07/2026. Bài số 6: GML."
+        self.assertEqual(extract_report_content_lesson_number(text), 6)
+        self.assertIsNone(extract_report_content_lesson_number("Bài tập về nhà số 6"))
 
 
 if __name__ == "__main__":

@@ -124,6 +124,7 @@ async def run_lms_analysis(
             job_id,
             job_repo,
             lock=runtime.browser_lock if runtime else None,
+            process_lock=getattr(runtime, "profile_lock", None) if runtime else None,
         ):
             await job_repo.update_job(
                 job_id,
@@ -226,6 +227,7 @@ async def run_lms_automation(
             job_id,
             job_repo,
             lock=runtime.browser_lock if runtime else None,
+            process_lock=getattr(runtime, "profile_lock", None) if runtime else None,
         ):
             await job_repo.update_job(
                 job_id,

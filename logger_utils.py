@@ -4,12 +4,13 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from contextvars import ContextVar
-from datetime import datetime, timezone
+from core.time_utils import now_business, utc_iso
 import json
 import logging
 from logging.handlers import RotatingFileHandler
 import os
 import re
+import sys
 import threading
 import uuid
 
@@ -83,7 +84,7 @@ def _safe_value(key: str, value):
 class _JsonFormatter(logging.Formatter):
     def format(self, record):
         payload = getattr(record, "structured", None) or {
-            "timestamp": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+            "timestamp": utc_iso(timespec="milliseconds"),
             "level": record.levelname,
             "message": redact_text(record.getMessage()),
         }
@@ -125,8 +126,8 @@ class LogManager:
             raise RuntimeError("Log manager đã đóng.")
         level = str(level).upper()
         message = redact_text(text)
-        timestamp = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
-        local_time = datetime.now().strftime("%H:%M:%S")
+        timestamp = utc_iso(timespec="milliseconds")
+        local_time = now_business().strftime("%H:%M:%S")
         context = {
             "request_id": _request_id.get(),
             "job_id": _job_id.get(),
@@ -159,7 +160,14 @@ class LogManager:
             message,
             extra={"structured": record},
         )
-        print(formatted)
+        try:
+            print(formatted)
+        except (UnicodeEncodeError, OSError):
+            try:
+                sys.stdout.buffer.write((formatted + "\n").encode("utf-8", errors="replace"))
+                sys.stdout.buffer.flush()
+            except Exception:
+                pass
         return record
 
     def recent(self, *, after=0, limit=200, level=None, job_id=None) -> list[dict]:

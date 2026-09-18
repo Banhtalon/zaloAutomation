@@ -3,7 +3,7 @@ from typing import Literal
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
-from api.dependencies import get_container
+from api.dependencies import get_container, require_operator
 from api.errors import public_error
 from core.container import AppContainer
 from repositories.upload_repository import UploadClaimError
@@ -18,7 +18,7 @@ class UploadRequest(BaseModel):
     purpose: Literal["googleform_ocr", "lms_analysis"]
 
 
-@router.post("/api/uploads")
+@router.post("/api/uploads", dependencies=[Depends(require_operator)])
 async def create_upload(
     req: UploadRequest,
     container: AppContainer = Depends(get_container),

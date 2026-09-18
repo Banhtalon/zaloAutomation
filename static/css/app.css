@@ -36,7 +36,8 @@ body {
         radial-gradient(circle at 72% 10%, rgba(108, 205, 255, 0.12), transparent 28%),
         radial-gradient(circle at 35% 95%, rgba(79, 126, 232, 0.08), transparent 32%),
         linear-gradient(135deg, #f8fbff 0%, #f3f8fd 48%, #f7fbff 100%);
-    background-attachment: fixed;
+    /* Avoid a full-page repaint on every scroll frame. */
+    background-attachment: scroll;
 }
 
 button,
@@ -94,8 +95,9 @@ select:focus-visible,
 
 .glass-panel {
     background: var(--surface);
-    backdrop-filter: blur(18px);
-    -webkit-backdrop-filter: blur(18px);
+    /* The surface is already 96% opaque; backdrop blur only adds GPU work. */
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
     border: 1px solid var(--border);
     box-shadow: var(--shadow-sm);
     border-radius: 16px;
@@ -422,7 +424,9 @@ input::placeholder {
 }
 
 .evidence-meta,
-.status-detail {
+.status-detail,
+.result-target-meta,
+.manual-verification-meta {
     width: 100%;
     margin-top: 5px;
     color: #64748b;
@@ -430,8 +434,48 @@ input::placeholder {
     line-height: 1.35;
 }
 
+.manual-verification-meta {
+    color: #7c3aed;
+    font-weight: 600;
+}
+
+.manual-verify-actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 5px;
+    width: 100%;
+    margin-top: 6px;
+}
+
+.manual-verify-button {
+    border: 1px solid currentColor;
+    border-radius: 6px;
+    padding: 4px 7px;
+    font-size: 11px;
+    font-weight: 700;
+    background: #fff;
+    cursor: pointer;
+}
+
+.manual-verify-button:disabled {
+    opacity: .55;
+    cursor: not-allowed;
+}
+
+.manual-verify-button--reported { color: #147a58; }
+.manual-verify-button--not-reported { color: #c74554; }
+
 .status-detail {
     max-width: 320px;
+}
+
+.result-target-meta {
+    max-width: 340px;
+    color: #64748b;
+    font-size: 0.78rem;
+    font-weight: 500;
+    line-height: 1.35;
 }
 
 .empty-state {

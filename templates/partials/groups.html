@@ -61,4 +61,49 @@
                         </div>
                     </div>
                 </div>
+
+                <section class="glass-panel p-6 flex flex-col" aria-labelledby="bcnb-zalo-gaps-title">
+                    <div class="flex flex-wrap items-start justify-between gap-4 mb-5">
+                        <div>
+                            <h2 id="bcnb-zalo-gaps-title" class="text-lg font-bold text-amber-200 tracking-wide">
+                                Lớp có trên BCNB nhưng chưa xác định được nhóm Zalo
+                            </h2>
+                            <p class="mt-1 text-xs text-gray-400">
+                                Tự cập nhật sau mỗi lần Dò tìm. Lớp mơ hồ hoặc đang chuyển cấp chỉ được cảnh báo, không tự ghép nhóm.
+                            </p>
+                            <p id="bcnb-zalo-gaps-summary" class="mt-2 text-sm text-gray-300" aria-live="polite">
+                                Chưa có dữ liệu đối chiếu.
+                            </p>
+                        </div>
+                        <div class="flex items-center gap-2">
+                            <div class="relative w-60 glass-panel rounded-lg overflow-hidden flex items-center">
+                                <i class="fa-solid fa-search text-gray-400 pl-3"></i>
+                                <input type="text" id="bcnbZaloGapSearchInput" onkeyup="filterBcnbZaloGaps()"
+                                    class="bg-transparent border-none text-gray-200 text-sm focus:ring-0 block w-full p-2 outline-none"
+                                    placeholder="Tìm mã lớp, giáo viên...">
+                            </div>
+                            <button type="button" aria-label="Làm mới đối chiếu BCNB và Zalo" onclick="fetchBcnbZaloGaps()" class="text-gray-400 hover:text-white px-3 py-2 rounded-md glass-panel">
+                                <i class="fa-solid fa-rotate-right"></i>
+                            </button>
+                        </div>
+                    </div>
+                    <p id="bcnb-zalo-gaps-stale" class="hidden mb-3 text-xs text-amber-300"></p>
+                    <div class="overflow-x-auto border border-amber-500/20 rounded-xl bg-black/20 shadow-inner">
+                        <table class="w-full text-sm text-left text-gray-300 tabular-nums">
+                            <thead class="text-[10px] text-amber-300/80 uppercase bg-black/40 border-b border-amber-500/20">
+                                <tr>
+                                    <th class="px-4 py-3 w-10">#</th>
+                                    <th class="px-4 py-3">Mã lớp</th>
+                                    <th class="px-4 py-3">Giáo viên</th>
+                                    <th class="px-4 py-3">Tuần / buổi</th>
+                                    <th class="px-4 py-3">Ngày học</th>
+                                    <th class="px-4 py-3">Trạng thái</th>
+                                </tr>
+                            </thead>
+                            <tbody id="bcnb-zalo-gaps-table-body" class="divide-y divide-glassborder">
+                                <tr><td colspan="6" class="px-6 py-8 text-center text-gray-500">Hãy bấm Dò tìm để tạo dữ liệu đối chiếu.</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </section>
             </div>

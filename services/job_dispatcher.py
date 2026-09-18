@@ -2,9 +2,11 @@ import asyncio
 import contextlib
 import json
 import secrets
+import uuid
 from collections import defaultdict
 from copy import deepcopy
 from time import monotonic
+from typing import Any
 
 from db.database import database_context
 from googleform_autosubmit.config import Config
@@ -18,6 +20,7 @@ from repositories.audit_repository import AuditRepository
 from repositories.job_repository import (
     JobCancelledError,
     JobNotFoundError,
+    JobQueueFullError,
     JobRepository,
     JobStateError,
     TERMINAL_STATUSES,
@@ -40,6 +43,13 @@ class JobDispatcher:
         database_path: str | None = None,
         heartbeat_seconds: int | None = None,
         log_manager=None,
+        max_concurrent_jobs: int | None = None,
+        max_queued_jobs: int | None = None,
+        job_timeout_seconds: int | None = None,
+        lease_timeout_seconds: int | None = None,
+        shutdown_grace_seconds: int | None = None,
+        queue_poll_seconds: float | None = None,
+        worker_id: str | None = None,
     ):
         self.job_repo = job_repo or JobRepository()
         self.upload_store = upload_store or UploadStore()
@@ -50,14 +60,55 @@ class JobDispatcher:
             2,
             int(heartbeat_seconds or Config.JOB_HEARTBEAT_SECONDS),
         )
+        self.max_concurrent_jobs = max(
+            1,
+            int(max_concurrent_jobs or Config.MAX_CONCURRENT_JOBS),
+        )
+        self.max_queued_jobs = max(
+            0,
+            int(
+                Config.MAX_QUEUED_JOBS
+                if max_queued_jobs is None
+                else max_queued_jobs
+            ),
+        )
+        self.job_timeout_seconds = max(
+            30,
+            int(job_timeout_seconds or Config.JOB_TIMEOUT_SECONDS),
+        )
+        self.lease_timeout_seconds = max(
+            self.heartbeat_seconds * 2,
+            int(lease_timeout_seconds or Config.LEASE_TIMEOUT_SECONDS),
+        )
+        self.shutdown_grace_seconds = max(
+            1,
+            int(shutdown_grace_seconds or Config.SHUTDOWN_GRACE_SECONDS),
+        )
+        self.queue_poll_seconds = max(
+            0.05,
+            float(queue_poll_seconds or Config.QUEUE_POLL_SECONDS),
+        )
+        self.worker_id = worker_id or uuid.uuid4().hex
         self.log_manager = log_manager
         self._tasks: dict[int, asyncio.Task] = {}
+        self._queue_order: list[int] = []
+        self._slot_semaphore = asyncio.Semaphore(self.max_concurrent_jobs)
+        self._deadline_jobs: set[int] = set()
         self._shutting_down = False
 
     async def _heartbeat_loop(self, job_id: int) -> None:
         while True:
             await asyncio.sleep(self.heartbeat_seconds)
-            if not await self.job_repo.heartbeat(job_id):
+            renew = getattr(self.job_repo, "renew_lease", None)
+            if renew is not None:
+                alive = await renew(
+                    job_id,
+                    self.worker_id,
+                    self.lease_timeout_seconds,
+                )
+            else:
+                alive = await self.job_repo.heartbeat(job_id)
+            if not alive:
                 return
 
     async def _dispatch(self, job: dict) -> None:
@@ -72,11 +123,12 @@ class JobDispatcher:
         elif job_type == "ZALO_SCAN":
             from services.zalo_service import run_zalo_automation
 
-            await run_zalo_automation(
-                job_id,
-                mode_from_job(job),
-                runtime=self.worker_runtime,
-            )
+            scan_kwargs: dict[str, Any] = {"runtime": self.worker_runtime}
+            # Keep legacy/manual jobs compatible while requiring the new
+            # immutable two-week plan whenever the route creates one.
+            if "scan_plan" in payload:
+                scan_kwargs["scan_plan"] = payload.get("scan_plan")
+            await run_zalo_automation(job_id, mode_from_job(job), **scan_kwargs)
         elif job_type == "GOOGLEFORM_OCR":
             from services.googleform_service import run_googleform_ocr
 
@@ -131,12 +183,57 @@ class JobDispatcher:
         with database_scope, use_log_manager(manager):
             await self._run_job_in_context(job_id)
 
+    async def _claim_job(self, job_id: int) -> bool:
+        claim = getattr(self.job_repo, "claim_lease", None)
+        if claim is None:
+            return await self.job_repo.mark_running(job_id)
+        return await claim(
+            job_id,
+            self.worker_id,
+            self.lease_timeout_seconds,
+            deadline_seconds=self.job_timeout_seconds,
+        )
+
+    async def _run_job_with_slot(self, job_id: int) -> None:
+        """Run an admitted job under the bounded worker semaphore and deadline."""
+        try:
+            queue_metadata = getattr(self.job_repo, "set_queue_metadata", None)
+            if queue_metadata is not None:
+                try:
+                    position = self._queue_order.index(job_id)
+                except ValueError:
+                    position = 0
+                await queue_metadata(job_id, position)
+            await self._slot_semaphore.acquire()
+            try:
+                if queue_metadata is not None:
+                    await queue_metadata(job_id, 0)
+                self._deadline_jobs.add(job_id)
+                await asyncio.wait_for(
+                    self._run_job(job_id),
+                    timeout=self.job_timeout_seconds,
+                )
+            finally:
+                self._deadline_jobs.discard(job_id)
+                self._slot_semaphore.release()
+        except asyncio.TimeoutError:
+            with contextlib.suppress(Exception):
+                await self.job_repo.update_job(
+                    job_id,
+                    status="FAILED",
+                    progress=100,
+                    message="Job vuot qua thoi han; da dung an toan.",
+                )
+        finally:
+            with contextlib.suppress(ValueError):
+                self._queue_order.remove(job_id)
+
     async def _run_job_in_context(self, job_id: int) -> None:
         heartbeat_task = None
         started = monotonic()
         job = None
         try:
-            if not await self.job_repo.mark_running(job_id):
+            if not await self._claim_job(job_id):
                 return
             job = await self.job_repo.get_job_record(job_id)
             if not job:
@@ -167,7 +264,7 @@ class JobDispatcher:
                 message="Job đã dừng theo yêu cầu của người vận hành.",
             )
         except asyncio.CancelledError:
-            if not self._shutting_down:
+            if not self._shutting_down and job_id not in self._deadline_jobs:
                 with contextlib.suppress(Exception):
                     await self.job_repo.update_job(
                         job_id,
@@ -207,10 +304,16 @@ class JobDispatcher:
                 )
 
     def status(self) -> dict:
+        active = sum(1 for task in self._tasks.values() if not task.done())
+        queued = max(0, active - self.max_concurrent_jobs)
         return {
-            "active_jobs": sum(
-                1 for task in self._tasks.values() if not task.done()
-            ),
+            "active_jobs": active,
+            "queued_jobs": queued,
+            "max_concurrent_jobs": self.max_concurrent_jobs,
+            "max_queued_jobs": self.max_queued_jobs,
+            "queue_capacity": self.max_concurrent_jobs + self.max_queued_jobs,
+            "queue_saturated": active >= self.max_concurrent_jobs + self.max_queued_jobs,
+            "worker_id": self.worker_id,
             "shutting_down": self._shutting_down,
         }
 
@@ -220,10 +323,25 @@ class JobDispatcher:
         existing = self._tasks.get(job_id)
         if existing and not existing.done():
             return existing
-        task = asyncio.create_task(self._run_job(job_id), name=f"job-{job_id}")
+        active = sum(1 for task in self._tasks.values() if not task.done())
+        capacity = self.max_concurrent_jobs + self.max_queued_jobs
+        if active >= capacity:
+            raise JobQueueFullError(
+                "Hàng đợi worker đã đầy; vui lòng thử lại sau.",
+                limit=capacity,
+                position=None,
+            )
+        self._queue_order.append(job_id)
+        task = asyncio.create_task(
+            self._run_job_with_slot(job_id),
+            name=f"job-{job_id}",
+        )
         self._tasks[job_id] = task
         def discard_completed(_task: asyncio.Task) -> None:
-            self._tasks.pop(job_id, None)
+            if self._tasks.get(job_id) is _task:
+                self._tasks.pop(job_id, None)
+                with contextlib.suppress(ValueError):
+                    self._queue_order.remove(job_id)
 
         task.add_done_callback(discard_completed)
         return task
@@ -382,18 +500,42 @@ class JobDispatcher:
     async def recover_jobs(self) -> list[int]:
         self._shutting_down = False
         self.worker_runtime.reset_locks()
+        if not any(not task.done() for task in self._tasks.values()):
+            self._slot_semaphore = asyncio.Semaphore(self.max_concurrent_jobs)
         job_ids = await self.job_repo.prepare_recovery()
         for job_id in job_ids:
-            self.schedule_job(job_id)
+            try:
+                self.schedule_job(job_id)
+            except JobQueueFullError:
+                # Keep the durable PENDING row; a later operator retry or
+                # process restart will admit it when capacity is available.
+                break
         return job_ids
 
     async def shutdown_jobs(self) -> None:
         self._shutting_down = True
         tasks = [task for task in self._tasks.values() if not task.done()]
-        for task in tasks:
+        active_ids = [job_id for job_id, task in self._tasks.items() if not task.done()]
+        worker_tasks = [
+            task for task in tasks if task.get_name().startswith("job-")
+        ]
+        unmanaged_tasks = [task for task in tasks if task not in worker_tasks]
+        if worker_tasks:
+            _done, pending = await asyncio.wait(
+                worker_tasks,
+                timeout=self.shutdown_grace_seconds,
+            )
+            for task in pending:
+                task.cancel()
+        for task in unmanaged_tasks:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        reconcile = getattr(self.job_repo, "reconcile_shutdown", None)
+        if reconcile is not None:
+            with contextlib.suppress(Exception):
+                await reconcile(active_ids)
+        self._queue_order.clear()
 
 
 _legacy_dispatcher = None

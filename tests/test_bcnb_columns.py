@@ -4,6 +4,7 @@ from services.bcnb_safety import (
     resolve_class_lesson_columns,
     resolve_lms_columns,
     resolve_report_columns,
+    resolve_schedule_columns,
 )
 
 
@@ -61,6 +62,7 @@ class BcnbColumnResolutionTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(await resolve_report_columns(page), (0, 1, 7))
+        self.assertEqual(await resolve_schedule_columns(page), (0, 1, 2, 6))
         self.assertEqual(await resolve_lms_columns(page), (0, 9))
         self.assertEqual(await resolve_class_lesson_columns(page), (0, 1))
 

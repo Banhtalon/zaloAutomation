@@ -16,7 +16,7 @@ required_files = {
     "tests/test_googleform_submit_service.py",
     "tests/test_basic_repositories.py",
     "tests/test_evidence_store.py",
-    "PHASE4_EXTERNAL_BOUNDARIES.md",
+    "PROJECT_SUMMARY.md",
 }
 missing = sorted(path for path in required_files if not (ROOT / path).exists())
 if missing:

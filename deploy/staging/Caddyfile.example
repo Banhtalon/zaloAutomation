@@ -1,0 +1,16 @@
+# Phase 9B private staging reverse proxy.
+# Replace staging.example.com with the real hostname before use.
+# Caddy obtains/renews TLS for a public hostname; never expose Uvicorn directly.
+staging.example.com {
+    encode zstd gzip
+
+    reverse_proxy 127.0.0.1:8000
+
+    header {
+        -Server
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "no-referrer"
+        Permissions-Policy "camera=(), microphone=(), geolocation=()"
+    }
+}

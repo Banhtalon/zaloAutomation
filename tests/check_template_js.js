@@ -47,6 +47,7 @@ const requiredIds = [
   'header-title', 'status-text', 'results-table', 'searchInput',
   'paste-area', 'ocr-results-table', 'mapping-table', 'form-history-table',
   'groups-table-body', 'ignored-groups-table-body', 'full-log-terminal',
+  'bcnb-zalo-gaps-summary', 'bcnb-zalo-gaps-stale', 'bcnb-zalo-gaps-table-body',
   'job-timeline', 'lmsModal', 'lmsFileInput', 'image-modal', 'modal-image',
 ];
 for (const id of requiredIds) {
@@ -229,7 +230,7 @@ async function checkJobPollingAndTerminalDetails() {
   );
   assertFrontend(harness.timers.size === 1, 'Active job must schedule exactly one poll');
   const scheduledPoll = [...harness.timers.entries()][0];
-  assertFrontend(scheduledPoll[1].delay === 2000, 'Active job poll interval must be 2 seconds');
+  assertFrontend(scheduledPoll[1].delay === 3000, 'Active job poll interval must be 3 seconds');
   harness.timers.delete(scheduledPoll[0]);
   await scheduledPoll[1].callback();
   await flushAsyncWork();
@@ -321,10 +322,164 @@ async function checkGoogleFormHistoryAndHttpError() {
   );
 }
 
+async function checkLazyIncrementalLogs() {
+  const requests = [];
+  const harness = createFrontendHarness(async (url) => {
+    requests.push(url);
+    if (url === '/api/jobs/latest') {
+      return { ok: true, status: 200, json: async () => null };
+    }
+    if (url === '/api/logs?after=0&limit=100') {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          records: [{ timestamp: '2026-08-14T10:00:00Z', message: 'first' }],
+          cursor: 1,
+        }),
+      };
+    }
+    if (url === '/api/logs?after=1&limit=100') {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          records: [{ timestamp: '2026-08-14T10:00:01Z', message: 'second' }],
+          cursor: 2,
+        }),
+      };
+    }
+    throw new Error(`Unexpected request in incremental log harness: ${url}`);
+  });
+  harness.context.document.getElementById('tab-logs').classList.add('active');
+  vm.runInContext(scriptSourceByPath.get('/static/js/state.js'), harness.context);
+  vm.runInContext(jobsSource, harness.context);
+  await flushAsyncWork();
+  await vm.runInContext('refreshLogs()', harness.context);
+  await flushAsyncWork();
+
+  assertFrontend(
+    requests.includes('/api/logs?after=0&limit=100')
+      && requests.includes('/api/logs?after=1&limit=100'),
+    'Visible log tab must request only incremental records using a cursor',
+  );
+  const terminal = harness.elements.get('full-log-terminal');
+  assertFrontend(terminal.children.length === 2, 'Incremental logs must append instead of rebuilding duplicates');
+
+  harness.context.document.getElementById('tab-logs').classList.remove('active');
+  const requestCount = requests.length;
+  await vm.runInContext('refreshLogs()', harness.context);
+  assertFrontend(requests.length === requestCount, 'Hidden log tab must not poll the log endpoint');
+}
+
+async function checkRequiredWeekDashboardView() {
+  const harness = createFrontendHarness(async (url) => {
+    if (url === '/api/jobs/latest') {
+      return { ok: true, status: 200, json: async () => null };
+    }
+    throw new Error(`Unexpected request in required-week harness: ${url}`);
+  });
+  vm.runInContext(scriptSourceByPath.get('/static/js/state.js'), harness.context);
+  vm.runInContext(jobsSource, harness.context);
+  await flushAsyncWork();
+
+  const results = [
+    {
+      group: 'GA37 W32',
+      person: 'Teacher',
+      status: '✅ Đã nộp – Có minh chứng',
+      scan_target: { week: 32, year: 2026, lesson: '3', class_date: '07/08/2026' },
+    },
+    {
+      group: 'GA37 W33',
+      person: 'Teacher',
+      status: '❌ Chưa tìm thấy trong khoảng đã kiểm chứng – Có minh chứng',
+      scan_target: { week: 33, year: 2026, lesson: '4', class_date: '14/08/2026' },
+    },
+    {
+      group: 'PTA12 W32',
+      person: 'Teacher',
+      status: '⚠️ Không đủ bằng chứng – Cần kiểm tra thủ công',
+      scan_target: { week: 32, year: 2026, lesson: '3', class_date: '07/08/2026' },
+    },
+  ];
+  vm.runInContext('zaloScanPlan = {required_week: {week: 32, year: 2026}}', harness.context);
+  vm.runInContext(`renderZaloResults(${JSON.stringify(results)})`, harness.context);
+  const table = harness.elements.get('results-table');
+  assertFrontend(table.children.length === 2, 'Dashboard must render only required-week rows');
+  assertFrontend(table.children.every(row => row.children[0].textContent.includes('W32')), 'Dashboard must hide latest-week rows');
+  assertFrontend(harness.elements.get('count-total').innerText === 2, 'Dashboard metrics must count required-week rows only');
+
+  vm.runInContext('zaloScanPlan = {required_week: {week: 33, year: 2026}}; renderZaloResults(latestZaloResults, true)', harness.context);
+  assertFrontend(harness.elements.get('results-table').children.length === 1, 'Dashboard must follow the refreshed required week');
+  assertFrontend(harness.elements.get('results-table').children[0].children[0].textContent.includes('W33'), 'Dashboard must render the refreshed required-week target');
+
+  vm.runInContext('renderZaloResults([])', harness.context);
+  assertFrontend(harness.elements.get('count-total').innerText === '0', 'Empty Zalo job must clear old metrics');
+  assertFrontend(harness.elements.get('results-table').children.length === 1, 'Empty Zalo job must render one empty-state row');
+  assertFrontend(vm.runInContext('latestZaloResults.length', harness.context) === 0, 'Empty Zalo job must clear old target rows');
+}
+
+async function checkBcnbZaloGapView() {
+  let shouldFail = false;
+  const requests = [];
+  const harness = createFrontendHarness(async (url) => {
+    requests.push(url);
+    if (url !== '/api/discovery/bcnb-zalo-gaps') {
+      throw new Error(`Unexpected request in BCNB/Zalo gap harness: ${url}`);
+    }
+    if (shouldFail) throw new Error('temporary read failure');
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        available: true,
+        stale: false,
+        summary: {
+          source_count: 4,
+          matched_count: 2,
+          missing_count: 1,
+          ambiguous_count: 1,
+          transition_review_count: 0,
+        },
+        items: [
+          {
+            class_code: 'VT-C4K-GA01',
+            status: 'MISSING_ZALO_GROUP',
+            teachers: ['Teacher A'],
+            periods: [{ week: 32, year: 2026, lesson: '7', class_date: '07/08/2026' }],
+          },
+          {
+            class_code: '<img src=x onerror=alert(1)>',
+            status: 'AMBIGUOUS_ZALO_GROUP',
+            teachers: ['Teacher B'],
+            periods: [{ week: 33, year: 2026, lesson: '8', class_date: '14/08/2026' }],
+          },
+        ],
+      }),
+    };
+  });
+  vm.runInContext(scriptSourceByPath.get('/static/js/groups.js'), harness.context);
+  await vm.runInContext('fetchBcnbZaloGaps()', harness.context);
+
+  const table = harness.elements.get('bcnb-zalo-gaps-table-body');
+  assertFrontend(requests[0] === '/api/discovery/bcnb-zalo-gaps', 'Gap view must use the read-only snapshot endpoint');
+  assertFrontend(table.children.length === 2, 'Gap view must render every review item');
+  assertFrontend(table.children[1].children[1].textContent === '<img src=x onerror=alert(1)>', 'Gap values must render through textContent');
+  assertFrontend(harness.elements.get('bcnb-zalo-gaps-summary').textContent.includes('1 chưa có nhóm'), 'Gap summary must expose missing class count');
+
+  shouldFail = true;
+  await vm.runInContext('fetchBcnbZaloGaps()', harness.context);
+  assertFrontend(table.children.length === 2, 'A refresh failure must preserve the last good gap list');
+}
+
 async function runFrontendBehaviorChecks() {
   await checkJobPollingAndTerminalDetails();
   await checkGoogleFormHistoryAndHttpError();
-  console.log(`template-js-contract-ok scripts=${scriptSources.length} handlers=${handlerNames.size} behavior=2`);
+  await checkLazyIncrementalLogs();
+  await checkRequiredWeekDashboardView();
+  await checkBcnbZaloGapView();
+  console.log(`template-js-contract-ok scripts=${scriptSources.length} handlers=${handlerNames.size} behavior=5`);
 }
 
 runFrontendBehaviorChecks().catch(error => {

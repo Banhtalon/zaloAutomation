@@ -139,6 +139,34 @@ class BcnbActionTests(unittest.IsolatedAsyncioTestCase):
             "B" * 64,
         )
 
+    async def test_dry_run_never_clicks_checkbox(self):
+        page, checkbox, audit_repo, job_repo = self.make_dependencies()
+
+        result = await execute_verified_checkbox_action(
+            page=page,
+            checkbox=checkbox,
+            audit_repo=audit_repo,
+            job_repo=job_repo,
+            job_id=3,
+            action_key="dry-run-action",
+            action_type="BCNB_REPORT_TICK",
+            class_code="VT-JSB14",
+            column_kind="report",
+            week=27,
+            year=2026,
+            lesson="14",
+            execution_mode="dry-run",
+            reason={"test": True},
+        )
+
+        self.assertEqual(result, "DRY_RUN")
+        checkbox.check.assert_not_awaited()
+        job_repo.ensure_not_cancelled.assert_not_awaited()
+        self.assertEqual(
+            audit_repo.complete_action.await_args.kwargs,
+            {"outcome": "DRY_RUN", "after_state": {"checked": False}},
+        )
+
     async def test_already_checked_production_state_is_audited_without_clicking(self):
         page, checkbox, audit_repo, job_repo = self.make_dependencies()
         checkbox.is_checked.return_value = True

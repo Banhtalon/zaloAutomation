@@ -123,7 +123,7 @@ def eligible_for_archive(
     *,
     ended_at: datetime | None,
     now: datetime,
-    retention_days: int = 14,
+    retention_days: int = 7,
 ) -> bool:
     if LifecycleStatus(status) != LifecycleStatus.ENDED_CONFIRMED or ended_at is None:
         return False

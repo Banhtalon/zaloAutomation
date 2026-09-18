@@ -6,7 +6,14 @@ _browser_job_lock = asyncio.Lock()
 
 
 @asynccontextmanager
-async def exclusive_browser_job(job_id, job_repo, waiting_message=None, *, lock=None):
+async def exclusive_browser_job(
+    job_id,
+    job_repo,
+    waiting_message=None,
+    *,
+    lock=None,
+    process_lock=None,
+):
     """Serialize jobs that share the persistent Chrome/Zalo profile."""
     active_lock = lock or _browser_job_lock
     if active_lock.locked():
@@ -27,10 +34,17 @@ async def exclusive_browser_job(job_id, job_repo, waiting_message=None, *, lock=
             break
         except asyncio.TimeoutError:
             continue
+    process_lock_acquired = False
     try:
         await check_cancelled()
+        if process_lock is not None:
+            await process_lock.acquire()
+            process_lock_acquired = True
+            await check_cancelled()
         yield
     finally:
+        if process_lock_acquired:
+            await process_lock.release()
         active_lock.release()
 
 

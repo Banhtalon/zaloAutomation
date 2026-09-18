@@ -13,7 +13,7 @@ class RaisingGroupRepository:
     async def get_all_groups(self):
         raise RuntimeError("database password=super-secret")
 
-    async def remove_ignored_group(self, _name):
+    async def restore_ignored_group(self, _name):
         raise RuntimeError("database password=super-secret")
 
 

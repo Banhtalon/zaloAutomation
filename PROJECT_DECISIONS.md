@@ -795,3 +795,65 @@
   independent Codex/Terra review remains required.
 - Supersedes: None. Extends DEC-024 without changing its scope or safety
   boundaries.
+
+## DEC-026 — Bridge-only product implementation in LOCAL_AUTO
+
+- Date: 2026-09-11
+- Status: Accepted by Owner
+- Context: v10 previously allowed Lead to code and completion readiness accepted
+  a manually recorded implementer session. That did not prove the configured
+  worker had been invoked and could spend Lead/Codex tokens on implementation.
+- Decision: In LOCAL_AUTO, Sol Medium Lead scopes, classifies, coordinates
+  deterministic gates and reports but does not edit product code or product
+  tests. Gemini 3.8 Flash High is the default worker. All gpt-6-astra senior and
+  elevated-review bindings use effort `low`. A bridge-generated receipt bound
+  to config, frozen task, execution history and exact candidate code is required
+  before implementation gates can be recognized, review can begin or workflow
+  completion can be reported. A task-packet session name is insufficient.
+- Budget: initial Gemini gets two successful repair rounds, followed by at most
+  one Astra-low senior pass. Initial Astra gets one successful repair. Failed or
+  interrupted provider calls preserve pending state and do not consume a
+  successful repair round.
+- Exception: Lead product implementation requires explicit Owner intent, is
+  marked `OWNER_AUTHORIZED_ASSISTED_LEAD`, and is reported as ASSISTED. Workflow
+  completion never grants merge or publish authority.
+- Consequence: bridge source/config changes invalidate the prior activation
+  receipt. The project returns to ASSISTED until a fresh real Windows worker →
+  gate → independent reviewer → repair pilot, quota drill and activation receipt
+  pass under the new rules.
+
+## DEC-027 — Retire QQ AI Workflow and bridge
+
+- Date: 2026-09-17
+- Status: Accepted by Owner
+- Decision: Remove the QQ AI Workflow V10 control layer, its bridge, local task
+  packets, project-specific AI-agent configuration and its entry points. Keep
+  the Zalo Automation application, its safety controls, product documentation
+  and historical project decisions.
+- Consequence: No V10 packet, bridge receipt, routing mode or AI-workflow
+  instruction is active in this repository. A recovery archive is stored outside
+  the repository; restoring it is a separate explicit decision.
+
+## DEC-028 — Chuẩn hóa bộ tài liệu hiện hành
+
+- Date: 2026-09-18
+- Status: Accepted by Owner
+- Context: Tài liệu dự án bị phân tán giữa nhiều phase report, canary report và
+  kế hoạch cũ. `PROJECT_SUMMARY.md`, `PROJECT_STATE.md`,
+  `PROJECT_COMPLETION_PLAN.md` và `VERSION.md` có số liệu mâu thuẫn với source,
+  khiến AI mới có thể hiểu nhầm lịch sử là trạng thái hiện tại.
+- Decision: Dùng bộ tài liệu trung tâm gồm `README.md`, `AGENTS.md`,
+  `PROJECT_SUMMARY.md`, `PROJECT_STATE.md`, `PROJECT_COMPLETION_PLAN.md`,
+  `PROJECT_DECISIONS.md`, `VERSION.md` và contract nghiệp vụ
+  `CLASS_LIFECYCLE.md`. Kết quả task cập nhật ngắn vào `PROJECT_STATE.md`; không
+  tạo report theo từng lần sửa nếu không có yêu cầu lưu bằng chứng độc lập.
+  Loại bỏ phase report, kế hoạch thực thi cũ và báo cáo canary đã được thay thế.
+- Consequences: AI có một đường đọc ngắn và không phải tự chọn giữa nhiều file
+  có nhãn “current”. Chi tiết lịch sử bị loại khỏi Git nhưng có bản ZIP khôi
+  phục bên ngoài repository. `PROJECT_DECISIONS.md` vẫn giữ nguyên lịch sử nên
+  các tham chiếu cũ có thể trỏ tới artifact đã được lưu trong bản ZIP.
+- Evidence: Review source ngày 2026-09-18 xác nhận 72 file Python production,
+  43 route, 19 bảng, 6 loại job, 55 file test và 524 hàm test. Backup trước sửa:
+  `F:\FINAL_PROJECT\zaloAutomation-docs-before-normalize-20260918-093444.zip`.
+- Supersedes: Cách tổ chức report theo từng task trong DEC-001; không thay đổi
+  các quyết định an toàn hoặc nghiệp vụ khác.

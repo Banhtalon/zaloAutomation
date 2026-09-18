@@ -65,6 +65,7 @@
                                 <select id="map-type" class="w-full bg-black/30 border border-glassborder rounded-lg px-2 py-2 text-sm text-gray-300 outline-none">
                                     <option value="text">Văn bản</option>
                                     <option value="radio">Trắc nghiệm</option>
+                                    <option value="select">Hộp chọn (Dropdown)</option>
                                 </select>
                             </div>
                             <div class="flex-1">
@@ -94,7 +95,14 @@
                     <div class="glass-panel p-6 flex flex-col relative">
                         <div class="flex items-center justify-between mb-4">
                             <h3 class="text-sm font-bold text-white tracking-wide text-balance">Lịch sử Nộp Form</h3>
-                            <button type="button" aria-label="Làm mới lịch sử nộp Form" onclick="fetchGoogleFormHistory()" class="text-gray-400 hover:text-white"><i class="fa-solid fa-rotate-right"></i></button>
+                            <div class="flex items-center gap-2">
+                                <button type="button" aria-label="Xóa toàn bộ lịch sử nộp Form" onclick="clearGoogleFormHistory()" title="Xóa toàn bộ lịch sử" class="text-xs text-rose-400 hover:text-rose-300 hover:bg-rose-500/10 px-2.5 py-1 rounded transition border border-rose-500/20">
+                                    <i class="fa-solid fa-trash-can mr-1"></i>Xóa lịch sử
+                                </button>
+                                <button type="button" aria-label="Làm mới lịch sử nộp Form" onclick="fetchGoogleFormHistory()" class="text-gray-400 hover:text-white p-1">
+                                    <i class="fa-solid fa-rotate-right"></i>
+                                </button>
+                            </div>
                         </div>
                         
                         <div class="flex-1 bg-black/20 border border-glassborder rounded-xl overflow-y-auto shadow-inner">
@@ -104,10 +112,11 @@
                                         <th class="px-4 py-3">Thời gian</th>
                                         <th class="px-4 py-3">Học viên</th>
                                         <th class="px-4 py-3">Trạng thái</th>
+                                        <th class="px-4 py-3 text-center">Bằng chứng</th>
                                     </tr>
                                 </thead>
                                 <tbody id="form-history-table" class="divide-y divide-glassborder bg-transparent">
-                                    <tr><td colspan="3" class="px-4 py-6 text-center text-gray-500 border-none">Đang tải lịch sử...</td></tr>
+                                    <tr><td colspan="4" class="px-4 py-6 text-center text-gray-500 border-none">Đang tải lịch sử...</td></tr>
                                 </tbody>
                             </table>
                         </div>

@@ -1,12 +1,14 @@
+import asyncio
 import os
 import tempfile
 import unittest
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 from services.zalo_evidence import (
     INSUFFICIENT_EVIDENCE,
+    NOT_FOUND_VERIFIED,
     SUBMITTED_LATE_VERIFIED,
     SUBMITTED_VERIFIED,
 )
@@ -16,15 +18,19 @@ from services.zalo_scan_evidence import (
     _required_window_start,
     _zalo_sync_is_incomplete,
     build_empty_evidence_result,
+    detect_history_gap,
+    EvidenceBoundsExceeded,
     scan_open_zalo_chat,
 )
 
 
 class FakeDateHeaders:
-    def __init__(self, value):
+    def __init__(self, value, *, scroll_error=None):
         self.value = value
         self.last = self
         self.scroll_into_view_if_needed = AsyncMock()
+        if scroll_error is not None:
+            self.scroll_into_view_if_needed.side_effect = scroll_error
 
     async def count(self):
         return 1
@@ -34,10 +40,13 @@ class FakeDateHeaders:
 
 
 class FakeMessage:
-    def __init__(self, text, date_header):
+    def __init__(self, text, date_header, *, date_scroll_error=None):
         self.text = text
         self.date_header = date_header
-        self.date_headers = FakeDateHeaders(date_header)
+        self.date_headers = FakeDateHeaders(
+            date_header,
+            scroll_error=date_scroll_error,
+        )
         self.scroll_into_view_if_needed = AsyncMock()
 
     async def inner_text(self):
@@ -80,6 +89,38 @@ class FakePage:
             evidence.write(f"proof-{len(self.screenshots)}".encode())
 
 
+class CountingListLocator(FakeListLocator):
+    def __init__(self, values, *, reported_count=None, fail_on_all=False):
+        super().__init__(values)
+        self.reported_count = len(values) if reported_count is None else reported_count
+        self.fail_on_all = fail_on_all
+        self.count_calls = 0
+
+    async def count(self):
+        self.count_calls += 1
+        return self.reported_count
+
+    async def all(self):
+        if self.fail_on_all:
+            raise AssertionError("message materialization must be bounded first")
+        return await super().all()
+
+
+class CountingPage(FakePage):
+    def __init__(self, messages, *, reported_count=None, fail_on_all=False):
+        super().__init__(messages)
+        self.message_locator = CountingListLocator(
+            messages,
+            reported_count=reported_count,
+            fail_on_all=fail_on_all,
+        )
+
+    def locator(self, selector):
+        if selector == '[data-component="bubble-message"]':
+            return self.message_locator
+        return super().locator(selector)
+
+
 class FakeVisibleBanner:
     first = None
 
@@ -109,8 +150,37 @@ class FakeNoDateMessage(FakeMessage):
 
 
 class FakeFailingScreenshotPage(FakePage):
+    def __init__(self, messages, *, error_message="screenshot unavailable"):
+        super().__init__(messages)
+        self.error_message = error_message
+
     async def screenshot(self, *, path):
-        raise RuntimeError("screenshot unavailable")
+        raise RuntimeError(self.error_message)
+
+
+class HangingDateHeaders(FakeDateHeaders):
+    def __init__(self, value):
+        super().__init__(value)
+        self.scroll_into_view_if_needed = AsyncMock(side_effect=self._hang)
+
+    async def _hang(self, **_kwargs):
+        await asyncio.Event().wait()
+
+
+class HangingCaptureMessage(FakeMessage):
+    def __init__(self, text, date_header):
+        super().__init__(text, date_header)
+        self.date_headers = HangingDateHeaders(date_header)
+
+
+class HangingScreenshotPage(FakePage):
+    async def screenshot(self, *, path):
+        await asyncio.Event().wait()
+
+
+class MissingScreenshotFilePage(FakePage):
+    async def screenshot(self, *, path):
+        return None
 
 
 class FakeBrokenDateMessage(FakeMessage):
@@ -138,6 +208,82 @@ class FakeHiddenBannerPage:
 
 
 class ZaloScanEvidenceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_canary_message_bound_rejects_before_materialization(self):
+        page = CountingPage(
+            [],
+            reported_count=1001,
+            fail_on_all=True,
+        )
+        with self.assertRaises(EvidenceBoundsExceeded):
+            await scan_open_zalo_chat(
+                page,
+                job_id=160,
+                screenshots_dir=".",
+                group_name="MindX - VT-C4K-GB40",
+                actual_group_name="MindX - VT-C4K-GB40",
+                person="Teacher",
+                class_date_str="29/07/2026",
+                today=datetime(2026, 7, 29, tzinfo=timezone.utc),
+                ensure_not_cancelled=AsyncMock(),
+                capture_max_messages=1000,
+            )
+        self.assertEqual(page.message_locator.count_calls, 1)
+
+    async def test_canary_bounds_and_window_are_validated(self):
+        page = FakePage([])
+        common = {
+            "page": page,
+            "job_id": 161,
+            "screenshots_dir": ".",
+            "group_name": "MindX - VT-C4K-GB40",
+            "actual_group_name": "MindX - VT-C4K-GB40",
+            "person": "Teacher",
+            "class_date_str": "29/07/2026",
+            "today": datetime(2026, 7, 29, tzinfo=timezone.utc),
+            "ensure_not_cancelled": AsyncMock(),
+        }
+        with self.assertRaises(EvidenceBoundsExceeded):
+            await scan_open_zalo_chat(**common, capture_max_scrolls=0)
+        with self.assertRaises(EvidenceBoundsExceeded):
+            await scan_open_zalo_chat(**common, capture_max_messages=1001)
+        with self.assertRaises(ValueError):
+            await scan_open_zalo_chat(
+                **common,
+                capture_window_start=datetime(2026, 7, 17),
+            )
+        with self.assertRaises(ValueError):
+            await scan_open_zalo_chat(
+                **common,
+                capture_window_start=datetime(2026, 7, 18, tzinfo=timezone.utc),
+                capture_window_end=datetime(2026, 7, 17, tzinfo=timezone.utc),
+            )
+
+    async def test_canary_window_uses_bounded_count_and_real_extraction(self):
+        messages = [
+            FakeMessage("Tin nhắn thông thường " * 5, "17/07/2026"),
+            FakeMessage("Trao đổi lớp học thông thường " * 5, "Hôm nay"),
+        ]
+        page = CountingPage(messages)
+        with tempfile.TemporaryDirectory() as root:
+            result = await scan_open_zalo_chat(
+                page,
+                job_id=162,
+                screenshots_dir=root,
+                group_name="MindX - VT-C4K-GB40",
+                actual_group_name="MindX - VT-C4K-GB40",
+                person="Teacher",
+                class_date_str="29/07/2026",
+                today=datetime(2026, 7, 29, tzinfo=timezone.utc),
+                ensure_not_cancelled=AsyncMock(),
+                capture_max_scrolls=2,
+                capture_max_messages=1000,
+                capture_window_start=datetime(2026, 7, 17, tzinfo=timezone.utc),
+                capture_window_end=datetime(2026, 7, 27, tzinfo=timezone.utc),
+            )
+        self.assertEqual(result["evidence"]["required_window_start"], "2026-07-17")
+        self.assertEqual(result["evidence"]["required_window_end"], "2026-07-27")
+        self.assertGreaterEqual(page.message_locator.count_calls, 3)
+
     async def test_wrong_open_chat_header_fails_closed_before_classification(self):
         messages = [
             FakeMessage("Tin nhắn cũ thông thường " * 5, "18/07/2026"),
@@ -238,6 +384,239 @@ class ZaloScanEvidenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(candidate["decision"], "SUBMITTED_LATE_ACCEPTED")
         self.assertIn("CONTENT_DATE_MISMATCH", result["evidence"]["warnings"][0])
 
+    async def test_gb40_next_class_date_uses_proven_previous_lesson_date(self):
+        messages = [
+            FakeMessage("Tin nhắn cũ thông thường " * 5, "22/07/2026"),
+            FakeMessage(
+                "Kính gửi quý phụ huynh. Tổng kết sau buổi học số 6 - 26/07/2026. "
+                "Mã lớp: VT-C4K-GB40. NỘI DUNG BUỔI HỌC và NHẬN XÉT học viên. "
+                "Nội dung buổi học kế tiếp: 02/08/2026.",
+                "29/07/2026",
+            ),
+        ]
+        page = FakePage(messages)
+
+        with tempfile.TemporaryDirectory() as root:
+            result = await scan_open_zalo_chat(
+                page,
+                job_id=134,
+                screenshots_dir=root,
+                group_name="MindX - Lập trình Game VT-C4K-GB40 CN",
+                actual_group_name="MindX - Lập trình Game VT-C4K-GB40 CN",
+                person="Teacher",
+                class_date_str="02/08/2026",
+                next_class_date_str="02/08/2026",
+                today=datetime(2026, 7, 29),
+                ensure_not_cancelled=AsyncMock(),
+            )
+
+        candidate = result["evidence"]["classifier_result"]["candidates"][0]
+        self.assertEqual(result["evidence_state"], SUBMITTED_VERIFIED)
+        self.assertTrue(result["submitted_for_bcnb"])
+        self.assertEqual(candidate["ui_sent_at"], "2026-07-29")
+        self.assertEqual(candidate["previous_lesson_date"], "2026-07-26")
+        self.assertEqual(candidate["date_reference"], "previous_lesson_date_from_content")
+        self.assertEqual(
+            result["evidence"]["date_context"]["previous_lesson_date"],
+            "2026-07-26",
+        )
+
+    async def test_armb15_uses_authoritative_bcnb_week_not_the_date_iso_week(self):
+        messages = [
+            FakeMessage("Tin nhắn cũ thông thường " * 5, "27/07/2026"),
+            FakeMessage(
+                "Kính gửi quý phụ huynh. Update sau buổi học số 11 - 03/08/2026. "
+                "Mã lớp: VT-ROB-ARMB15. NỘI DUNG BUỔI HỌC và NHẬN XÉT học viên.",
+                "06/08/2026",
+            ),
+        ]
+        page = FakePage(messages)
+
+        with tempfile.TemporaryDirectory() as root:
+            result = await scan_open_zalo_chat(
+                page,
+                job_id=136,
+                screenshots_dir=root,
+                group_name="MindX - Robotics-VT-ROB-ARMB15 T2 (18H-20H)",
+                actual_group_name="MindX - Robotics-VT-ROB-ARMB15 T2 (18H-20H)",
+                person="Teacher",
+                class_date_str="27/07/2026",
+                scan_target={
+                    "week": 33,
+                    "year": 2026,
+                    "class_code": "VT-ROB-ARMB15",
+                    "lesson": "11",
+                    "class_date": "03/08/2026",
+                    "zalo_deadline": "20:00 05/08/2026",
+                },
+                today=datetime(2026, 8, 6),
+                ensure_not_cancelled=AsyncMock(),
+            )
+
+        candidate = result["evidence"]["classifier_result"]["candidates"][0]
+        context = result["evidence"]["date_context"]
+        self.assertTrue(result["submitted_for_bcnb"])
+        self.assertEqual(candidate["lesson_date"], "2026-08-03")
+        self.assertEqual(candidate["ui_sent_at"], "2026-08-06")
+        self.assertEqual(context["target_week"], 33)
+        self.assertEqual(context["target_year"], 2026)
+        self.assertEqual(context["target_week_source"], "BCNB_SERVER")
+        self.assertEqual(context["lesson_date_source"], "bcnb_target_date")
+
+    async def test_ga35_style_stale_template_header_is_corrected_only_with_bai_signal(self):
+        messages = [
+            FakeMessage("Tin nhắn cũ thông thường " * 5, "18/07/2026"),
+            FakeMessage(
+                "Kính gửi quý phụ huynh. Update sau buổi học số 5 - 26/07/2026. "
+                "Mã lớp: VT-C4K-GA35. NỘI DUNG BUỔI HỌC và NHẬN XÉT học viên. "
+                "Bài số 6: Lập trình di chuyển với GML. NHIỆM VỤ KHI VỀ NHÀ.",
+                "06/08/2026",
+            ),
+        ]
+        target = {
+            "week": 32,
+            "year": 2026,
+            "class_code": "VT-C4K-GA35",
+            "lesson": "6",
+            "class_date": "02/08/2026",
+            "zalo_deadline": "12:00 04/08/2026",
+        }
+
+        with tempfile.TemporaryDirectory() as root:
+            result = await scan_open_zalo_chat(
+                FakePage(messages),
+                job_id=139,
+                screenshots_dir=root,
+                group_name="MindX - Lập trình Game VT-C4K-GA35 CN",
+                actual_group_name="MindX - Lập trình Game VT-C4K-GA35 CN",
+                person="Teacher",
+                class_date_str="02/08/2026",
+                scan_target=target,
+                today=datetime(2026, 8, 14),
+                ensure_not_cancelled=AsyncMock(),
+            )
+
+        candidate = result["evidence"]["classifier_result"]["candidates"][-1]
+        context = result["evidence"]["date_context"]
+        self.assertEqual(result["evidence_state"], SUBMITTED_VERIFIED)
+        self.assertTrue(result["submitted_for_bcnb"])
+        self.assertEqual(candidate["decision"], "SUBMITTED_DATE_TYPO")
+        self.assertEqual(candidate["target_match"]["decision"], "TARGET_DATE_TYPO_CORRECTED")
+        self.assertEqual(context["target_week"], 32)
+        self.assertEqual(context["lesson_date"], "2026-08-02")
+        self.assertEqual(context["reported_lesson_date"], "2026-07-26")
+        self.assertEqual(context["reported_lesson"], 5)
+        self.assertIn("ghi sai ngày/buổi", result["status_detail"])
+
+    async def test_old_report_is_not_reused_for_a_later_bcnb_target(self):
+        messages = [
+            FakeMessage("Tin nhắn cũ thông thường " * 5, "18/07/2026"),
+            FakeMessage(
+                "Kính gửi quý phụ huynh. Update sau buổi học số 5 - 26/07/2026. "
+                "Mã lớp: VT-C4K-GA35. NỘI DUNG BUỔI HỌC và NHẬN XÉT học viên. "
+                "Bài số 6: Lập trình di chuyển với GML. NHIỆM VỤ KHI VỀ NHÀ.",
+                "06/08/2026",
+            ),
+        ]
+
+        with tempfile.TemporaryDirectory() as root:
+            result = await scan_open_zalo_chat(
+                FakePage(messages),
+                job_id=140,
+                screenshots_dir=root,
+                group_name="MindX - Lập trình Game VT-C4K-GA35 CN",
+                actual_group_name="MindX - Lập trình Game VT-C4K-GA35 CN",
+                person="Teacher",
+                class_date_str="09/08/2026",
+                scan_target={
+                    "week": 33,
+                    "year": 2026,
+                    "class_code": "VT-C4K-GA35",
+                    "lesson": "7",
+                    "class_date": "09/08/2026",
+                    "zalo_deadline": "12:00 11/08/2026",
+                },
+                today=datetime(2026, 8, 14),
+                ensure_not_cancelled=AsyncMock(),
+            )
+
+        candidate = result["evidence"]["classifier_result"]["candidates"][-1]
+        self.assertEqual(result["evidence_state"], NOT_FOUND_VERIFIED)
+        self.assertFalse(result["submitted_for_bcnb"])
+        self.assertEqual(candidate["decision"], "TARGET_BEFORE_CLASS_DATE")
+        self.assertIn("không dùng cho dòng này", result["status_detail"])
+
+    async def test_unconfirmed_stale_header_remains_manual_review(self):
+        messages = [
+            FakeMessage("Tin nhắn cũ thông thường " * 5, "18/07/2026"),
+            FakeMessage(
+                "Kính gửi quý phụ huynh. Update sau buổi học số 5 - 26/07/2026. "
+                "Mã lớp: VT-C4K-GA35. NỘI DUNG BUỔI HỌC và NHẬN XÉT học viên. "
+                "NHIỆM VỤ KHI VỀ NHÀ.",
+                "06/08/2026",
+            ),
+        ]
+
+        with tempfile.TemporaryDirectory() as root:
+            result = await scan_open_zalo_chat(
+                FakePage(messages),
+                job_id=141,
+                screenshots_dir=root,
+                group_name="MindX - Lập trình Game VT-C4K-GA35 CN",
+                actual_group_name="MindX - Lập trình Game VT-C4K-GA35 CN",
+                person="Teacher",
+                class_date_str="02/08/2026",
+                scan_target={
+                    "week": 32,
+                    "year": 2026,
+                    "class_code": "VT-C4K-GA35",
+                    "lesson": "6",
+                    "class_date": "02/08/2026",
+                    "zalo_deadline": "12:00 04/08/2026",
+                },
+                today=datetime(2026, 8, 14),
+                ensure_not_cancelled=AsyncMock(),
+            )
+
+        candidate = result["evidence"]["classifier_result"]["candidates"][-1]
+        self.assertEqual(result["evidence_state"], INSUFFICIENT_EVIDENCE)
+        self.assertFalse(result["submitted_for_bcnb"])
+        self.assertEqual(candidate["decision"], "TARGET_SESSION_AMBIGUOUS")
+        self.assertIn("chưa đủ căn cứ", result["status_detail"])
+
+    async def test_next_class_date_without_previous_date_evidence_is_manual_review(self):
+        messages = [
+            FakeMessage("Tin nhắn cũ thông thường " * 5, "22/07/2026"),
+            FakeMessage(
+                "Kính gửi quý phụ huynh. Báo cáo buổi học. Mã lớp: VT-C4K-GB40. "
+                "NỘI DUNG BUỔI HỌC và NHẬN XÉT học viên.",
+                "29/07/2026",
+            ),
+        ]
+        page = FakePage(messages)
+
+        with tempfile.TemporaryDirectory() as root:
+            result = await scan_open_zalo_chat(
+                page,
+                job_id=135,
+                screenshots_dir=root,
+                group_name="MindX - Lập trình Game VT-C4K-GB40 CN",
+                actual_group_name="MindX - Lập trình Game VT-C4K-GB40 CN",
+                person="Teacher",
+                class_date_str="02/08/2026",
+                next_class_date_str="02/08/2026",
+                today=datetime(2026, 7, 29),
+                ensure_not_cancelled=AsyncMock(),
+            )
+
+        self.assertEqual(result["evidence_state"], INSUFFICIENT_EVIDENCE)
+        self.assertFalse(result["submitted_for_bcnb"])
+        self.assertIn("chưa xác định được buổi học tham chiếu", result["status_detail"])
+        self.assertEqual(
+            result["evidence"]["classifier_result"]["candidates"][0]["decision"],
+            "BEFORE_CLASS_DATE",
+        )
+
     async def test_report_candidate_without_ui_date_fails_closed(self):
         messages = [
             FakeMessage("Tin nhắn cũ thông thường " * 5, "18/07/2026"),
@@ -286,7 +665,7 @@ class ZaloScanEvidenceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(page.screenshots, [])
 
-    async def test_late_report_beyond_six_days_is_evidenced_but_not_submitted(self):
+    async def test_late_report_beyond_six_days_is_evidenced_and_submitted(self):
         messages = [
             FakeMessage("Tin nhắn cũ thông thường " * 5, "18/07/2026"),
             FakeMessage(
@@ -311,8 +690,8 @@ class ZaloScanEvidenceTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(result["evidence_state"], SUBMITTED_LATE_VERIFIED)
-        self.assertFalse(result["submitted_for_bcnb"])
-        self.assertIn("Quá hạn 9 ngày", result["status_detail"])
+        self.assertTrue(result["submitted_for_bcnb"])
+        self.assertIn("Trễ 9 ngày", result["status_detail"])
 
     async def test_invalid_class_date_fails_closed_before_browser_interaction(self):
         page = FakePage([])
@@ -385,6 +764,249 @@ class ZaloScanEvidenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["evidence_state"], INSUFFICIENT_EVIDENCE)
         self.assertFalse(result["submitted_for_bcnb"])
         self.assertIn("Không chụp được ảnh tin nhắn báo cáo", result["status_detail"])
+
+    async def test_report_found_screenshot_error_persists_typed_capture_diagnostic(self):
+        secret_marker = "synthetic-screenshot-secret-marker"
+        messages = [
+            FakeMessage("Tin nhắn cũ thông thường " * 5, "18/07/2026"),
+            FakeMessage(
+                "Kính gửi phụ huynh. Báo cáo buổi học. Mã lớp: VT-C4K-GB40. "
+                "NỘI DUNG và NHẬN XÉT học viên.",
+                "Hôm nay",
+            ),
+        ]
+        page = FakeFailingScreenshotPage(messages, error_message=secret_marker)
+
+        with tempfile.TemporaryDirectory() as root:
+            with (
+                patch("services.zalo_scan_evidence.asyncio.sleep", new=AsyncMock()),
+                patch("services.zalo_scan_evidence.log_message") as capture_log,
+            ):
+                result = await scan_open_zalo_chat(
+                    page,
+                    job_id=150,
+                    screenshots_dir=root,
+                    group_name="MindX - VT-C4K-GB40",
+                    actual_group_name="MindX - VT-C4K-GB40",
+                    person="Teacher",
+                    class_date_str="29/07/2026",
+                    today=datetime(2026, 7, 29),
+                    ensure_not_cancelled=AsyncMock(),
+                    worker_id="scan-7",
+                    attempt=2,
+                )
+
+        classifier = result["evidence"]["classifier_result"]
+        self.assertTrue(classifier["report_found"])
+        self.assertEqual(classifier["decision"], "SUBMITTED_ON_TIME")
+        self.assertEqual(result["evidence_state"], INSUFFICIENT_EVIDENCE)
+        self.assertFalse(result["submitted_for_bcnb"])
+        self.assertIn("đã nhận diện report nhưng không tạo được evidence", result["status_detail"].casefold())
+        diagnostics = result["evidence"].get("capture_diagnostics", [])
+        screenshot_failures = [
+            item for item in diagnostics if item.get("error_code") == "CAPTURE_SCREENSHOT_ERROR"
+        ]
+        self.assertEqual(len(screenshot_failures), 1)
+        self.assertEqual(screenshot_failures[0]["label"], "report")
+        self.assertEqual(screenshot_failures[0]["phase"], "CAPTURE_SCREENSHOT")
+        self.assertIsInstance(screenshot_failures[0]["elapsed_ms"], int)
+        self.assertNotIn(secret_marker, repr(result))
+        self.assertTrue(all(secret_marker not in repr(call) for call in capture_log.call_args_list))
+        capture_calls = [
+            call
+            for call in capture_log.call_args_list
+            if call.kwargs.get("event") == "zalo.scan.capture_telemetry"
+        ]
+        self.assertEqual(len(capture_calls), 1)
+        allowed_log_fields = {
+            "event",
+            "job_id",
+            "worker_id",
+            "phase",
+            "attempt",
+            "elapsed_ms",
+            "page_state",
+            "error_code",
+        }
+        self.assertEqual(set(capture_calls[0].kwargs), allowed_log_fields)
+        self.assertEqual(capture_calls[0].kwargs["job_id"], 150)
+        self.assertEqual(capture_calls[0].kwargs["worker_id"], "scan-7")
+        self.assertEqual(capture_calls[0].kwargs["attempt"], 2)
+        self.assertEqual(capture_calls[0].kwargs["phase"], "CAPTURE_SCREENSHOT")
+        self.assertEqual(capture_calls[0].kwargs["page_state"], "READY")
+        self.assertEqual(capture_calls[0].kwargs["error_code"], "CAPTURE_SCREENSHOT_ERROR")
+        self.assertNotIn("label", capture_calls[0].kwargs)
+        self.assertNotIn("report", repr(capture_calls[0]))
+
+    async def test_detached_date_locator_during_scroll_is_typed_and_sanitized(self):
+        secret_marker = "synthetic-detached-secret-marker"
+        messages = [
+            FakeMessage("Tin nhắn cũ thông thường " * 5, "18/07/2026"),
+            FakeMessage(
+                "Kính gửi phụ huynh. Báo cáo buổi học. Mã lớp: VT-C4K-GB40. "
+                "NỘI DUNG và NHẬN XÉT học viên.",
+                "Hôm nay",
+                date_scroll_error=RuntimeError(secret_marker),
+            ),
+        ]
+        page = FakePage(messages)
+
+        with tempfile.TemporaryDirectory() as root:
+            with (
+                patch("services.zalo_scan_evidence.asyncio.sleep", new=AsyncMock()),
+                patch("services.zalo_scan_evidence.log_message") as capture_log,
+            ):
+                result = await scan_open_zalo_chat(
+                    page,
+                    job_id=151,
+                    screenshots_dir=root,
+                    group_name="MindX - VT-C4K-GB40",
+                    actual_group_name="MindX - VT-C4K-GB40",
+                    person="Teacher",
+                    class_date_str="29/07/2026",
+                    today=datetime(2026, 7, 29),
+                    ensure_not_cancelled=AsyncMock(),
+                )
+
+        self.assertTrue(result["evidence"]["classifier_result"]["report_found"])
+        self.assertEqual(result["evidence_state"], INSUFFICIENT_EVIDENCE)
+        diagnostics = result["evidence"].get("capture_diagnostics", [])
+        self.assertTrue(
+            any(
+                item.get("error_code") == "CAPTURE_SCROLL_ERROR"
+                and item.get("phase") == "CAPTURE_SCROLL"
+                for item in diagnostics
+            )
+        )
+        self.assertNotIn(secret_marker, repr(result))
+        self.assertTrue(all(secret_marker not in repr(call) for call in capture_log.call_args_list))
+
+    async def test_capture_scroll_timeout_returns_in_finite_time_with_typed_code(self):
+        messages = [
+            FakeMessage("Tin nhắn cũ thông thường " * 5, "18/07/2026"),
+            HangingCaptureMessage(
+                "Kính gửi phụ huynh. Báo cáo buổi học. Mã lớp: VT-C4K-GB40. "
+                "NỘI DUNG và NHẬN XÉT học viên.",
+                "Hôm nay",
+            ),
+        ]
+        page = FakePage(messages)
+
+        with tempfile.TemporaryDirectory() as root:
+            with (
+                patch("services.zalo_scan_evidence.asyncio.sleep", new=AsyncMock()),
+                patch("services.zalo_scan_evidence.log_message") as capture_log,
+                patch("services.zalo_scan_evidence.CAPTURE_SCROLL_TIMEOUT_SECONDS", 0.05),
+            ):
+                try:
+                    result = await asyncio.wait_for(
+                        scan_open_zalo_chat(
+                            page,
+                            job_id=152,
+                            screenshots_dir=root,
+                            group_name="MindX - VT-C4K-GB40",
+                            actual_group_name="MindX - VT-C4K-GB40",
+                            person="Teacher",
+                            class_date_str="29/07/2026",
+                            today=datetime(2026, 7, 29),
+                            ensure_not_cancelled=AsyncMock(),
+                        ),
+                        timeout=0.2,
+                    )
+                except asyncio.TimeoutError as exc:
+                    self.fail(f"capture scroll did not return within finite timeout: {exc}")
+
+        self.assertEqual(result["evidence_state"], INSUFFICIENT_EVIDENCE)
+        diagnostics = result["evidence"].get("capture_diagnostics", [])
+        self.assertTrue(
+            any(
+                item.get("error_code") == "CAPTURE_SCROLL_TIMEOUT"
+                and item.get("phase") == "CAPTURE_SCROLL"
+                for item in diagnostics
+            )
+        )
+        self.assertTrue(all("TimeoutError" not in repr(call) for call in capture_log.call_args_list))
+
+    async def test_screenshot_timeout_is_distinct_from_screenshot_error(self):
+        messages = [
+            FakeMessage("Tin nhắn cũ thông thường " * 5, "18/07/2026"),
+            FakeMessage(
+                "Kính gửi phụ huynh. Báo cáo buổi học. Mã lớp: VT-C4K-GB40. "
+                "NỘI DUNG và NHẬN XÉT học viên.",
+                "Hôm nay",
+            ),
+        ]
+        page = HangingScreenshotPage(messages)
+
+        with tempfile.TemporaryDirectory() as root:
+            with (
+                patch("services.zalo_scan_evidence.asyncio.sleep", new=AsyncMock()),
+                patch("services.zalo_scan_evidence.log_message"),
+                patch("services.zalo_scan_evidence.CAPTURE_SCREENSHOT_TIMEOUT_SECONDS", 0.05),
+            ):
+                try:
+                    result = await asyncio.wait_for(
+                        scan_open_zalo_chat(
+                            page,
+                            job_id=153,
+                            screenshots_dir=root,
+                            group_name="MindX - VT-C4K-GB40",
+                            actual_group_name="MindX - VT-C4K-GB40",
+                            person="Teacher",
+                            class_date_str="29/07/2026",
+                            today=datetime(2026, 7, 29),
+                            ensure_not_cancelled=AsyncMock(),
+                        ),
+                        timeout=0.2,
+                    )
+                except asyncio.TimeoutError as exc:
+                    self.fail(f"capture screenshot did not return within finite timeout: {exc}")
+
+        self.assertEqual(result["evidence_state"], INSUFFICIENT_EVIDENCE)
+        diagnostics = result["evidence"].get("capture_diagnostics", [])
+        self.assertTrue(
+            any(
+                item.get("error_code") == "CAPTURE_SCREENSHOT_TIMEOUT"
+                and item.get("phase") == "CAPTURE_SCREENSHOT"
+                for item in diagnostics
+            )
+        )
+
+    async def test_missing_screenshot_file_has_typed_validation_diagnostic(self):
+        messages = [
+            FakeMessage("Tin nhắn cũ thông thường " * 5, "18/07/2026"),
+            FakeMessage(
+                "Kính gửi phụ huynh. Báo cáo buổi học. Mã lớp: VT-C4K-GB40. "
+                "NỘI DUNG và NHẬN XÉT học viên.",
+                "Hôm nay",
+            ),
+        ]
+        page = MissingScreenshotFilePage(messages)
+
+        with tempfile.TemporaryDirectory() as root:
+            with patch("services.zalo_scan_evidence.asyncio.sleep", new=AsyncMock()):
+                result = await scan_open_zalo_chat(
+                    page,
+                    job_id=154,
+                    screenshots_dir=root,
+                    group_name="MindX - VT-C4K-GB40",
+                    actual_group_name="MindX - VT-C4K-GB40",
+                    person="Teacher",
+                    class_date_str="29/07/2026",
+                    today=datetime(2026, 7, 29),
+                    ensure_not_cancelled=AsyncMock(),
+                )
+
+        self.assertTrue(result["evidence"]["classifier_result"]["report_found"])
+        self.assertEqual(result["evidence_state"], INSUFFICIENT_EVIDENCE)
+        diagnostics = result["evidence"].get("capture_diagnostics", [])
+        self.assertTrue(
+            any(
+                item.get("error_code") == "CAPTURE_FILE_VALIDATION_ERROR"
+                and item.get("phase") == "CAPTURE_SCREENSHOT"
+                for item in diagnostics
+            )
+        )
 
     async def test_ui_date_helper_and_window_helpers_fail_closed(self):
         today = datetime(2026, 7, 29)
@@ -483,6 +1105,118 @@ class ZaloScanEvidenceTests(unittest.IsolatedAsyncioTestCase):
             before_class["evidence"]["classifier_result"]["candidates"][0]["decision"],
             "BEFORE_CLASS_DATE",
         )
+
+    async def test_previous_lesson_date_context_is_used_when_content_has_no_date(self):
+        messages = [
+            FakeMessage("Tin nhắn cũ thông thường " * 5, "18/07/2026"),
+            FakeMessage(
+                "Kính gửi phụ huynh. Báo cáo buổi học. Mã lớp: VT-C4K-GB40. "
+                "NỘI DUNG và NHẬN XÉT học viên.",
+                "29/07/2026",
+            ),
+        ]
+        with tempfile.TemporaryDirectory() as root:
+            result = await scan_open_zalo_chat(
+                FakePage(messages),
+                job_id=137,
+                screenshots_dir=root,
+                group_name="MindX - VT-C4K-GB40",
+                actual_group_name="MindX - VT-C4K-GB40",
+                person="Teacher",
+                class_date_str="02/08/2026",
+                previous_lesson_date_str="26/07/2026",
+                next_class_date_str="02/08/2026",
+                today=datetime(2026, 7, 29),
+                ensure_not_cancelled=AsyncMock(),
+            )
+        candidate = result["evidence"]["classifier_result"]["candidates"][0]
+        self.assertEqual(candidate["date_reference"], "previous_lesson_date")
+        self.assertEqual(
+            result["evidence"]["date_context"]["lesson_date"],
+            "2026-07-26",
+        )
+
+    async def test_report_without_class_date_over_eight_days_remains_submitted(self):
+        messages = [
+            FakeMessage("Tin nhắn cũ thông thường " * 5, "10/07/2026"),
+            FakeMessage(
+                "Kính gửi phụ huynh. Báo cáo buổi học. Mã lớp: VT-C4K-GB40. "
+                "NỘI DUNG và NHẬN XÉT học viên.",
+                "15/07/2026",
+            ),
+        ]
+        with tempfile.TemporaryDirectory() as root:
+            result = await scan_open_zalo_chat(
+                FakePage(messages),
+                job_id=138,
+                screenshots_dir=root,
+                group_name="MindX - VT-C4K-GB40",
+                actual_group_name="MindX - VT-C4K-GB40",
+                person="Teacher",
+                class_date_str="",
+                today=datetime(2026, 7, 29),
+                ensure_not_cancelled=AsyncMock(),
+            )
+        self.assertEqual(result["evidence_state"], SUBMITTED_LATE_VERIFIED)
+        self.assertTrue(result["submitted_for_bcnb"])
+
+    def test_detect_history_gap_unit(self):
+        target = datetime(2026, 9, 11)
+        # Gap of 13 days straddling target date (04/09 to 17/09)
+        dates = [datetime(2026, 9, 4), datetime(2026, 9, 17)]
+        gap = detect_history_gap(dates, target, min_gap_days=5)
+        self.assertIsNotNone(gap)
+        d_prev, d_curr, gap_days = gap
+        self.assertEqual(d_prev.date(), datetime(2026, 9, 4).date())
+        self.assertEqual(d_curr.date(), datetime(2026, 9, 17).date())
+        self.assertEqual(gap_days, 13)
+
+        # Message exists on target date -> No gap
+        dates_with_target = [datetime(2026, 9, 4), datetime(2026, 9, 11), datetime(2026, 9, 17)]
+        self.assertIsNone(detect_history_gap(dates_with_target, target, min_gap_days=5))
+
+        # Small gap (< 5 days) -> No suspicious gap
+        small_gap_dates = [datetime(2026, 9, 10), datetime(2026, 9, 12)]
+        self.assertIsNone(detect_history_gap(small_gap_dates, target, min_gap_days=5))
+
+        # Target date outside the gap range -> No gap
+        past_target = datetime(2026, 9, 1)
+        self.assertIsNone(detect_history_gap(dates, past_target, min_gap_days=5))
+
+    async def test_history_gap_straddling_target_date_fails_closed_with_insufficient_evidence(self):
+        # When messages jump across the class date without any message in between,
+        # it indicates un-synced history and must NOT conclude NOT_FOUND_VERIFIED.
+        messages = [
+            FakeMessage("Tin nhắn cũ trước ngày học " * 4, "04/09/2026"),
+            FakeMessage("Tin nhắn mới sau ngày học " * 4, "17/09/2026"),
+        ]
+        page = FakePage(messages)
+        with tempfile.TemporaryDirectory() as root:
+            result = await scan_open_zalo_chat(
+                page,
+                job_id=232,
+                screenshots_dir=root,
+                group_name="[VŨNG TÀU] - VT-KIND-ROB4A03 - [18H00-19H30 - T6] (OFF)",
+                actual_group_name="[VŨNG TÀU] - VT-KIND-ROB4A03 - [18H00-19H30 - T6] (OFF)",
+                person="Teacher",
+                class_date_str="11/09/2026",
+                scan_target={
+                    "class_code": "VT-KIND-ROB4A03",
+                    "class_date": "11/09/2026",
+                    "class_date_iso": "2026-09-11",
+                    "lesson": "4",
+                    "week": 37,
+                    "year": 2026,
+                    "zalo_deadline": "12:00 13/09/2026",
+                },
+                today=datetime(2026, 9, 17),
+                ensure_not_cancelled=AsyncMock(),
+            )
+        self.assertEqual(result["evidence_state"], INSUFFICIENT_EVIDENCE)
+        self.assertFalse(result["submitted_for_bcnb"])
+        validation_errors = result["evidence"]["validation_errors"]
+        self.assertTrue(any("khoảng trống tin nhắn" in err for err in validation_errors))
+        self.assertTrue(any("chưa đồng bộ" in err for err in validation_errors))
 
 
 if __name__ == "__main__":

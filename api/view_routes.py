@@ -1,9 +1,12 @@
-from fastapi import APIRouter, Query, Request, Response
+from pathlib import Path
+
+from fastapi import APIRouter, Depends, Query, Request, Response
+from api.dependencies import require_viewer
 from fastapi.templating import Jinja2Templates
 from logger_utils import get_recent_logs
 
 router = APIRouter()
-templates = Jinja2Templates(directory="templates")
+templates = Jinja2Templates(directory=str(Path(__file__).resolve().parents[1] / "templates"))
 
 @router.get("/")
 async def index(request: Request):
@@ -17,7 +20,7 @@ async def index(request: Request):
     response.headers["Cache-Control"] = "no-store"
     return response
 
-@router.get("/api/logs")
+@router.get("/api/logs", dependencies=[Depends(require_viewer)])
 async def get_logs(
     after: int = Query(default=0, ge=0),
     limit: int = Query(default=200, ge=1, le=500),

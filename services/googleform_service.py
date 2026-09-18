@@ -12,6 +12,7 @@ from repositories.audit_repository import AuditRepository
 from repositories.job_repository import JobRepository
 from repositories.report_repository import ReportRepository
 from services.external_gateways import ExternalGateways, StudentOcrGateway
+from services.googleform_idempotency import persisted_key_digest
 
 report_repo = ReportRepository()
 job_repo = JobRepository()
@@ -82,6 +83,9 @@ async def _background_submit_forms(
     try:
         mapping_dict = await report_repo.get_form_mapping_dict()
         external = external or ExternalGateways.production()
+        # The worker may be called directly by a legacy integration; normalize
+        # again so no raw client token reaches audit or report persistence.
+        batch_digest = persisted_key_digest(idempotency_key)
         sem = asyncio.Semaphore(Config.CONCURRENCY_LIMIT)
         log_message(f"Khởi chạy tiến trình nộp {len(students)} form...")
 
@@ -105,7 +109,7 @@ async def _background_submit_forms(
                             f"{student_name.casefold()}\0{class_code.upper()}".encode("utf-8")
                         ).hexdigest()[:24]
                         audit, created = await audit_repo.record_intent(
-                            action_key=f"googleform:{idempotency_key}:{target_hash}",
+                            action_key=f"googleform:{batch_digest}:{target_hash}",
                             job_id=job_id,
                             action_type="GOOGLE_FORM_SUBMIT",
                             target_type="STUDENT_CLASS",
@@ -113,7 +117,7 @@ async def _background_submit_forms(
                             mode=execution_mode,
                             before_state=None,
                             intended_state={"submitted": True},
-                            reason={"batch_key": idempotency_key},
+                            reason={"batch_key_sha256": batch_digest},
                         )
                         audit_id = audit["id"]
                         if not created:
@@ -134,7 +138,7 @@ async def _background_submit_forms(
                             }
                         await _ensure_not_cancelled(job_id)
                         log_message(f"🚀 Nộp form cho: {student_name} ({class_code})")
-                        await submitter.submit_form(student_name, class_code)
+                        screenshot_path = await submitter.submit_form(student_name, class_code)
                         status_text = "Thành công (DryRun)" if execution_mode != "production" else "Thành công"
                         await audit_repo.complete_action(
                             audit_id,
@@ -148,6 +152,7 @@ async def _background_submit_forms(
                             "",
                             job_id=job_id,
                             action_key=audit["action_key"],
+                            screenshot_path=screenshot_path,
                         )
                         return {
                             "name": student_name,

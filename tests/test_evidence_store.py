@@ -16,7 +16,7 @@ class EvidenceStoreTests(unittest.TestCase):
                 0,
             )
 
-    def test_removes_only_old_png_and_prunes_empty_nested_directories(self):
+    def test_tombstones_only_old_png_without_deleting_or_pruning(self):
         with tempfile.TemporaryDirectory() as root:
             nested = Path(root, "job-1")
             nested.mkdir()
@@ -32,12 +32,12 @@ class EvidenceStoreTests(unittest.TestCase):
             count = cleanup_old_screenshots(days=14, root=root)
 
             self.assertEqual(count, 1)
-            self.assertFalse(old_png.exists())
+            self.assertTrue(old_png.exists())
             self.assertTrue(new_png.exists())
             self.assertTrue(ignored.exists())
-            self.assertFalse(nested.exists())
+            self.assertTrue(nested.exists())
 
-    def test_remove_error_is_fail_closed_and_walk_error_is_logged(self):
+    def test_scan_is_fail_closed_and_walk_error_is_logged(self):
         with tempfile.TemporaryDirectory() as root:
             old_png = Path(root, "old.png")
             old_png.write_bytes(b"old")
@@ -45,7 +45,7 @@ class EvidenceStoreTests(unittest.TestCase):
             os.utime(old_png, (old_time, old_time))
 
             with patch("services.evidence_store.os.remove", side_effect=OSError("locked")):
-                self.assertEqual(cleanup_old_screenshots(root=root), 0)
+                self.assertEqual(cleanup_old_screenshots(root=root), 1)
             self.assertTrue(old_png.exists())
 
             with (
@@ -55,6 +55,33 @@ class EvidenceStoreTests(unittest.TestCase):
                 self.assertEqual(cleanup_old_screenshots(root=root), 0)
                 log.assert_called_once()
                 self.assertEqual(log.call_args.kwargs["level"], "WARNING")
+
+    def test_vietnamese_encoding_in_log_messages(self):
+        with tempfile.TemporaryDirectory() as root:
+            nested = Path(root, "job-1")
+            nested.mkdir()
+            old_png = nested / "old.png"
+            old_png.write_bytes(b"old")
+            old_time = (datetime.now() - timedelta(days=30)).timestamp()
+            os.utime(old_png, (old_time, old_time))
+
+            with patch("services.evidence_store.log_message") as log:
+                count = cleanup_old_screenshots(days=14, root=root)
+                self.assertEqual(count, 1)
+                log.assert_called_once()
+                msg = log.call_args[0][0]
+                self.assertIn("Phát hiện 1 ảnh Zalo quá hạn retention; đã ghi tombstone, không xóa âm thầm.", msg)
+                self.assertNotIn("PhÃ", msg)
+
+            with (
+                patch("services.evidence_store.os.walk", side_effect=OSError("test disk error")),
+                patch("services.evidence_store.log_message") as log,
+            ):
+                cleanup_old_screenshots(root=root)
+                log.assert_called_once()
+                msg = log.call_args[0][0]
+                self.assertIn("Lỗi khi quét ảnh chụp cũ: test disk error", msg)
+                self.assertNotIn("Lá»", msg)
 
 
 if __name__ == "__main__":

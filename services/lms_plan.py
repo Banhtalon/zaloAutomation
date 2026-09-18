@@ -6,6 +6,10 @@ import unicodedata
 
 CLASS_CODE_PATTERN = re.compile(r"^[A-Z0-9]{2,}(?:-[A-Z0-9]{2,})+$")
 MAX_CLASS_CODES = 200
+LMS_PLAN_KIND = "lms_preview"
+LMS_PLAN_VERSION = 2
+LMS_PLAN_TARGET = "BCNB"
+LMS_PLAN_ACTION_SET = ("BCNB_LMS_TICK",)
 
 
 class LmsSafetyError(ValueError):
@@ -90,7 +94,10 @@ def build_lms_plan(missing_classes, bcnb_rows, week: int, year: int, dry_run=Tru
         blocking_issues.append("Không có lớp nào đủ điều kiện để tick.")
 
     plan = {
-        "kind": "lms_preview",
+        "kind": LMS_PLAN_KIND,
+        "plan_version": LMS_PLAN_VERSION,
+        "target": LMS_PLAN_TARGET,
+        "action_set": list(LMS_PLAN_ACTION_SET),
         "week": int(week),
         "year": int(year),
         "missing_classes": missing,
@@ -109,12 +116,24 @@ def build_lms_plan(missing_classes, bcnb_rows, week: int, year: int, dry_run=Tru
 
 def compute_plan_digest(plan: dict) -> str:
     digest_payload = {
+        "kind": plan.get("kind"),
+        # A missing version intentionally hashes differently from a current
+        # preview, so confirmations created before the contract change cannot
+        # be replayed silently.
+        "plan_version": plan.get("plan_version", 0),
+        "target": plan.get("target"),
+        "action_set": plan.get("action_set", []),
         "week": plan.get("week"),
         "year": plan.get("year"),
         "dry_run": bool(plan.get("dry_run", True)),
         "missing_classes": plan.get("missing_classes", []),
         "observed_classes": plan.get("observed_classes", []),
         "classes_to_tick": plan.get("classes_to_tick", []),
+        "already_checked_classes": plan.get("already_checked_classes", []),
+        "unmatched_classes": plan.get("unmatched_classes", []),
+        "missing_but_checked_classes": plan.get("missing_but_checked_classes", []),
+        "blocking_issues": plan.get("blocking_issues", []),
+        "can_confirm": bool(plan.get("can_confirm", False)),
     }
     canonical = json.dumps(
         digest_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")

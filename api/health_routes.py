@@ -2,7 +2,7 @@ import asyncio
 
 from fastapi import APIRouter, Depends, Query, Response
 
-from api.dependencies import get_container
+from api.dependencies import get_container, require_viewer
 from core.container import AppContainer
 from services.observability import collect_job_metrics, live_status, ready_status
 
@@ -36,7 +36,7 @@ async def health_ready(
     return result
 
 
-@router.get("/api/metrics/jobs")
+@router.get("/api/metrics/jobs", dependencies=[Depends(require_viewer)])
 async def job_metrics(
     window_hours: int | None = Query(default=None, ge=1, le=168),
     container: AppContainer = Depends(get_container),

@@ -1,278 +1,168 @@
-# PROJECT SUMMARY — Zalo Automation (MindX Auto)
+# PROJECT SUMMARY — Zalo Automation
 
-> **Mục đích**: File này là tài liệu tham chiếu để AI (hoặc developer mới) có thể hiểu toàn bộ dự án trong thời gian ngắn nhất.
+> Nguồn tham chiếu tổng quan cho AI và người phát triển. Nội dung này mô tả mã
+> nguồn tại ngày 2026-09-18; dữ liệu và trạng thái chạy phải kiểm tra lại trong
+> `PROJECT_STATE.md` và runtime trước mỗi task.
 
-> **Cập nhật Giai đoạn 2**: Job không còn dùng `FastAPI BackgroundTasks` làm
-> nguồn trạng thái duy nhất. Hệ thống hiện dùng SQLite-backed dispatcher,
-> upload theo `upload_id`/job, heartbeat/cancel/retry/recovery và external-action
-> audit. Xem `PHASE2_RELIABILITY.md` cho contract vận hành mới nhất.
+## 1. Mục tiêu sản phẩm
 
-> **Bắt đầu Giai đoạn 3 (mốc 3.1)**: Mode thực thi đã được đóng băng theo job,
-> Zalo/date verification chuyển sang fail-closed, BCNB safety helper dùng chung,
-> đồng thời có structured rotating log, health/readiness, aggregate metrics và
-> quality gate. Xem `PHASE3_MAINTAINABILITY.md`.
+Zalo Automation, tên giao diện MindX Auto, hỗ trợ một người vận hành quản lý
+báo cáo giảng dạy. Hệ thống không coi AI hoặc một lần quét trình duyệt là nguồn
+sự thật duy nhất. Mọi trường hợp thiếu, trùng hoặc mơ hồ phải dừng để kiểm tra.
 
-> **Mốc 3.2**: Ứng dụng đã có `create_app()`/`AppContainer`, settings bất biến,
-> database/log/dispatcher/worker-lock theo từng app, router dependency injection,
-> local Host/Origin/body/request-id guard và metrics không chặn event loop.
+Ba luồng nghiệp vụ chính:
 
-> **Mốc 3.3**: Frontend đã tách thành Jinja partial, CSS và JavaScript theo tính
-> năng. Facade `index.html` còn 37 dòng; DOM/API và thiết kế hiện hữu được giữ
-> nguyên, có contract gate và smoke test bảo vệ.
+| Luồng | Đầu vào | Kết quả |
+|---|---|---|
+| Zalo + BCNB | Hai tuần BCNB và các nhóm Zalo | Bằng chứng báo cáo theo lớp; dry-run hoặc cập nhật BCNB có kiểm chứng |
+| Google Form | Ảnh danh sách học viên | Danh sách OCR để duyệt; điền form ở dry-run hoặc production có chống gửi trùng |
+| LMS + BCNB | Ảnh danh sách lớp chưa hoàn thành LMS | Kế hoạch có mã xác nhận dùng một lần; dry-run hoặc cập nhật BCNB có đọc lại |
 
-> **Mốc 3.4**: Clone upload đã failure-atomic theo batch và có startup
-> reconciliation. Ghi BCNB chỉ được audit `VERIFIED` sau hard reload/read-back
-> đúng tuần, mã lớp và buổi; production không còn `bare except`.
+## 2. Công nghệ và cách chạy
 
-> **Mốc 3.5 — hoàn tất Giai đoạn 3**: Dependency phát triển đã được pin; Ruff
-> đạt toàn workspace, mypy đạt trên 44 tệp production và branch coverage
-> production đạt 53,4% với gate 52,0%. Toàn bộ cổng chất lượng chạy qua
-> `CHECK_QUALITY.ps1` hoặc `QUALITY.bat`.
+| Thành phần | Hiện tại |
+|---|---|
+| API và server | FastAPI `0.136.3`, Uvicorn `0.49.0` |
+| Tự động trình duyệt | Playwright `1.60.0`, Chromium, profile cục bộ |
+| AI đọc ảnh | Google Gemini qua `google-genai 2.8.0` |
+| Dữ liệu | SQLite và `aiosqlite` |
+| Giao diện | Jinja2, JavaScript thường, CSS/Tailwind CDN, Chart.js |
+| Python | Cấu hình kiểm tra cho Python 3.14; máy hiện tại dùng Python 3.14.7 |
+| Kiểm tra | `unittest`, Coverage, Ruff, mypy và các cổng bất biến theo giai đoạn |
+| Khởi động | `START.bat` → `python -m scripts.run_local` → `main:app` |
 
-> **Giai đoạn 4 — hoàn tất**: `ExternalGateways` tách Playwright/Gemini/Form
-> khỏi orchestration và được inject theo app qua `WorkerRuntime`. Browser lifecycle,
-> Google Form audit `UNKNOWN` và BCNB dialog/login đã được harden. Có 85 test,
-> branch coverage production 64,3% và gate bắt buộc 60,0%. Xem
-> `PHASE4_EXTERNAL_BOUNDARIES.md`.
+`main.create_app()` tạo ứng dụng. `AppContainer` sở hữu cấu hình, repository,
+kho upload, kho bằng chứng, gateway bên ngoài, dispatcher và vòng đời start/stop.
+Không dùng nhiều Uvicorn worker với kiến trúc hiện tại.
 
----
+## 3. Cấu trúc mã nguồn
 
-## 1. Tổng quan dự án
+| Khu vực | Trách nhiệm |
+|---|---|
+| `main.py` | Tạo FastAPI app, middleware bảo mật/ghi log và gắn router |
+| `api/` | 10 router: giao diện, đăng nhập, Zalo, Form, LMS, job, upload, health, bằng chứng và probe đã nghỉ |
+| `core/` | Cấu hình bất biến, container, phân quyền và kiểm tra sẵn sàng production |
+| `services/` | Luồng nghiệp vụ, Playwright/Gemini gateway, dispatcher, bằng chứng và kiểm tra an toàn |
+| `repositories/` | Đọc/ghi SQLite cho job, lớp, báo cáo, audit, LMS, upload và bằng chứng |
+| `db/` | Tạo/nâng schema, transaction, backup và thử khôi phục |
+| `googleform_autosubmit/` | Cấu hình, OCR và thao tác Google Form |
+| `classifiers/` | Bộ phân loại báo cáo Zalo theo luật và trích ngày |
+| `templates/`, `static/` | Dashboard bốn khu vực và mã giao diện |
+| `tests/` | 55 file `test_*.py` cùng các cổng kiểm tra riêng |
+| `scripts/` | Khởi động local, backup/restore, smoke test và runner chẩn đoán giới hạn |
+| `deploy/staging/` | Mẫu cấu hình staging; không tự triển khai |
 
-**Zalo Automation** (tên giao diện: **MindX Auto**) là hệ thống tự động hóa quy trình quản lý báo cáo giảng dạy cho trung tâm **MindX**. Hệ thống gồm 3 tính năng chính:
+Hai file lớn nhất là `services/external_gateways.py` và
+`services/zalo_parallel_service.py`. Không tách chúng chỉ để “đẹp”; chỉ thay đổi
+khi có yêu cầu chức năng hoặc lỗi cụ thể và phải kiểm tra tất cả caller liên quan.
 
-| # | Tính năng | Mô tả |
-|---|-----------|-------|
-| 1 | **Zalo Auto Scan** | Tự động quét các nhóm Zalo của giáo viên, phân loại tin nhắn để xác định báo cáo buổi học, rồi tick kết quả lên hệ thống BCNB (Bảng Chấm Nhận Bằng). |
-| 2 | **Google Form Auto Submit** | Dùng AI (Gemini Vision) để OCR ảnh chụp danh sách học viên, sau đó tự động điền và nộp Google Form phản hồi cho từng học viên. |
-| 3 | **LMS Auto Tick** | Dùng AI (Gemini Vision) để đọc ảnh danh sách lớp chưa nhận xét LMS, sau đó tự động tick checkbox trên BCNB cho các lớp đã hoàn thành. |
+## 4. API và quyền
 
----
+Mã nguồn hiện có 43 route. Các nhóm chính:
 
-## 2. Tech Stack
+- `/auto-discover`, `/run-scan`, `/api/zalo-scan-plan`, `/api/groups`:
+  discovery, kế hoạch và quét Zalo/BCNB.
+- `/api/uploads`, `/api/googleform/*`: upload, OCR, mapping, lịch sử, ảnh bằng
+  chứng và submit Google Form.
+- `/api/lms/analyze`, `/api/lms/confirm`: phân tích và xác nhận LMS.
+- `/api/jobs/*`: trạng thái, hủy, retry, timeline, audit và target.
+- `/api/evidence/*`: phục vụ ảnh bằng chứng qua kiểm tra đường dẫn và quyền.
+- `/api/auth/*`: đăng nhập, phiên hiện tại và đăng xuất khi chạy web mode.
+- `/api/health/*`, `/api/metrics/jobs`: liveness, readiness và số liệu job.
 
-| Thành phần | Công nghệ |
-|------------|-----------|
-| **Backend Framework** | FastAPI (Python 3.x) + Uvicorn |
-| **Browser Automation** | Playwright (Chromium, persistent session) |
-| **AI / LLM** | Google Gemini API (`google-genai` SDK) — model `gemini-3.1-flash-lite` |
-| **Database** | SQLite (file `database.db`) + `aiosqlite` cho async |
-| **Frontend** | Jinja2 partials + CSS/JavaScript classic modules + TailwindCSS CDN + Chart.js + Font Awesome |
-| **Templating** | Jinja2 (FastAPI `TemplateResponse`) |
-| **Image Processing** | Pillow (PIL) |
-| **Config** | python-dotenv (file `.env`) |
-| **Quality** | unittest (85 test) + branch coverage 64,3% (gate 60%) + Ruff + mypy |
-| **OS** | Windows (file `START.bat` để khởi chạy) |
+Ba vai trò web là `Viewer`, `Operator` và `Admin`. Chế độ local chỉ cho phép
+host loopback. Chế độ web yêu cầu đăng nhập, cookie an toàn, CSRF, host/origin
+allowlist và HTTPS theo kiểm tra production readiness.
 
----
+Hai route landing probe còn tồn tại để tương thích nhưng trả trạng thái nghỉ;
+chẩn đoán tương ứng chỉ được chạy qua CLI giới hạn.
 
-## 3. Cấu trúc thư mục
+## 5. Job nền
 
-```
-zaloAutomation/
-├── main.py                          # Entry point — khởi tạo FastAPI app, mount routers
-├── START.bat                        # Script khởi chạy (activate venv + run uvicorn + mở Chrome)
-├── requirements.txt                 # Dependencies
-├── requirements-dev.txt             # Development dependencies được pin
-├── pyproject.toml                    # Cấu hình Ruff, mypy và coverage
-├── CHECK_QUALITY.ps1                 # Cổng chất lượng tái lập đầy đủ
-├── QUALITY.bat                       # Entry point một lần bấm trên Windows
-├── .env / .env.example              # Biến môi trường (API keys, credentials)
-├── database.db                      # SQLite database file
-├── logger_utils.py                  # Hệ thống log in-memory (system_logs[])
-│
-├── api/                             # FastAPI Routers (API Layer)
-│   ├── __init__.py
-│   ├── view_routes.py               # GET / (serve HTML), GET /api/logs, GET /favicon.ico
-│   ├── zalo_routes.py               # POST /auto-discover, POST /run-scan, GET /api/groups
-│   ├── googleform_routes.py         # CRUD mappings, upload image, run OCR, submit forms
-│   ├── lms_routes.py                # POST /api/lms/upload-and-run
-│   └── job_routes.py                # GET /api/jobs/{id}, GET /api/jobs/active/latest
-│
-├── services/                        # Business Logic Layer
-│   ├── __init__.py
-│   ├── zalo_service.py              # [CORE] Điều phối quét Zalo + ghi BCNB an toàn
-│   ├── googleform_service.py        # Logic OCR + nộp Google Form
-│   ├── lms_service.py               # Logic AI Vision + tick LMS trên BCNB
-│   ├── external_gateways.py         # Ranh giới Playwright/Gemini/Form inject theo app
-│   └── ocr_service.py               # Wrapper OCRProcessor (ít sử dụng trực tiếp)
-│
-├── classifiers/                     # Hệ thống phân loại tin nhắn
-│   ├── __init__.py
-│   ├── rule_classifier.py           # [ACTIVE] Scoring-based classifier (regex + keyword matching)
-│   ├── llm_classifier.py            # [STUB] Placeholder cho Gemini LLM classifier
-│   └── embedding_classifier.py      # [STUB] Placeholder cho embedding classifier (BAAI/bge-m3)
-│
-├── models/                          # Pydantic Models (Data Schema)
-│   ├── group.py                     # GroupBase, Group, IgnoredGroup
-│   ├── job.py                       # JobStatus, JobCreate, Job
-│   └── report.py                    # ReportCreate, Report
-│
-├── repositories/                    # Data Access Layer (SQLite)
-│   ├── group_repository.py          # CRUD groups + ignored_groups
-│   ├── job_repository.py            # CRUD scan_jobs
-│   └── report_repository.py         # CRUD form_mappings, form_submissions, reports, classification_logs
-│
-├── db/
-│   └── database.py                  # Khởi tạo DB schema (7 bảng), async connection context manager
-│
-├── googleform_autosubmit/           # Module Google Form riêng biệt
-│   ├── __init__.py
-│   ├── config.py                    # Config class (đọc từ .env)
-│   ├── form_submitter.py            # FormSubmitter — tự động điền và nộp Google Form bằng Playwright
-│   └── ocr_processor.py             # OCRProcessor — dùng Gemini Vision để OCR ảnh → JSON [{name, class_code}]
-│
-├── templates/
-│   ├── index.html                   # Facade Jinja 37 dòng, giữ thứ tự tài nguyên
-│   └── partials/                    # Sidebar, header, 4 vùng tab và 2 modal
-│
-├── static/
-│   ├── css/app.css                  # Style giao diện dùng chung
-│   ├── js/                          # State, groups, jobs, Google Form, LMS, modal
-│   └── screenshots/                 # Ảnh chụp màn hình Zalo được lưu tự động khi quét
-│
-├── zalo_session/                    # Chromium persistent user data (session Zalo đã login)
-├── temp_lms/                        # Thư mục chứa ảnh tạm cho LMS Auto Tick
-└── venv/                            # Python virtual environment
-```
+SQLite là nguồn trạng thái bền vững. `JobDispatcher` hỗ trợ sáu loại job:
 
----
+| Job | Chức năng | Retry/recovery |
+|---|---|---|
+| `ZALO_DISCOVERY` | Đọc BCNB/Zalo và tạo snapshot | Có |
+| `ZALO_SCAN` | Quét target và lập/thực hiện kế hoạch BCNB | Chỉ khi dry-run |
+| `GOOGLEFORM_OCR` | OCR ảnh học viên | Có |
+| `GOOGLEFORM_SUBMIT` | Điền hoặc gửi form | Production không tự retry |
+| `LMS_ANALYSIS` | OCR và tạo kế hoạch LMS | Có |
+| `LMS_AUTOMATION` | Thực hiện kế hoạch đã xác nhận | Không retry mù |
 
-## 4. Database Schema (SQLite — 7 bảng)
+Job có heartbeat, cancel hợp tác, timeout, giới hạn hàng đợi, event timeline và
+external-action audit. Job production bị gián đoạn không được tự phát lại vì
+có thể thao tác bên ngoài đã xảy ra nhưng chưa kịp ghi kết quả.
 
-| Bảng | Mục đích |
-|------|----------|
-| `groups` | Lưu danh sách nhóm Zalo đang hoạt động (group_name, person_in_charge, class_date) |
-| `ignored_groups` | Nhóm đã kết thúc khóa / bị loại bỏ (group_name) |
-| `form_mappings` | Cấu hình Q&A mapping cho Google Form (question, field_type, value) |
-| `form_submissions` | Lịch sử nộp Google Form (student_name, class_code, status, error_message) |
-| `scan_jobs` | Tiến trình quét/job (job_type, status, progress, message, results) |
-| `reports` | Báo cáo buổi học (group_name, class_code, lesson_number, lesson_date, confidence) |
-| `classification_logs` | Log phân loại tin nhắn (message, rule_score, embedding_score, llm_result, final_result) |
+## 6. Luồng Zalo và BCNB
 
----
+1. Discovery đọc đúng hai tuần BCNB, thu thập nhóm Zalo và tạo snapshot bất biến.
+2. So khớp ưu tiên mã lớp đầy đủ; alias rút gọn chỉ được dùng khi ánh xạ duy nhất.
+3. `/run-scan` từ chối snapshot cũ, thiếu hai tuần, trùng target hoặc chưa đến giờ học.
+4. Hai worker Zalo đọc target song song; thao tác ghi BCNB được giới hạn riêng.
+5. Tin nhắn được phân loại bằng luật. Ngày gửi lấy từ giao diện Zalo; ngày trong
+   nội dung chỉ là bằng chứng hỗ trợ.
+6. Thiếu lịch sử đồng bộ, header sai, ngày không chắc chắn hoặc target mơ hồ trả
+   trạng thái cần xem xét, không suy luận “không có báo cáo”.
+7. Khi ghi BCNB, hệ thống ghi intent, tải lại trang và đọc lại checkbox trước khi
+   đánh dấu `VERIFIED`.
 
-## 5. Các Flow chính
+Vòng đời lớp nằm trong `CLASS_LIFECYCLE.md`.
 
-### 5.1. Zalo Auto Discovery (`POST /auto-discover`)
-1. Mở Chromium → truy cập trang BCNB (`teachingmindx.top/check_nhanxet.php`) → auto login
-2. Chọn tuần trước → đọc bảng dữ liệu lấy: mã lớp, ngày học, giáo viên
-3. Chuyển sang Zalo Web → tìm kiếm "MindX -" → cuộn để gom tất cả tên nhóm
-4. Đối chiếu tên nhóm Zalo ↔ mã lớp BCNB bằng **thuật toán "Lõi Kép"** (tách mã lớp theo dấu `-`, so khớp phần lõi)
-5. Nhóm không khớp → đưa vào `ignored_groups`. Nhóm khớp → lưu vào `groups` kèm tên giáo viên + ngày học
+## 7. Luồng Google Form
 
-### 5.2. Zalo Auto Scan (`POST /run-scan`)
-1. Kiểm tra nhóm bị ẩn — nếu có "Thông báo khai giảng" → phục hồi
-2. Lặp qua từng nhóm: tìm kiếm trên Zalo → mở chat → xác minh đúng nhóm (normalize Unicode + regex)
-3. Smart Scroll: cuộn lên tối đa 6 lần, dừng sớm nếu tin nhắn > 6 ngày
-4. Bấm "Xem thêm" để bung tin nhắn dài
-5. Duyệt 50 tin nhắn mới nhất (ngược), phân loại bằng `rule_classifier.py`:
-   - **Scoring System**: Lời chào (+1.0), Đầu mục chính (+2.0/mỗi), Đầu mục phụ (+1.0/mỗi), Từ khóa báo cáo (+3.0), Mã lớp (+1.0), Penalty điểm danh (-2.0)
-   - Ngưỡng ≥ 4.0 → là báo cáo
-6. Trích xuất ngày tháng (3 mức: dd/mm/yyyy → dd/mm → "ngày d tháng m")
-7. Tính trễ/đúng hạn dựa trên ngày học từ BCNB
-8. Chụp ảnh khung chat → lưu `static/screenshots/`
-9. Quay lại BCNB → tick checkbox cho các lớp đã nộp + lớp Buổi 14 (miễn báo cáo)
+1. Ảnh được kiểm tra MIME, dung lượng, số pixel và lưu theo `upload_id`.
+2. `GOOGLEFORM_OCR` dùng Gemini để trả danh sách `{name, class_code}` cho người
+   vận hành rà soát.
+3. Submit chuẩn hóa danh sách, khóa theo idempotency key và lưu mode vào payload.
+4. Form hỗ trợ text, radio và dropdown/listbox; có mapping cơ sở theo mã lớp.
+5. Mỗi học viên có outcome riêng. Kết quả không rõ sau khi bấm submit là
+   `UNKNOWN`, không tự gửi lại.
+6. Ảnh Trang 1 và Trang 3 được ghép làm bằng chứng; giao diện cho xem hoặc xóa.
 
-### 5.3. Google Form Auto Submit (`POST /api/googleform/submit`)
-1. User paste/upload ảnh chụp màn hình danh sách học viên
-2. Gọi `Gemini Vision` OCR → trả về JSON `[{name, class_code}]`
-3. User review/chỉnh sửa danh sách trên UI
-4. Hệ thống dùng `FormSubmitter` (Playwright) mở Google Form → điền tên, mã lớp, các câu hỏi mapping → Submit
-5. Có tính năng: chuyển trang thông minh (multi-page form), phát hiện reCAPTCHA, rate limit, concurrency
+## 8. Luồng LMS
 
-### 5.4. LMS Auto Tick (`POST /api/lms/upload-and-run`)
-1. User upload ảnh danh sách lớp CHƯA nhận xét LMS
-2. Gemini Vision → trích xuất mã lớp (JSON array)
-3. Mở BCNB → tick cột LMS cho tất cả lớp KHÔNG nằm trong danh sách chưa làm (logic đảo ngược)
+1. Ảnh đầu vào được Gemini trích mã lớp.
+2. Server lập kế hoạch theo tuần BCNB và trả mã xác nhận có hạn dùng.
+3. Admin xác nhận đúng plan digest; plan cũ, dùng lại hoặc thay đổi mode bị từ chối.
+4. Hệ thống chỉ tích các lớp đủ điều kiện, rồi tải lại và đọc trạng thái server.
 
----
+## 9. Dữ liệu
 
-## 6. Frontend (Dashboard module hóa)
+`db/database.py` hiện khai báo 19 bảng, gồm các nhóm:
 
-`templates/index.html` là facade Jinja 37 dòng. Nội dung được chia thành 8
-partial và các tệp CSS/JavaScript theo chức năng, nhưng phía người dùng vẫn là
-một dashboard với 4 tab:
+- lớp và discovery: `groups`, `ignored_groups`, `class_cohorts`,
+  `class_code_history`, `discovery_snapshots`, `zalo_batch_targets`;
+- job và file đầu vào: `scan_jobs`, `job_events`, `job_uploads`;
+- báo cáo/Form: `reports`, `classification_logs`, `form_mappings`,
+  `form_submissions`, `googleform_idempotency`;
+- kiểm chứng: `lms_confirmations`, `external_action_audit`,
+  `evidence_artifacts`, `evidence_access_log`;
+- schema: `schema_migrations`.
 
-| Tab | Nội dung |
-|-----|----------|
-| **Zalo Auto** | Bảng kết quả quét, metrics cards (Tổng/Hoàn thành/Miễn/Trễ), nút Quét/Dò tìm/Tick LMS/Lọc lỗi, thanh tìm kiếm |
-| **Nộp Google Form** | Upload ảnh (paste/drag/click), kết quả OCR (editable), cấu hình mapping Q&A, lịch sử nộp, nút Submit |
-| **Cấu hình Nhóm** | Danh sách nhóm đang hoạt động + nhóm bị loại bỏ (với nút phục hồi) |
-| **Nhật ký** | Terminal-style log viewer (copy-able) |
+Schema được nâng theo hướng cộng thêm và có checksum migration. Backup SQLite
+dùng API backup của SQLite, kiểm tra hash/integrity và có restore drill.
 
-- **Design**: Dark mode, Glassmorphism, TailwindCSS CDN, Font Awesome icons, Chart.js donut chart
-- **Polling**: Dashboard tự động poll `GET /api/jobs/{id}` mỗi 2 giây để cập nhật trạng thái
-- **Contract**: Cổng kiểm tra khóa DOM ID, global handler, thứ tự script và khả năng phục vụ tài nguyên tĩnh
+## 10. Ranh giới an toàn
 
----
+- Mặc định mẫu cấu hình là `BCNB_DRY_RUN=true` và
+  `GOOGLE_FORM_MODE=dry-run`.
+- Chế độ ghi thật phải vượt qua `core/production_readiness.py` trước khi tạo
+  worker bên ngoài.
+- Browser profile có khóa liên tiến trình; lock của PID đã chết được thu hồi.
+- Ảnh bằng chứng có hash, metadata, retention và access log; không phục vụ trực
+  tiếp qua `/static/screenshots`.
+- Log có request/job context, rotation và che dữ liệu nhạy cảm.
+- `CHECK_QUALITY.ps1 -Isolated` đặt biến chặn gateway thật và dùng database,
+  upload, log, bằng chứng tạm.
 
-## 7. Background Job System
+## 11. Phần chưa được coi là hoàn tất
 
-- `services/job_dispatcher.py` claim job `PENDING → RUNNING`, phát heartbeat và dispatch từ payload lưu trong SQLite.
-- Cancel là hợp tác: worker dừng giữa các target, không hard-cancel giữa click và verify.
-- Retry tạo job mới có `retry_of_job_id` và `attempt + 1`; backend chặn retry tác vụ ghi thật.
-- Startup chỉ chạy lại tác vụ đọc/dry-run an toàn. External mutation bị gián đoạn được quarantine để kiểm tra audit.
-- Frontend poll `/api/jobs/{id}`, hiển thị heartbeat, cancel/retry và timeline events/audit.
-- Job types: `ZALO_DISCOVERY`, `ZALO_SCAN`, `GOOGLEFORM_OCR`, `GOOGLEFORM_SUBMIT`, `LMS_ANALYSIS`, `LMS_AUTOMATION`.
-- Retry có upload clone theo batch transaction; startup dọn file pending/mồ côi trước khi recovery.
-- BCNB report/LMS chỉ hoàn tất audit sau khi tải lại dữ liệu server và đọc checkbox mới.
-
----
-
-## 8. Các thành phần chưa hoàn thiện (Stub)
-
-| File | Trạng thái | Ghi chú |
-|------|-----------|---------|
-| `classifiers/llm_classifier.py` | **STUB** | `GeminiClassifier` chỉ return hardcoded values. Chưa tích hợp Gemini API thật |
-| `classifiers/embedding_classifier.py` | **STUB** | `EmbeddingClassifier` return `UNCERTAIN`. Chưa tích hợp BAAI/bge-m3 |
-| `models/report.py` | Có định nghĩa nhưng **chưa sử dụng** trong flow chính | Chỉ lưu qua repository |
-| `services/ocr_service.py` | Wrapper nhưng **không được gọi trực tiếp** | Google Form service gọi trực tiếp `OCRProcessor` |
-
----
-
-## 9. Biến môi trường (.env)
-
-| Key | Mô tả |
-|-----|-------|
-| `GEMINI_API_KEY` | API key cho Google Gemini |
-| `GEMINI_MODEL` | Model name (mặc định: `gemini-3.1-flash-lite`) |
-| `BCNB_USERNAME` / `BCNB_PASSWORD` | Tài khoản đăng nhập BCNB |
-| `FORM_URL` | URL Google Form cần nộp |
-| `GOOGLE_FORM_MODE` | `dry-run` (chỉ điền, không submit) hoặc `production` |
-| `GOOGLE_FORM_CONCURRENCY_LIMIT` | Số form nộp đồng thời (mặc định: 3) |
-| `GOOGLE_FORM_RATE_LIMIT` | Delay giữa các lần nộp (giây, mặc định: 5) |
-| `GOOGLE_FORM_HEADLESS` | `true`/`false` — chạy browser ẩn hay hiện |
-| `BCNB_DRY_RUN` | Mặc định `true`; chỉ `false` sau khi duyệt dry-run |
-| `UPLOAD_ROOT` / `UPLOAD_RETENTION_HOURS` | Nơi lưu input riêng theo job và thời gian giữ để retry |
-| `MAX_UPLOAD_BYTES` / `MAX_IMAGE_PIXELS` | Giới hạn byte và pixel chống ảnh quá lớn |
-| `JOB_HEARTBEAT_SECONDS` | Chu kỳ heartbeat của worker |
-
----
-
-## 10. Các thuật toán đặc biệt
-
-### Exact Class-code Matching
-Tên nhóm Zalo chỉ khớp khi chứa đầy đủ mã lớp với biên ký tự hợp lệ. Không còn
-dùng phần lõi/substring, nên `VT-JSB14` không thể khớp nhầm `VT-JSB140`.
-
-### Rule-based Scoring Classifier
-Phân loại tin nhắn Zalo có phải là báo cáo hay không:
-- 5 category tính điểm + 1 penalty
-- Ngưỡng ≥ 4.0 → báo cáo
-- Kèm trích xuất ngày tháng thông minh (3 mức fallback)
-
-### Smart Scroll
-Tối ưu cuộn trên Zalo Web:
-- Cuộn tối đa 6 lần, mỗi lần -2000px
-- Dừng sớm nếu tin nhắn đầu tiên trên màn hình đã > 6 ngày
-
----
-
-## 11. Lưu ý kỹ thuật
-
-1. **Playwright Persistent Context**: Dùng `launch_persistent_context` với `user_data_dir='./zalo_session'` để giữ session Zalo đã login sẵn (không cần quét QR mỗi lần).
-2. **Anti-detection**: Inject script loại bỏ flag `navigator.webdriver` và dùng `--disable-blink-features=AutomationControlled`.
-3. **Concurrency**: Browser job dùng lock dùng chung và chờ có kiểm tra cancel. Vẫn phải chạy Uvicorn một worker cho tới khi có distributed lease.
-4. **Unicode Normalization**: Tất cả so sánh text tiếng Việt đều normalize NFC trước khi xử lý.
-5. **Logging**: Hệ thống log in-memory (`system_logs[]`), giới hạn 200 dòng, hiển thị trên UI tab "Nhật ký".
+- Chưa có bằng chứng nghiệm thu mới cho toàn bộ luồng thật Zalo, BCNB, Google
+  Form và LMS sau các thay đổi gần nhất.
+- Cấu hình production trên một máy không đồng nghĩa hệ thống đã được duyệt để
+  chạy production hoặc đưa lên Internet.
+- Working tree đang chứa lượng thay đổi lớn chưa được gom thành bản phát hành
+  sạch; cần review và tạo checkpoint Git trước thay đổi sản phẩm tiếp theo.
+- Bộ phân loại đang dùng luật; không có `llm_classifier.py` hoặc
+  `embedding_classifier.py`. Đây là chủ ý hiện tại, không phải file bị thiếu.

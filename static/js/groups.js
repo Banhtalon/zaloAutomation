@@ -1,4 +1,5 @@
         let groupsCache = [];
+        let bcnbZaloGapsCache = [];
         function renderTableMessage(tbody, colSpan, message, isError = false) {
             const tr = document.createElement('tr');
             const td = document.createElement('td');
@@ -52,6 +53,105 @@
                 (g.NguoiPhuTrach && g.NguoiPhuTrach.toLowerCase().includes(query))
             );
             renderGroupsTable(filtered);
+        }
+
+        const bcnbZaloGapLabels = {
+            MISSING_ZALO_GROUP: 'Chưa có nhóm Zalo',
+            AMBIGUOUS_ZALO_GROUP: 'Có nhiều nhóm có thể trùng',
+            TRANSITION_REVIEW: 'Đang chuyển cấp - cần xem lại'
+        };
+
+        function formatBcnbZaloGapPeriods(periods) {
+            return (Array.isArray(periods) ? periods : []).map(period => {
+                const lesson = period.lesson ? ` · buổi ${period.lesson}` : '';
+                return `W${period.week}/${period.year}${lesson}`;
+            }).join(', ');
+        }
+
+        function renderBcnbZaloGaps(items) {
+            const tbody = document.getElementById('bcnb-zalo-gaps-table-body');
+            if (!tbody) return;
+            if (!Array.isArray(items) || items.length === 0) {
+                renderTableMessage(tbody, 6, 'Không có lớp BCNB nào cần đối chiếu Zalo.');
+                return;
+            }
+            tbody.replaceChildren();
+            items.forEach((item, index) => {
+                const periods = Array.isArray(item.periods) ? item.periods : [];
+                const tr = document.createElement('tr');
+                tr.className = 'hover:bg-amber-500/5 transition-colors';
+                const values = [
+                    index + 1,
+                    item.class_code || '',
+                    (Array.isArray(item.teachers) ? item.teachers : []).join(', ') || 'Chưa xác định',
+                    formatBcnbZaloGapPeriods(periods),
+                    periods.map(period => period.class_date || period.class_date_iso || '').filter(Boolean).join(', '),
+                    bcnbZaloGapLabels[item.status] || item.status || 'Cần xem lại'
+                ];
+                values.forEach((value, valueIndex) => {
+                    const td = document.createElement('td');
+                    td.className = valueIndex === 0
+                        ? 'px-4 py-3 text-xs font-mono text-gray-500'
+                        : (valueIndex === 5
+                            ? 'px-4 py-3 text-xs font-semibold text-amber-300'
+                            : 'px-4 py-3 text-gray-200');
+                    td.textContent = String(value);
+                    tr.appendChild(td);
+                });
+                tbody.appendChild(tr);
+            });
+        }
+
+        function filterBcnbZaloGaps() {
+            const input = document.getElementById('bcnbZaloGapSearchInput');
+            const query = String(input ? input.value : '').trim().toLowerCase();
+            const filtered = bcnbZaloGapsCache.filter(item => {
+                const searchable = [
+                    item.class_code,
+                    ...(Array.isArray(item.teachers) ? item.teachers : []),
+                    bcnbZaloGapLabels[item.status] || item.status
+                ].join(' ').toLowerCase();
+                return searchable.includes(query);
+            });
+            renderBcnbZaloGaps(filtered);
+        }
+
+        async function fetchBcnbZaloGaps() {
+            const tbody = document.getElementById('bcnb-zalo-gaps-table-body');
+            const summaryElement = document.getElementById('bcnb-zalo-gaps-summary');
+            const staleElement = document.getElementById('bcnb-zalo-gaps-stale');
+            if (!tbody || !summaryElement || !staleElement) return;
+            try {
+                const response = await fetch('/api/discovery/bcnb-zalo-gaps');
+                const data = await response.json();
+                if (!response.ok) {
+                    throw new Error(data.detail?.message || 'Không đọc được dữ liệu đối chiếu.');
+                }
+                if (!data.available) {
+                    const needsRerun = data.reason === 'DISCOVERY_PLAN_UPGRADE_REQUIRED';
+                    summaryElement.textContent = needsRerun
+                        ? 'Snapshot cũ chưa có dữ liệu này. Hãy bấm Dò tìm lại.'
+                        : 'Chưa có snapshot Dò tìm để đối chiếu.';
+                    if (bcnbZaloGapsCache.length === 0) {
+                        renderTableMessage(tbody, 6, summaryElement.textContent);
+                    }
+                    staleElement.classList.add('hidden');
+                    return;
+                }
+                bcnbZaloGapsCache = Array.isArray(data.items) ? data.items : [];
+                const summary = data.summary || {};
+                summaryElement.textContent = `${summary.source_count || 0} lớp BCNB · ${summary.matched_count || 0} đã ghép đúng · ${summary.missing_count || 0} chưa có nhóm · ${summary.ambiguous_count || 0} mơ hồ · ${summary.transition_review_count || 0} đang chuyển cấp`;
+                staleElement.textContent = data.stale
+                    ? 'Dữ liệu đã cũ hơn thời hạn kế hoạch. Hãy bấm Dò tìm để cập nhật.'
+                    : '';
+                staleElement.classList.toggle('hidden', !data.stale);
+                filterBcnbZaloGaps();
+            } catch (error) {
+                summaryElement.textContent = `Không thể làm mới: ${error.message}`;
+                if (bcnbZaloGapsCache.length === 0) {
+                    renderTableMessage(tbody, 6, 'Không thể tải dữ liệu đối chiếu.', true);
+                }
+            }
         }
 
         // IGNORED GROUPS APIS
@@ -118,7 +218,7 @@
         }
 
         async function confirmIgnoredGroupEnded(groupName) {
-            if (!confirm(`Xác nhận lớp ${groupName} đã thực sự kết thúc? Lớp sẽ được lưu trữ sau 14 ngày.`)) return;
+            if (!confirm(`Xác nhận lớp ${groupName} đã thực sự kết thúc? Lớp sẽ được lưu trữ sau 7 ngày.`)) return;
             try {
                 const res = await fetch('/api/ignored-groups/confirm-ended', {
                     method: 'POST',

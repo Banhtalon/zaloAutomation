@@ -94,6 +94,29 @@ class LmsPlanSafetyTests(unittest.TestCase):
             compute_plan_digest(production),
         )
 
+    def test_digest_binds_plan_version_target_and_action_set(self):
+        plan = build_lms_plan(
+            ["VT-JSB14"],
+            [
+                {"class_code": "VT-JSB14", "checked": False},
+                {"class_code": "VT-JSB15", "checked": False},
+            ],
+            week=28,
+            year=2026,
+        )
+        for field, value in (
+            ("plan_version", plan["plan_version"] + 1),
+            ("target", "OTHER_SYSTEM"),
+            ("action_set", ["OTHER_ACTION"]),
+        ):
+            changed = dict(plan)
+            changed[field] = value
+            with self.subTest(field=field):
+                self.assertNotEqual(
+                    compute_plan_digest(plan),
+                    compute_plan_digest(changed),
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

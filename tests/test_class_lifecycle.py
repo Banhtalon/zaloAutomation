@@ -65,8 +65,8 @@ class ClassLifecycleTests(unittest.TestCase):
     def test_archive_clock_starts_at_confirmed_end_not_first_absence(self):
         now = datetime(2026, 7, 16, tzinfo=timezone.utc)
         old_date = now - timedelta(days=30)
-        confirmed_13_days_ago = now - timedelta(days=13)
-        confirmed_14_days_ago = now - timedelta(days=14)
+        confirmed_6_days_ago = now - timedelta(days=6)
+        confirmed_7_days_ago = now - timedelta(days=7)
 
         self.assertFalse(
             eligible_for_archive(
@@ -78,14 +78,14 @@ class ClassLifecycleTests(unittest.TestCase):
         self.assertFalse(
             eligible_for_archive(
                 LifecycleStatus.ENDED_CONFIRMED,
-                ended_at=confirmed_13_days_ago,
+                ended_at=confirmed_6_days_ago,
                 now=now,
             )
         )
         self.assertTrue(
             eligible_for_archive(
                 LifecycleStatus.ENDED_CONFIRMED,
-                ended_at=confirmed_14_days_ago,
+                ended_at=confirmed_7_days_ago,
                 now=now,
             )
         )

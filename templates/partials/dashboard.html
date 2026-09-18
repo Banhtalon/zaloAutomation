@@ -1,5 +1,10 @@
 <!-- TAB 1: ZALO AUTO -->
 <div id="tab-dashboard" class="tab-content active flex-1 flex-col space-y-5" role="tabpanel" aria-labelledby="btn-dashboard">
+    <div id="assisted-local-mode" class="self-start inline-flex items-center gap-2 rounded-full border border-indigo-200 bg-indigo-50 px-3 py-1 text-xs font-semibold text-indigo-700" role="status" aria-label="Chế độ vận hành">
+        <i class="fa-solid fa-laptop" aria-hidden="true"></i>
+        <span>Chế độ hỗ trợ — Local</span>
+    </div>
+
     <div class="metrics-grid grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 shrink-0">
         <div class="metric-card glass-panel glow-card-blue flex items-center">
             <div class="metric-card__icon rounded-full bg-blue-100 text-blue-600 flex items-center justify-center text-lg mr-4">
@@ -61,6 +66,12 @@
             </button>
         </div>
     </div>
+
+    <div id="zalo-scan-plan" class="rounded-xl border border-indigo-200 bg-indigo-50 px-4 py-3 text-sm text-indigo-900" role="status">
+        Chưa có kế hoạch tuần BCNB. Hãy bấm “Dò tìm” trước khi quét.
+    </div>
+
+    <div id="zalo-target-progress" class="hidden rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-700" role="status" aria-live="polite"></div>
 
     <div class="data-panel glass-panel flex-1 flex flex-col overflow-hidden">
         <div class="table-scroll flex-1">

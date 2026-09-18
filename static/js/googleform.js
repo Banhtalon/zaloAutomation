@@ -3,6 +3,79 @@
         const placeholder = document.getElementById('upload-placeholder');
         const overlay = document.getElementById('preview-overlay');
 
+        const GOOGLEFORM_IDEMPOTENCY_STORAGE_KEY = 'googleform.idempotency.v1';
+
+        function googleFormStorage() {
+            try {
+                return typeof localStorage === 'undefined' ? null : localStorage;
+            } catch (err) {
+                return null;
+            }
+        }
+
+        function googleFormStudentMarker(students) {
+            const canonical = JSON.stringify((students || []).map(student => ({
+                name: String(student.name || '').normalize('NFKC').trim().split(/\s+/).filter(Boolean).join(' '),
+                class_code: String(student.class_code || '').normalize('NFKC').trim().split(/\s+/).filter(Boolean).join('').toUpperCase()
+            })));
+            let hash = 2166136261;
+            for (let index = 0; index < canonical.length; index += 1) {
+                hash ^= canonical.charCodeAt(index);
+                hash = Math.imul(hash, 16777619);
+            }
+            return (hash >>> 0).toString(16);
+        }
+
+        function newGoogleFormIdempotencyKey() {
+            if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+                return crypto.randomUUID();
+            }
+            return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+        }
+
+        function restoreGoogleFormIdempotencyState() {
+            const storage = googleFormStorage();
+            if (!storage) return;
+            try {
+                const saved = JSON.parse(storage.getItem(GOOGLEFORM_IDEMPOTENCY_STORAGE_KEY) || 'null');
+                if (saved && saved.key && saved.marker) googleformBatchId = String(saved.key);
+            } catch (err) {
+                storage.removeItem(GOOGLEFORM_IDEMPOTENCY_STORAGE_KEY);
+            }
+        }
+
+        function clearGoogleFormIdempotencyState() {
+            googleformBatchId = null;
+            const storage = googleFormStorage();
+            if (storage) storage.removeItem(GOOGLEFORM_IDEMPOTENCY_STORAGE_KEY);
+        }
+
+        function ensureGoogleFormIdempotencyKey(students) {
+            const marker = googleFormStudentMarker(students);
+            const storage = googleFormStorage();
+            let saved = null;
+            if (storage) {
+                try {
+                    saved = JSON.parse(storage.getItem(GOOGLEFORM_IDEMPOTENCY_STORAGE_KEY) || 'null');
+                } catch (err) {
+                    saved = null;
+                }
+            }
+            if (!googleformBatchId || !saved || saved.marker !== marker || saved.key !== googleformBatchId) {
+                googleformBatchId = newGoogleFormIdempotencyKey();
+            }
+            if (storage) {
+                storage.setItem(GOOGLEFORM_IDEMPOTENCY_STORAGE_KEY, JSON.stringify({
+                    key: googleformBatchId,
+                    marker,
+                    updated_at: new Date().toISOString()
+                }));
+            }
+            return googleformBatchId;
+        }
+
+        restoreGoogleFormIdempotencyState();
+
         function setPreviewImage(base64) {
             imgPreview.src = base64;
             imgPreview.classList.remove('hidden');
@@ -71,7 +144,7 @@
             try {
                 const data = await createRuntimeUpload(base64Data, 'googleform_ocr');
                 googleformUploadIds.push(data.upload_id);
-                googleformBatchId = null;
+                clearGoogleFormIdempotencyState();
             } catch (err) {
                 alert("Lỗi tải ảnh: " + err.message);
             } finally {
@@ -176,7 +249,7 @@
                         question.textContent = String(mapping.question || '');
                         const type = document.createElement('td');
                         type.className = 'px-5 py-3.5 text-xs text-gray-300';
-                        type.textContent = mapping.field_type === 'radio' ? 'Trắc nghiệm' : 'Văn bản';
+                        type.textContent = mapping.field_type === 'radio' ? 'Trắc nghiệm' : (['select', 'dropdown'].includes(mapping.field_type) ? 'Hộp chọn' : 'Văn bản');
                         const value = document.createElement('td');
                         value.className = 'px-5 py-3.5 text-emerald-400 font-mono text-[13px]';
                         value.textContent = String(mapping.value || '');
@@ -244,25 +317,76 @@
                             errorMessage.textContent = String(history.error_message);
                             status.appendChild(errorMessage);
                         }
-                        tr.append(time, student, status);
+                        const actionTd = document.createElement('td');
+                        actionTd.className = 'px-5 py-3 text-xs text-center whitespace-nowrap';
+                        if (history.screenshot_path) {
+                            const viewBtn = document.createElement('button');
+                            viewBtn.type = 'button';
+                            viewBtn.className = 'px-2 py-1 bg-indigo-500/20 text-indigo-300 hover:bg-indigo-500/30 rounded border border-indigo-500/30 mr-1.5 transition text-[11px] font-medium';
+                            viewBtn.innerHTML = '<i class="fa-solid fa-image mr-1"></i>Xem hình';
+                            viewBtn.onclick = () => openImageModal(`/api/googleform/submissions/${history.id}/screenshot`);
+
+                            const deleteBtn = document.createElement('button');
+                            deleteBtn.type = 'button';
+                            deleteBtn.className = 'px-2 py-1 bg-rose-500/20 text-rose-300 hover:bg-rose-500/30 rounded border border-rose-500/30 transition text-[11px] font-medium';
+                            deleteBtn.innerHTML = '<i class="fa-solid fa-trash-can mr-1"></i>Xóa hình';
+                            deleteBtn.onclick = () => deleteSubmissionScreenshot(history.id);
+
+                            actionTd.append(viewBtn, deleteBtn);
+                        } else {
+                            const emptySpan = document.createElement('span');
+                            emptySpan.className = 'text-gray-600 text-xs';
+                            emptySpan.textContent = '—';
+                            actionTd.appendChild(emptySpan);
+                        }
+                        tr.append(time, student, status, actionTd);
                         tbody.appendChild(tr);
                     });
                 } else {
-                    renderTableMessage(tbody, 3, 'Chưa có lịch sử nộp.');
+                    renderTableMessage(tbody, 4, 'Chưa có lịch sử nộp.');
                 }
             } catch (err) {}
+        }
+
+        async function deleteSubmissionScreenshot(id) {
+            if (!confirm("Bạn có chắc chắn muốn xóa ảnh chụp màn hình này?")) return;
+            try {
+                const res = await fetch(`/api/googleform/submissions/${id}/screenshot`, { method: 'DELETE' });
+                if (res.ok) {
+                    fetchGoogleFormHistory();
+                } else {
+                    alert("Không thể xóa ảnh chụp.");
+                }
+            } catch (err) {
+                alert("Lỗi khi gửi yêu cầu xóa ảnh.");
+            }
+        }
+
+        async function clearGoogleFormHistory() {
+            if (!confirm("Bạn có chắc chắn muốn xóa toàn bộ lịch sử nộp form và các ảnh chụp liên quan?")) return;
+            try {
+                const res = await fetch('/api/googleform/history', { method: 'DELETE' });
+                if (res.ok) {
+                    fetchGoogleFormHistory();
+                } else {
+                    alert("Không thể xóa lịch sử nộp form.");
+                }
+            } catch (err) {
+                alert("Lỗi khi gửi yêu cầu xóa lịch sử.");
+            }
         }
 
         async function submitGoogleForm() {
             if (ocrStudents.length === 0) return alert("Danh sách học viên trống! Hãy quét AI trước.");
             if (!canStartAnotherJob()) return;
+            const intentKey = ensureGoogleFormIdempotencyKey(ocrStudents);
             if (!confirm(`Sẽ nộp form cho ${ocrStudents.length} học viên. Bắt đầu ngay?`)) return;
             try {
                 const res = await fetch('/api/googleform/submit', {
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         students: ocrStudents,
-                        idempotency_key: googleformBatchId
+                        idempotency_key: intentKey
                     })
                 });
                 let data = {};
@@ -272,8 +396,12 @@
                     data = {};
                 }
                 if (!res.ok) {
+                    const detail = data && data.detail;
+                    const detailMessage = detail && typeof detail === 'object'
+                        ? (detail.message || detail.code)
+                        : detail;
                     throw new Error(
-                        data.detail || data.error || data.message ||
+                        detailMessage || data.error || data.message ||
                         `Máy chủ từ chối yêu cầu (HTTP ${res.status}).`
                     );
                 }

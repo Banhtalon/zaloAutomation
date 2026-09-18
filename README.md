@@ -1,58 +1,55 @@
-# QQ AI Workflow v9
-Status: revision 2 candidate; adoption awaits independent review and Controller readiness.
-Reusable, evidence-gated workflow kit for small projects whose Owner should not
-need to read code or operate the engineering control plane.
+# Zalo Automation / MindX Auto
 
-The canonical specification is `.ai-workflow/V9_CANONICAL_SPEC.md`. The kit is
-self-contained, dependency-free, and intentionally keeps model routing manual.
+Ứng dụng Windows chạy cục bộ để hỗ trợ ba công việc:
 
-## Start a new project
+1. Dò lớp từ BCNB, tìm báo cáo trong nhóm Zalo và lập kế hoạch cập nhật BCNB.
+2. Đọc ảnh danh sách học viên bằng Gemini và điền Google Form.
+3. Đọc ảnh tình trạng LMS và lập kế hoạch tích LMS trên BCNB.
 
-1. Create a repository from this template or copy the kit into an existing repo.
-2. Fill `.ai-workflow/PROJECT_PROFILE.json` from the example.
-3. Create a task and its verification manifest from `.ai-workflow/templates/`.
-4. Freeze verification before implementation:
+Ứng dụng dùng FastAPI, Python, Playwright, Gemini, SQLite, Jinja2 và JavaScript.
 
-   `npm run workflow:freeze -- path/to/verification-manifest.json`
+## Đọc tài liệu theo thứ tự
 
-5. Follow `.ai-workflow/CONTROLLER_OPERATIONS.md` to create an external
-   Controller snapshot and publish its digest in the task issue. Run tools from
-   a trusted checkout, with the candidate directory as working directory.
+1. [PROJECT_SUMMARY.md](PROJECT_SUMMARY.md) — chức năng và kiến trúc hiện tại.
+2. [PROJECT_STATE.md](PROJECT_STATE.md) — trạng thái, bằng chứng và việc còn mở.
+3. [PROJECT_COMPLETION_PLAN.md](PROJECT_COMPLETION_PLAN.md) — thứ tự hoàn thiện tiếp theo.
+4. [PROJECT_DECISIONS.md](PROJECT_DECISIONS.md) — các quyết định không được tự ý đảo ngược.
+5. [CLASS_LIFECYCLE.md](CLASS_LIFECYCLE.md) — quy tắc vòng đời lớp.
+6. [VERSION.md](VERSION.md) — lịch sử thay đổi cấp cao.
 
-   `node <trusted-kit>/scripts/prepare-attempt.mjs <control.json> <pinned-digest> <new-path> <new-branch>`
+AI hoặc người phát triển mới phải đọc `AGENTS.md` trước khi sửa dự án.
 
-6. Commit the candidate, bind its head and inspect the actual Git diff, then
-   publish the returned Controller digest before running frozen gates:
+## Khởi động trên máy hiện tại
 
-   `node <trusted-kit>/scripts/inspect-risk.mjs <control.json> <pinned-digest> <candidate-head>`
+1. Giữ file `.env` ở máy cục bộ; không gửi file này cho người khác.
+2. Chạy `START.bat`.
+3. Mở `http://127.0.0.1:8000` nếu trình duyệt không tự mở.
+4. Kiểm tra `http://127.0.0.1:8000/api/health/ready`. Thành công khi có
+   `"ready": true`.
 
-   `node <trusted-kit>/scripts/verify-task.mjs <manifest.json> <control.json> <new-pinned-digest> <external-evidence.json>`
+`START.bat` dùng môi trường Python trong `venv` và chạy
+`python -m scripts.run_local`. Chỉ chạy một tiến trình ứng dụng vì SQLite và
+profile Zalo đang được thiết kế cho một máy/một người vận hành.
 
-7. Generate the plain-language Owner handoff:
+## Kiểm tra chất lượng
 
-   `npm run workflow:owner-status -- path/to/task.json`
+Chạy tại thư mục gốc của dự án:
 
-Run `npm test` to validate the kit and `npm run pilot` to execute the three
-hermetic GREEN, YELLOW, and escalation pilots.
+```powershell
+.\CHECK_QUALITY.ps1 -Isolated
+```
 
-## Safety properties
+Chế độ `-Isolated` dùng dữ liệu tạm và chặn trình duyệt/dịch vụ thật. Một lần
+kiểm tra xanh chỉ chứng minh mã nguồn chạy được trong môi trường cách ly; không
+phải quyền ghi Zalo, BCNB, Google Form hoặc triển khai production.
 
-- deterministic evidence outranks model opinion;
-- verification criteria are hash-locked before implementation;
-- risk can increase after diff inspection and cannot decrease within a revision;
-- risk and complexity are separate fields;
-- every retry uses a clean worktree from the same approved baseline;
-- secrets are redacted at the command-output boundary;
-- high-risk work stops for a qualified reviewer and/or Technical Operator;
-- no unattended model routing is included in v9.
+## Quy tắc an toàn
 
-## Zalo Automation adoption
-
-This is an existing FastAPI/Python/Playwright/Gemini/SQLite project. The
-product roadmap and historical reports remain in `PROJECT_SUMMARY.md`,
-`PROJECT_STATE.md`, `PROJECT_DECISIONS.md`, and `docs/`; this adoption adds the
-v9 control plane without rebuilding product code. Project-specific gates are
-defined in the frozen migration manifest under `.ai-workflow/tasks/`.
-
-Local migration evidence is hermetic only. It does not authorize database,
-browser, Zalo/BCNB, Google Form, deployment, or production actions.
+- `.env`, `database.db`, `runtime/`, ảnh bằng chứng và `zalo_session/` không
+  được đưa vào Git.
+- Thiếu hoặc mơ hồ về lớp, tuần, ngày, nhóm Zalo hay kết quả ghi phải dừng để
+  người vận hành kiểm tra.
+- Không chạy thao tác thật chỉ vì `.env` đang để chế độ production. Mỗi lần chạy
+  thật vẫn cần đúng mục tiêu, bản xem trước mới và xác nhận riêng của Owner.
+- Trước khi cập nhật hoặc triển khai, phải sao lưu SQLite và giữ khả năng quay
+  lại phiên bản trước.

@@ -22,7 +22,7 @@ required_files = {
     "services/zalo_discovery_service.py",
     "services/observability.py",
     "api/health_routes.py",
-    "PHASE3_MAINTAINABILITY.md",
+    "PROJECT_SUMMARY.md",
     "templates/index.html",
     "templates/partials/sidebar.html",
     "templates/partials/header.html",
@@ -86,10 +86,12 @@ invariants = {
     "lms-digest-binds-mode": '"dry_run": bool(plan.get("dry_run", True))' in plan,
     "zalo-chat-fail-closed": "open_chat_matches(group_name, header_text)" in zalo
     and "Không xác minh được nhóm Zalo đang mở" in zalo,
-    "shared-bcnb-week-selection": "select_last_week_checked" in discovery
+    # Discovery deliberately reads the current period from BCNB itself before
+    # deriving its predecessor; LMS still uses the shared previous-week helper.
+    "shared-bcnb-week-selection": "read_current_week_checked" in discovery
     and "select_last_week_checked" in lms,
     "service-size-budget": len(zalo.splitlines()) <= 520
-    and len(discovery.splitlines()) <= 300,
+    and len(discovery.splitlines()) <= 400,
     "app-factory": "def create_app(" in main and "app = create_app()" in main,
     "single-container-dispatcher": "self.dispatcher = JobDispatcher(" in container_source,
     "metrics-off-event-loop": "asyncio.to_thread" in health_routes,

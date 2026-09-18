@@ -8,12 +8,13 @@ import re
 import shutil
 import uuid
 from contextlib import suppress
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from pathlib import Path
 
 import PIL.Image
 
 from googleform_autosubmit.config import Config
+from core.time_utils import now_utc, utc_iso
 from logger_utils import log_message
 from repositories.upload_repository import UploadClaimError, UploadRepository
 
@@ -322,8 +323,8 @@ class UploadStore:
 
     async def cleanup_expired(self, retention_hours: int | None = None) -> int:
         hours = retention_hours if retention_hours is not None else Config.UPLOAD_RETENTION_HOURS
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=max(1, hours))
-        records = await self.repository.list_expired(cutoff.isoformat(timespec="seconds"))
+        cutoff = now_utc() - timedelta(hours=max(1, hours))
+        records = await self.repository.list_expired(utc_iso(cutoff))
         deleted = 0
         async with self._lock:
             for record in records:

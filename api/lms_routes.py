@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
-from api.dependencies import get_container
+from api.dependencies import enqueue_job, get_container, require_admin, require_operator
 from api.errors import public_error
 from core.container import AppContainer
 from repositories.lms_repository import ConfirmationError
@@ -80,11 +80,11 @@ async def _start_analysis(upload_id: str, container: AppContainer):
             "UPLOAD_CONFLICT",
             "Ảnh LMS không còn sẵn sàng.",
         ) from exc
-    container.dispatcher.schedule_job(job_id)
+    await enqueue_job(container, job_id)
     return {"status": "success", "job_id": job_id, "dry_run": dry_run}
 
 
-@router.post("/api/lms/analyze")
+@router.post("/api/lms/analyze", dependencies=[Depends(require_operator)])
 async def api_lms_analyze(
     req: LMSAnalyzeRequest,
     container: AppContainer = Depends(get_container),
@@ -92,7 +92,7 @@ async def api_lms_analyze(
     return await _start_analysis(req.upload_id, container)
 
 
-@router.post("/api/lms/upload-and-run", deprecated=True)
+@router.post("/api/lms/upload-and-run", deprecated=True, dependencies=[Depends(require_operator)])
 async def api_lms_legacy_analyze(
     req: LMSLegacyUploadRequest,
     container: AppContainer = Depends(get_container),
@@ -112,7 +112,7 @@ async def api_lms_legacy_analyze(
     return await _start_analysis(upload["upload_id"], container)
 
 
-@router.post("/api/lms/confirm")
+@router.post("/api/lms/confirm", dependencies=[Depends(require_admin)])
 async def api_lms_confirm(
     req: LMSConfirmRequest,
     container: AppContainer = Depends(get_container),
@@ -121,12 +121,17 @@ async def api_lms_confirm(
         confirmation = await container.lms_repo.consume_confirmation(
             req.analysis_job_id,
             req.confirmation_token,
+            # The mode is read from the current immutable app settings at the
+            # last possible moment.  A preview made in production must never
+            # be consumable after the operator switches to dry-run (or vice
+            # versa).
+            dry_run=container.settings.bcnb_dry_run,
             max_age_minutes=container.settings.lms_confirmation_ttl_minutes,
         )
     except ConfirmationError as exc:
         raise public_error(
             409,
-            "LMS_CONFIRMATION_INVALID",
+            getattr(exc, "code", "LMS_CONFIRMATION_INVALID"),
             "Xác nhận LMS không hợp lệ hoặc đã hết hạn.",
         ) from exc
 
@@ -145,7 +150,7 @@ async def api_lms_confirm(
             "Kế hoạch LMS không còn hợp lệ.",
         )
 
-    container.dispatcher.schedule_job(confirmation["job_id"])
+    await enqueue_job(container, confirmation["job_id"])
     return {
         "status": "success",
         "job_id": confirmation["job_id"],

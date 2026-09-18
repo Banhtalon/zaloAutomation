@@ -39,6 +39,4 @@ runtime/
 .DS_Store
 Thumbs.db
 
-# QQ AI Workflow runtime state
 node_modules/
-.ai-workflow/runtime/

@@ -1,5 +1,10 @@
 import asyncio
+import io
+from pathlib import Path
 import re
+import time
+import uuid
+from PIL import Image
 from playwright.async_api import async_playwright
 from logger_utils import logger
 from .browser_launcher import launch_chromium_with_fallback
@@ -19,6 +24,37 @@ class SubmissionOutcomeUnknownError(RuntimeError):
 
     pass
 
+def _save_stitched_screenshots(screenshots: list[bytes], student_name: str) -> str | None:
+    if not screenshots:
+        return None
+    try:
+        screenshot_dir = Path(Config.RUNTIME_ROOT) / "screenshots" / "googleform"
+        screenshot_dir.mkdir(parents=True, exist_ok=True)
+        safe_name = re.sub(r"[^\w\-]", "_", student_name)[:20]
+        filename = f"sub_{int(time.time())}_{safe_name}_{uuid.uuid4().hex[:6]}.png"
+        output_path = screenshot_dir / filename
+
+        images = [Image.open(io.BytesIO(b)) for b in screenshots if b]
+        if not images:
+            return None
+        if len(images) == 1:
+            images[0].save(output_path, format="PNG", optimize=True)
+        else:
+            total_width = max(img.width for img in images)
+            total_height = sum(img.height for img in images)
+            stitched = Image.new("RGB", (total_width, total_height), (255, 255, 255))
+            current_y = 0
+            for img in images:
+                stitched.paste(img, (0, current_y))
+                current_y += img.height
+            stitched.save(output_path, format="PNG", optimize=True)
+
+        return str(output_path)
+    except Exception as exc:
+        logger.warning(f"Không thể tạo ảnh chụp màn hình ghép: {exc}")
+        return None
+
+
 class FormSubmitter:
     def __init__(self, mapping_dict, execution_mode=None):
         self.mapping = mapping_dict
@@ -37,7 +73,7 @@ class FormSubmitter:
 
         return False
 
-    async def fill_field(self, page, question, rules):
+    async def fill_field(self, page, question, rules, class_code=None, captured_screenshots=None):
         field_type = rules['type']
         value = rules['value']
         
@@ -47,14 +83,31 @@ class FormSubmitter:
                 .filter(has_text=question)
                 .first
             )
-            
+
             # --- TÍNH NĂNG CHUYỂN TRANG THÔNG MINH ---
+            question_aliases = {
+                "Mã cơ sở của em là?": "Cơ sở trường MindX mà em đang học",
+                "Cơ sở trường MindX mà em đang học": "Mã cơ sở của em là?",
+            }
+            alt_question = question_aliases.get(question)
+
             for _ in range(5):
                 if await question_container.count() > 0 and await question_container.is_visible():
                     break
+                if alt_question:
+                    alt_container = page.locator("div[role='listitem']").filter(has_text=alt_question).first
+                    if await alt_container.count() > 0 and await alt_container.is_visible():
+                        question_container = alt_container
+                        break
                 
                 next_btn = page.locator("div[role='button']").filter(has_text=re.compile(r"^\s*(Tiếp|Next)\s*$", re.IGNORECASE)).first
                 if await next_btn.count() > 0 and await next_btn.is_visible():
+                    if captured_screenshots is not None and hasattr(page, "screenshot"):
+                        try:
+                            img_bytes = await page.screenshot(full_page=False)
+                            captured_screenshots.append(img_bytes)
+                        except Exception:
+                            pass
                     logger.info("👉 Không thấy câu hỏi. Đang cuộn và bấm 'Tiếp' sang trang sau...")
                     await next_btn.scroll_into_view_if_needed()
                     await next_btn.click()
@@ -65,6 +118,11 @@ class FormSubmitter:
                 else:
                     break
 
+            if await question_container.count() == 0 and alt_question:
+                alt_container = page.locator("div[role='listitem']").filter(has_text=alt_question).first
+                if await alt_container.count() > 0:
+                    question_container = alt_container
+
             if await question_container.count() == 0:
                 raise Exception("Không tìm thấy câu hỏi trên bất kỳ trang nào.")
 
@@ -72,7 +130,83 @@ class FormSubmitter:
             await question_container.scroll_into_view_if_needed()
 
             # --- ĐIỀN DỮ LIỆU ---
-            if field_type == "text":
+            is_listbox = False
+            if hasattr(question_container, "locator"):
+                try:
+                    is_listbox = (await question_container.locator("div[role='listbox']").count()) > 0
+                except Exception:
+                    is_listbox = False
+
+            if field_type in ("select", "dropdown", "listbox") or (is_listbox and field_type not in ("text",)):
+                listbox = question_container.locator("div[role='listbox']").first
+                if await listbox.count() == 0:
+                    raise ValueError(f"Không tìm thấy hộp chọn (dropdown) cho câu hỏi [{question}].")
+
+                target_value = value.strip()
+                if target_value.lower() == "auto" and class_code:
+                    target_value = class_code.split("-")[0].strip().upper()
+
+                campus_code_map = {
+                    "VT": "Vũng Tàu - 205A Lê Hồng Phong",
+                    "HN": "HN - 71 Nguyễn Chí Thanh",
+                    "HCM": "HCM - Phan Văn Trị",
+                    "DN": "Đà Nẵng",
+                    "HP": "Hải Phòng",
+                    "CT": "Cần Thơ",
+                    "BD": "Bình Dương",
+                    "NA": "Nghệ An",
+                    "BN": "Bắc Ninh",
+                    "QN": "Quảng Ninh",
+                    "PT": "Phú Thọ",
+                    "VP": "Vĩnh Phúc",
+                    "TN": "Thái Nguyên",
+                    "TH": "Thanh Hóa",
+                    "HY": "Hưng Yên",
+                }
+                if target_value.upper() in campus_code_map:
+                    target_value = campus_code_map[target_value.upper()]
+
+                option_locator = page.get_by_role("option", name=target_value, exact=True)
+
+                # Mở dropdown với cơ chế retry: đợi option visible thay vì sleep cố định
+                _DROPDOWN_MAX_RETRIES = 3
+                _DROPDOWN_OPTION_TIMEOUT_MS = 5000
+                for dropdown_attempt in range(_DROPDOWN_MAX_RETRIES):
+                    await listbox.scroll_into_view_if_needed()
+                    await listbox.click()
+                    try:
+                        await option_locator.first.wait_for(
+                            state="visible", timeout=_DROPDOWN_OPTION_TIMEOUT_MS
+                        )
+                        break  # Dropdown đã mở, option visible
+                    except Exception:
+                        if dropdown_attempt < _DROPDOWN_MAX_RETRIES - 1:
+                            logger.warning(
+                                f"Dropdown chưa mở (lần {dropdown_attempt + 1}/"
+                                f"{_DROPDOWN_MAX_RETRIES}), thử lại..."
+                            )
+                            # Bấm lại listbox để đóng dropdown bị kẹt, rồi đợi
+                            try:
+                                await listbox.click()
+                            except Exception:
+                                pass
+                            await asyncio.sleep(0.5)
+                        else:
+                            # Fallback: thử tìm option không exact
+                            option_locator = page.get_by_role(
+                                "option", name=target_value
+                            )
+                            if await option_locator.count() == 0:
+                                raise ValueError(
+                                    f"Không tìm thấy lựa chọn [{value}] trong danh sách."
+                                )
+
+                target_option = option_locator.first
+                await target_option.scroll_into_view_if_needed()
+                await target_option.click()
+                await asyncio.sleep(0.3)
+
+            elif field_type == "text":
                 input_locator = question_container.locator("input[type='text'], textarea").first
                 await input_locator.fill(value)
                 
@@ -117,13 +251,41 @@ class FormSubmitter:
         await page.goto(Config.FORM_URL, wait_until="domcontentloaded")
         await self.check_captcha(page)
 
+        captured_screenshots: list[bytes] = []
+
         # Cập nhật tên câu hỏi chính xác theo ảnh số 1
-        await self.fill_field(page, "Tên của em là?", {"type": "text", "value": student_name})
-        await self.fill_field(page, "Mã lớp của em là?", {"type": "text", "value": class_code})
+        await self.fill_field(
+            page,
+            "Tên của em là?",
+            {"type": "text", "value": student_name},
+            captured_screenshots=captured_screenshots,
+        )
+        await self.fill_field(
+            page,
+            "Mã lớp của em là?",
+            {"type": "text", "value": class_code},
+            captured_screenshots=captured_screenshots,
+        )
 
         # Điền các câu còn lại từ cấu hình mapping
         for question, rules in self.mapping.items():
-            await self.fill_field(page, question, rules)
+            await self.fill_field(
+                page,
+                question,
+                rules,
+                class_code=class_code,
+                captured_screenshots=captured_screenshots,
+            )
+
+        # Chụp màn hình trang cuối cùng sau khi điền xong
+        if hasattr(page, "screenshot"):
+            try:
+                img_bytes = await page.screenshot(full_page=False)
+                captured_screenshots.append(img_bytes)
+            except Exception:
+                pass
+
+        screenshot_path = _save_stitched_screenshots(captured_screenshots, student_name)
 
         if self.execution_mode == "production":
             submit_button = page.locator("div[role='button']").filter(has_text=re.compile(r"^\s*(Gửi|Submit|Gửi|Hoàn thành)\s*$", re.IGNORECASE)).first
@@ -164,12 +326,14 @@ class FormSubmitter:
         else:
             logger.info("Dry-Run: Đã điền form. Mô phỏng thành công.")
 
+        return screenshot_path
+
     async def submit_form(self, student_name, class_code, browser=None):
         if browser:
             context = await browser.new_context()
             page = await context.new_page()
             try:
-                await self._execute_submission(page, student_name, class_code)
+                return await self._execute_submission(page, student_name, class_code)
             except Exception as e:
                 logger.error(f"❌ Thất bại cho {student_name}: {e}")
                 raise e
@@ -184,7 +348,7 @@ class FormSubmitter:
                 context = await local_browser.new_context()
                 page = await context.new_page()
                 try:
-                    await self._execute_submission(page, student_name, class_code)
+                    return await self._execute_submission(page, student_name, class_code)
                 except Exception as e:
                     logger.error(f"❌ Thất bại cho {student_name}: {e}")
                     raise

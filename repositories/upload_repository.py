@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from core.time_utils import utc_iso
 
 from db.database import get_db_connection
 
@@ -8,7 +8,7 @@ class UploadClaimError(ValueError):
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return utc_iso()
 
 
 class UploadRepository:
