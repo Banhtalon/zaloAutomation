@@ -1,5 +1,13 @@
         let groupsCache = [];
         let bcnbZaloGapsCache = [];
+        function safeGroupLabel(value, fallback = 'Chưa xác định') {
+            const text = String(value || '').trim();
+            if (!text) return fallback;
+            if (/(<\?php|<\/?b\b|warning\s*:|notice\s*:|fatal\s+error|stack\s+trace|mysqli_|undefined\s+index)/i.test(text)) {
+                return 'Dữ liệu nguồn không hợp lệ';
+            }
+            return text;
+        }
         function renderTableMessage(tbody, colSpan, message, isError = false) {
             const tr = document.createElement('tr');
             const td = document.createElement('td');
@@ -33,7 +41,7 @@
             groups.forEach((g, idx) => {
                 const tr = document.createElement('tr');
                 tr.className = 'hover:bg-white/5 transition-colors';
-                const values = [idx + 1, g.TenNhom || '', g.NguoiPhuTrach || 'Trống'];
+                const values = [idx + 1, safeGroupLabel(g.TenNhom, 'Chưa có tên nhóm'), safeGroupLabel(g.NguoiPhuTrach, 'Trống')];
                 values.forEach((value, valueIndex) => {
                     const td = document.createElement('td');
                     td.className = valueIndex === 0
@@ -83,7 +91,9 @@
                 const values = [
                     index + 1,
                     item.class_code || '',
-                    (Array.isArray(item.teachers) ? item.teachers : []).join(', ') || 'Chưa xác định',
+                    (Array.isArray(item.teachers) ? item.teachers : [])
+                        .map(teacher => safeGroupLabel(teacher))
+                        .join(', ') || 'Chưa xác định',
                     formatBcnbZaloGapPeriods(periods),
                     periods.map(period => period.class_date || period.class_date_iso || '').filter(Boolean).join(', '),
                     bcnbZaloGapLabels[item.status] || item.status || 'Cần xem lại'

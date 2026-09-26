@@ -857,3 +857,73 @@
   `F:\FINAL_PROJECT\zaloAutomation-docs-before-normalize-20260918-093444.zip`.
 - Supersedes: Cách tổ chức report theo từng task trong DEC-001; không thay đổi
   các quyết định an toàn hoặc nghiệp vụ khác.
+
+## DEC-029 — Canary chỉ-đọc hữu hạn cho JSB16 sau sửa timeout
+
+- Date: 2026-09-22
+- Status: Accepted for one completed read-only observation
+- Context: Owner chọn `VT-JSB16` để kiểm tra trên Zalo thật sau khi Terra đã
+  chấp nhận bản sửa ZALO-SEARCH-TIMEOUT-001 ở local/source. Target chính xác
+  được đối chiếu từ Job 277: buổi 6 ngày 20/09/2026, không phải buổi 7 sắp tới.
+- Decision: Bổ sung một descriptor bất biến và CLI riêng chỉ cho JSB16; không
+  nhận mã lớp, tên nhóm hay descriptor từ dòng lệnh. Cửa sổ bằng chứng là
+  12–22/09/2026. Giữ nguyên giới hạn 300 giây, 60 lần cuộn, 1.000 tin nhắn,
+  profile lock, cleanup fail-closed, artifact ngoài Git và toàn bộ cấm ghi
+  BCNB, Zalo, Form, database, repository và job dispatch.
+- Evidence: Contract tests của ba canary đạt 16/16; `CHECK_QUALITY.ps1
+  -Isolated` đạt exit 0, 540 tests, coverage 77.1%, `QUALITY GATE PASSED`.
+  Canary thật chạy một lần: Zalo authenticated, cửa sổ 10 ngày được tải đủ,
+  cleanup `CLEANUP_OK`, không có `TargetClosedError`, không tạo job mới. Kết
+  quả target là `NOT_FOUND_VERIFIED`/`LESSON_REPORT_ABSENT`; artifact riêng tư
+  ngoài repository, JSON rút gọn SHA-256
+  `20F238C3058B944D2EC729F2EAC7B3BF037E5AFCB209587146ECCC881D157790`.
+- Consequences: Đây là bằng chứng đúng cho một quan sát chỉ-đọc, không làm
+  Job 277 thành công và không cho phép chạy batch, retry chung, mutation,
+  staging, pilot hay production. JSB16 cần kiểm tra nghiệp vụ thủ công; nếu
+  cần canary cho lớp khác, phải tạo descriptor khóa cứng và được Owner duyệt
+  riêng.
+- Supersedes: None. Extends DEC-021/DEC-022 và không thay đổi các rào chắn
+  fail-closed.
+
+## DEC-030 — Preflight fail-closed và một phiên Zalo production trên mỗi profile
+
+- Date: 2026-09-26
+- Status: Accepted for local implementation; chưa phải production acceptance.
+- Context: Owner gặp Zalo mở hai tab, popup phiên khác và `TargetClosedError` khi
+  retry đóng page cũ. Trước đây nút chạy chưa có một báo cáo tổng hợp để phân
+  biệt điều kiện an toàn với cảnh báo cần xác nhận.
+- Decision: Trước `/run-scan`, server trả báo cáo `GREEN`, `YELLOW` hoặc `RED`
+  gồm kế hoạch, job đang chạy, cấu hình production, database/backup, profile
+  lock và audit chưa xử lý. `RED` chặn cả UI lẫn API; `YELLOW` chỉ được chạy
+  production sau xác nhận rõ ràng; không có force-run. Server kiểm tra lại lần
+  cuối ngay trước khi tạo job. Production dùng một worker/trang Zalo trên mỗi
+  profile; dry-run vẫn giữ số worker cấu hình. Hàng đợi target cần xem lại chỉ
+  đọc, không tự kết luận hoặc ghi BCNB. Chuỗi cảnh báo HTML/PHP từ nguồn ngoài
+  không được dùng làm nhãn chính trên giao diện.
+- Consequences: Cấu hình `BCNB_DRY_RUN=false` chỉ cho phép hệ thống xem xét
+  production; Owner vẫn phải qua preflight. Nếu cần nhiều worker production,
+  phải có profile riêng và kiểm chứng độc lập. Backup preflight tạo một bản sao
+  SQLite tạm để kiểm chứng rồi dọn ngay; không thay đổi database nguồn.
+- Evidence: Source và test local ngày 2026-09-26; không chạy browser Zalo thật,
+  không ghi BCNB và không thay đổi `.env`, database hoặc browser profile trong
+  task này. Quality gate đầy đủ được ghi bổ sung trong `PROJECT_STATE.md` sau
+  khi chạy xong.
+- Supersedes: Không; mở rộng các rào chắn fail-closed của DEC-021/DEC-022 và
+  giữ nguyên DEC-029.
+
+## DEC-031 — Admission job Zalo nguyên tử khi có cạnh tranh
+
+- Date: 2026-09-26
+- Status: Accepted for local implementation; chưa phải production acceptance.
+- Context: Preflight và lần kiểm tra lại ngay trước khi tạo job vẫn có thể bị
+  hai HTTP request chạy đồng thời cùng nhìn thấy trạng thái “chưa có job”.
+- Decision: `JobRepository.create_job(..., reject_if_active=True)` kiểm tra job
+  `PENDING`/`RUNNING` và chèn job trong cùng giao dịch SQLite `BEGIN IMMEDIATE`.
+  Route `/run-scan` dùng chốt này và trả `ACTIVE_JOB_PRESENT` nếu request khác
+  đã nhận trước. Không thêm hàng đợi production hoặc nút force-run.
+- Consequences: Chỉ một request được nhận trong cuộc cạnh tranh; request còn lại
+  dừng an toàn trước khi mở browser hoặc ghi BCNB. Các loại job khác không đổi
+  vì tùy chọn này mặc định tắt.
+- Evidence: Regression `test_exclusive_job_admission_rejects_active_job_atomically`
+  pass; quality gate ngày 2026-09-26 đạt exit 0, 560 test.
+- Supersedes: Không; bổ sung DEC-030.

@@ -1,7 +1,7 @@
 # PROJECT SUMMARY — Zalo Automation
 
 > Nguồn tham chiếu tổng quan cho AI và người phát triển. Nội dung này mô tả mã
-> nguồn tại ngày 2026-09-18; dữ liệu và trạng thái chạy phải kiểm tra lại trong
+> nguồn tại ngày 2026-09-26; dữ liệu và trạng thái chạy phải kiểm tra lại trong
 > `PROJECT_STATE.md` và runtime trước mỗi task.
 
 ## 1. Mục tiêu sản phẩm
@@ -26,7 +26,7 @@ Ba luồng nghiệp vụ chính:
 | Tự động trình duyệt | Playwright `1.60.0`, Chromium, profile cục bộ |
 | AI đọc ảnh | Google Gemini qua `google-genai 2.8.0` |
 | Dữ liệu | SQLite và `aiosqlite` |
-| Giao diện | Jinja2, JavaScript thường, CSS/Tailwind CDN, Chart.js |
+| Giao diện | Jinja2, JavaScript thường, CSS/Tailwind CDN |
 | Python | Cấu hình kiểm tra cho Python 3.14; máy hiện tại dùng Python 3.14.7 |
 | Kiểm tra | `unittest`, Coverage, Ruff, mypy và các cổng bất biến theo giai đoạn |
 | Khởi động | `START.bat` → `python -m scripts.run_local` → `main:app` |
@@ -60,7 +60,8 @@ khi có yêu cầu chức năng hoặc lỗi cụ thể và phải kiểm tra t�
 
 Mã nguồn hiện có 43 route. Các nhóm chính:
 
-- `/auto-discover`, `/run-scan`, `/api/zalo-scan-plan`, `/api/groups`:
+  - `/auto-discover`, `/run-scan`, `/api/zalo-scan-plan`,
+    `/api/zalo-scan-preflight`, `/api/groups`:
   discovery, kế hoạch và quét Zalo/BCNB.
 - `/api/uploads`, `/api/googleform/*`: upload, OCR, mapping, lịch sử, ảnh bằng
   chứng và submit Google Form.
@@ -90,6 +91,10 @@ SQLite là nguồn trạng thái bền vững. `JobDispatcher` hỗ trợ sáu l
 | `LMS_ANALYSIS` | OCR và tạo kế hoạch LMS | Có |
 | `LMS_AUTOMATION` | Thực hiện kế hoạch đã xác nhận | Không retry mù |
 
+`/run-scan` phải qua preflight GREEN hoặc xác nhận YELLOW; bước tạo job Zalo
+kiểm tra job đang hoạt động trong cùng giao dịch SQLite để không nhận hai lần
+chạy cạnh tranh. Production chỉ dùng một worker/trang Zalo trên mỗi profile.
+
 Job có heartbeat, cancel hợp tác, timeout, giới hạn hàng đợi, event timeline và
 external-action audit. Job production bị gián đoạn không được tự phát lại vì
 có thể thao tác bên ngoài đã xảy ra nhưng chưa kịp ghi kết quả.
@@ -99,7 +104,10 @@ có thể thao tác bên ngoài đã xảy ra nhưng chưa kịp ghi kết quả
 1. Discovery đọc đúng hai tuần BCNB, thu thập nhóm Zalo và tạo snapshot bất biến.
 2. So khớp ưu tiên mã lớp đầy đủ; alias rút gọn chỉ được dùng khi ánh xạ duy nhất.
 3. `/run-scan` từ chối snapshot cũ, thiếu hai tuần, trùng target hoặc chưa đến giờ học.
-4. Hai worker Zalo đọc target song song; thao tác ghi BCNB được giới hạn riêng.
+4. Dry-run giữ số worker cấu hình để kiểm thử; production hiện dùng một worker
+   Zalo trên mỗi profile vì Zalo chỉ cho một phiên/tab ổn định. Muốn tăng worker
+   phải dùng profile riêng và kiểm chứng riêng; thao tác ghi BCNB vẫn được giới
+   hạn độc lập.
 5. Tin nhắn được phân loại bằng luật. Ngày gửi lấy từ giao diện Zalo; ngày trong
    nội dung chỉ là bằng chứng hỗ trợ.
 6. Thiếu lịch sử đồng bộ, header sai, ngày không chắc chắn hoặc target mơ hồ trả

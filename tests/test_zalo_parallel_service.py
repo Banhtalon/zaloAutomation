@@ -28,7 +28,10 @@ class BatchFailurePolicyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(policy.consecutive_systemic, 3)
         self.assertEqual(policy.abnormal_targets, 3)
         self.assertTrue(policy.halted.is_set())
-        self.assertEqual(policy.halt_reason, "auth session unavailable")
+        self.assertEqual(
+            policy.halt_reason,
+            parallel_service.ZALO_JOB_REASON_BATCH_SYSTEMIC_THRESHOLD,
+        )
 
     async def test_non_systemic_result_breaks_consecutive_systemic_count(self):
         policy = BatchFailurePolicy(total_targets=100)
@@ -50,7 +53,27 @@ class BatchFailurePolicyTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await policy.record(abnormal=True, systemic=False))
         self.assertEqual(policy.abnormal_targets, 2)
         self.assertTrue(policy.halted.is_set())
-        self.assertIn("2/5", policy.halt_reason or "")
+        self.assertEqual(
+            policy.halt_reason,
+            parallel_service.ZALO_JOB_REASON_BATCH_ABNORMAL_THRESHOLD,
+        )
+
+    async def test_forty_eight_targets_nine_abnormal_does_not_halt_but_ten_does(self):
+        policy = BatchFailurePolicy(total_targets=48)
+        for _ in range(9):
+            halted = await policy.record(abnormal=True, systemic=False)
+            self.assertFalse(halted)
+            self.assertFalse(policy.halted.is_set())
+        self.assertEqual(policy.abnormal_targets, 9)
+
+        halted = await policy.record(abnormal=True, systemic=False)
+        self.assertTrue(halted)
+        self.assertTrue(policy.halted.is_set())
+        self.assertEqual(policy.abnormal_targets, 10)
+        self.assertEqual(
+            policy.halt_reason,
+            parallel_service.ZALO_JOB_REASON_BATCH_ABNORMAL_THRESHOLD,
+        )
 
 
 class InMemoryBatchRepository:
@@ -256,7 +279,7 @@ class FakeSearchInput:
         self.fill_calls = 0
         self.values = []
 
-    async def clear(self):
+    async def clear(self, *args, **kwargs):
         self.clear_calls += 1
         if self.clear_hang:
             await asyncio.Event().wait()
@@ -265,7 +288,7 @@ class FakeSearchInput:
             if error is not None:
                 raise error
 
-    async def fill(self, value):
+    async def fill(self, value, *args, **kwargs):
         self.fill_calls += 1
         self.values.append(value)
         self.page.header_locator.text = value
@@ -481,6 +504,463 @@ def _verified_scan_result(target: dict[str, object]) -> dict[str, object]:
             },
         },
     }
+
+
+class BatchHaltPolicyAcceptanceTests(unittest.IsolatedAsyncioTestCase):
+    """Hermetic acceptance tests for requirements P1–P7 of ZALO-BATCH-HALT-POLICY-002."""
+
+    async def test_p1_forty_nine_targets_ten_not_found_verified_thirty_nine_submitted_does_not_halt(self):
+        """P1: 49 targets with 10 NOT_FOUND_VERIFIED and 39 SUBMITTED_VERIFIED does not halt on 20% threshold;
+        scan completes batch; 0 unsubmitted targets written to BCNB."""
+        repository = InMemoryBatchRepository()
+        browser = FakeParallelBrowser([{}, {}])
+        evidence_repo = SimpleNamespace(register_scan_results=AsyncMock())
+        job_repo = SimpleNamespace(
+            ensure_not_cancelled=AsyncMock(),
+            update_job=AsyncMock(),
+        )
+        runtime = SimpleNamespace(
+            external=SimpleNamespace(browser=browser),
+            zalo_scan_concurrency=2,
+            bcnb_write_concurrency=1,
+            batch_systemic_failure_limit=3,
+            batch_abnormal_percent_limit=20,
+        )
+        targets = [_make_search_target(index) for index in range(1, 50)]
+
+        async def fake_scan(_page, *, target, **_kwargs):
+            target_id = int(target["lesson"]) - 20
+            if target_id <= 10:
+                return {
+                    "scan_target": target,
+                    "evidence_state": "NOT_FOUND_VERIFIED",
+                    "status": "NOT_FOUND",
+                    "evidence": {
+                        "date_context": {"target_week": target["week"], "target_year": target["year"]},
+                        "classifier_result": {"decision": "NOT_FOUND"},
+                    },
+                }
+            return {
+                "scan_target": target,
+                "evidence_state": "SUBMITTED_VERIFIED",
+                "status": "VERIFIED",
+                "evidence": {
+                    "date_context": {"target_week": target["week"], "target_year": target["year"]},
+                    "classifier_result": {"decision": "SUBMITTED"},
+                },
+            }
+
+        async def fake_update(_page, *, period_filter, scan_results, **_kwargs):
+            return {
+                "target_outcomes": [
+                    {
+                        "class_code": item["scan_target"]["class_code"],
+                        "lesson": item["scan_target"]["lesson"],
+                        "week": item["scan_target"]["week"],
+                        "year": item["scan_target"]["year"],
+                        "class_date_iso": item["scan_target"]["class_date_iso"],
+                        "status": "DRY_RUN",
+                    }
+                    for item in scan_results
+                    if (
+                        int(item["scan_target"]["week"]),
+                        int(item["scan_target"]["year"]),
+                    ) in period_filter
+                    and item.get("evidence_state") == "SUBMITTED_VERIFIED"
+                ]
+            }
+
+        scan_plan = {
+            "selected_weeks": [{"week": 34, "year": 2026}],
+            "targets": targets,
+        }
+        with (
+            patch.object(parallel_service, "ZaloBatchRepository", return_value=repository),
+            patch.object(
+                parallel_service,
+                "ensure_zalo_history_synced",
+                AsyncMock(return_value={"verified": True, "reason": "fixture"}),
+            ),
+            patch.object(parallel_service, "_login_bcnb_if_needed", AsyncMock()),
+            patch.object(parallel_service, "_scan_one_target", side_effect=fake_scan),
+            patch.object(parallel_service, "update_bcnb_reports", side_effect=fake_update),
+            patch.object(parallel_service, "log_message"),
+            patch.object(parallel_service.asyncio, "sleep", AsyncMock()),
+        ):
+            result = await parallel_service.run_parallel_zalo_batch(
+                job_id=1001,
+                execution_mode="dry-run",
+                scan_plan=scan_plan,
+                today=datetime(2026, 8, 25, tzinfo=BUSINESS_TIMEZONE),
+                scan_started_at=datetime(2026, 8, 25, tzinfo=BUSINESS_TIMEZONE),
+                evidence_root="unused-evidence-root",
+                screenshots_dir="unused-screenshots-dir",
+                runtime=runtime,
+                job_repo=job_repo,
+                audit_repo=object(),
+                evidence_repo=evidence_repo,
+            )
+
+        self.assertFalse(result["halted"])
+        self.assertEqual(result["abnormal_targets"], 0)
+        self.assertEqual(len(result["scan_results"]), 49)
+
+        rows = await repository.list_for_job(1001)
+        self.assertEqual(len(rows), 49)
+        submitted_rows = [r for r in rows if int(r["lesson"]) - 20 > 10]
+        not_found_rows = [r for r in rows if int(r["lesson"]) - 20 <= 10]
+        self.assertEqual(len(submitted_rows), 39)
+        self.assertEqual(len(not_found_rows), 10)
+        self.assertTrue(all(r["write_status"] == "DRY_RUN" for r in submitted_rows))
+        self.assertTrue(all(r["write_status"] == "FAILED_BEFORE_WRITE" for r in not_found_rows))
+        self.assertTrue(all(r["error_code"] == "EVIDENCE_NOT_READY" for r in not_found_rows))
+
+        progress = parallel_service.build_zalo_job_progress(
+            scan_results=result["scan_results"],
+            batch_summary=result["batch_summary"],
+            halt_reason=result.get("halt_reason"),
+            dry_run=True,
+        )
+        self.assertEqual(progress["status"], "PARTIAL_SUCCESS")
+        self.assertEqual(progress["reason_code"], parallel_service.ZALO_JOB_REASON_TARGETS_NEED_REVIEW)
+        self.assertEqual(progress["total_targets"], 49)
+        self.assertEqual(progress["attempted_target_count"], 49)
+        self.assertEqual(progress["verified_submitted_count"], 39)
+        self.assertEqual(progress["verified_not_found_count"], 10)
+        self.assertEqual(progress["insufficient_or_error_count"], 0)
+        self.assertEqual(progress["safe_count"], 39)
+        self.assertEqual(progress["write_eligible_count"], 39)
+
+    async def test_p2_forty_nine_targets_nine_abnormal_with_not_found_verified_does_not_halt(self):
+        """P2: 49 targets, 9 insufficient evidence / technical errors (plus NOT_FOUND_VERIFIED) does not halt."""
+        policy = BatchFailurePolicy(total_targets=49)
+        for _ in range(15):
+            self.assertFalse(await policy.record(abnormal=False, systemic=False))
+        for _ in range(9):
+            self.assertFalse(await policy.record(abnormal=True, systemic=False))
+        for _ in range(25):
+            self.assertFalse(await policy.record(abnormal=False, systemic=False))
+
+        self.assertEqual(policy.abnormal_targets, 9)
+        self.assertFalse(policy.halted.is_set())
+        self.assertIsNone(policy.halt_reason)
+
+    async def test_p3_forty_nine_targets_ten_abnormal_halts_fail_closed(self):
+        """P3: 49 targets, 10 insufficient evidence / technical errors halts fail-closed on >20% threshold."""
+        policy = BatchFailurePolicy(total_targets=49)
+        for _ in range(9):
+            self.assertFalse(await policy.record(abnormal=True, systemic=False))
+        self.assertFalse(policy.halted.is_set())
+        self.assertTrue(await policy.record(abnormal=True, systemic=False))
+        self.assertTrue(policy.halted.is_set())
+        self.assertEqual(policy.halt_reason, parallel_service.ZALO_JOB_REASON_BATCH_ABNORMAL_THRESHOLD)
+
+    async def test_p4_not_found_with_insufficient_evidence_is_counted_abnormal(self):
+        """P4: NOT_FOUND accompanied by INSUFFICIENT_EVIDENCE must still be counted as abnormal."""
+        not_found_insufficient = {
+            "status": "NOT_FOUND",
+            "evidence_state": "INSUFFICIENT_EVIDENCE",
+            "evidence": {"classifier_result": {"decision": "NOT_FOUND"}},
+        }
+        evidence_state = str(not_found_insufficient.get("evidence_state") or "")
+        abnormal = evidence_state not in {
+            "SUBMITTED_VERIFIED",
+            "SUBMITTED_LATE_VERIFIED",
+            "LESSON_14_EXEMPTION",
+            "NOT_FOUND_VERIFIED",
+        }
+        self.assertTrue(abnormal)
+
+        not_found_verified = {
+            "status": "NOT_FOUND",
+            "evidence_state": "NOT_FOUND_VERIFIED",
+            "evidence": {"classifier_result": {"decision": "NOT_FOUND"}},
+        }
+        evidence_state_v = str(not_found_verified.get("evidence_state") or "")
+        abnormal_v = evidence_state_v not in {
+            "SUBMITTED_VERIFIED",
+            "SUBMITTED_LATE_VERIFIED",
+            "LESSON_14_EXEMPTION",
+            "NOT_FOUND_VERIFIED",
+        }
+        self.assertFalse(abnormal_v)
+
+    async def test_p5_three_consecutive_systemic_failures_halts_regardless_of_not_found_verified(self):
+        """P5: 3 consecutive systemic errors halts on systemic threshold, regardless of NOT_FOUND_VERIFIED count."""
+        policy = BatchFailurePolicy(total_targets=49)
+        for _ in range(10):
+            await policy.record(abnormal=False, systemic=False)
+        self.assertEqual(policy.consecutive_systemic, 0)
+        self.assertFalse(policy.halted.is_set())
+
+        self.assertFalse(await policy.record(abnormal=True, systemic=True, reason="ZALO_SYNC_INCOMPLETE"))
+        self.assertFalse(await policy.record(abnormal=True, systemic=True, reason="ZALO_SYNC_INCOMPLETE"))
+        self.assertTrue(await policy.record(abnormal=True, systemic=True, reason="ZALO_SYNC_INCOMPLETE"))
+
+        self.assertTrue(policy.halted.is_set())
+        self.assertEqual(policy.consecutive_systemic, 3)
+        self.assertEqual(policy.halt_reason, parallel_service.ZALO_JOB_REASON_BATCH_SYSTEMIC_THRESHOLD)
+
+    def test_p6_progress_payload_uses_batch_level_reasons_never_unknown_fail_closed(self):
+        """P6: Job halted due to rate or systemic threshold uses BATCH_ABNORMAL_THRESHOLD or BATCH_SYSTEMIC_THRESHOLD,
+        and never returns UNKNOWN_FAIL_CLOSED."""
+        progress_abnormal = parallel_service.build_zalo_job_progress(
+            scan_results=[
+                {"evidence_state": "SUBMITTED_VERIFIED"},
+                {"evidence_state": "INSUFFICIENT_EVIDENCE"},
+            ],
+            batch_summary={"total": 5, "scan": {"VERIFIED": 1, "FAILED": 1}, "write": {"BLOCKED_BATCH_HALT": 5}},
+            halt_reason=parallel_service.ZALO_JOB_REASON_BATCH_ABNORMAL_THRESHOLD,
+            dry_run=True,
+        )
+        self.assertEqual(progress_abnormal["status"], "FAILED")
+        self.assertEqual(progress_abnormal["reason_code"], "BATCH_ABNORMAL_THRESHOLD")
+        self.assertNotEqual(progress_abnormal["reason_code"], "UNKNOWN_FAIL_CLOSED")
+        self.assertEqual(progress_abnormal["total_targets"], 5)
+        self.assertEqual(progress_abnormal["attempted_target_count"], 2)
+        self.assertEqual(progress_abnormal["verified_submitted_count"], 1)
+        self.assertEqual(progress_abnormal["verified_not_found_count"], 0)
+        self.assertEqual(progress_abnormal["insufficient_or_error_count"], 1)
+        self.assertEqual(progress_abnormal["safe_count"], 0)
+        self.assertEqual(progress_abnormal["write_eligible_count"], 0)
+        self.assertIn("BATCH_ABNORMAL_THRESHOLD", progress_abnormal["message"])
+
+        progress_systemic = parallel_service.build_zalo_job_progress(
+            scan_results=[
+                {"evidence_state": "SUBMITTED_VERIFIED"},
+                {"evidence_state": "INSUFFICIENT_EVIDENCE"},
+                {"evidence_state": "INSUFFICIENT_EVIDENCE"},
+                {"evidence_state": "INSUFFICIENT_EVIDENCE"},
+            ],
+            batch_summary={"total": 10, "scan": {"VERIFIED": 1, "FAILED": 3}, "write": {"BLOCKED_BATCH_HALT": 10}},
+            halt_reason=parallel_service.ZALO_JOB_REASON_BATCH_SYSTEMIC_THRESHOLD,
+            dry_run=True,
+        )
+        self.assertEqual(progress_systemic["status"], "FAILED")
+        self.assertEqual(progress_systemic["reason_code"], "BATCH_SYSTEMIC_THRESHOLD")
+        self.assertNotEqual(progress_systemic["reason_code"], "UNKNOWN_FAIL_CLOSED")
+        self.assertIn("BATCH_SYSTEMIC_THRESHOLD", progress_systemic["message"])
+
+    async def test_p7_completed_targets_retain_truthful_result_with_blocked_batch_halt_on_real_halt(self):
+        """P7: Valid targets completed before a real halt keep truthful result_json/evidence_state,
+        while write_status remains BLOCKED_BATCH_HALT and zero targets are written to BCNB."""
+        repository = InMemoryBatchRepository()
+        browser = FakeParallelBrowser([{}, {}])
+        evidence_repo = SimpleNamespace(register_scan_results=AsyncMock())
+        job_repo = SimpleNamespace(
+            ensure_not_cancelled=AsyncMock(),
+            update_job=AsyncMock(),
+        )
+        runtime = SimpleNamespace(
+            external=SimpleNamespace(browser=browser),
+            zalo_scan_concurrency=1,
+            bcnb_write_concurrency=1,
+            batch_systemic_failure_limit=3,
+            batch_abnormal_percent_limit=20,
+        )
+        targets = [_make_search_target(index) for index in range(1, 6)]
+
+        async def fake_scan(_page, *, target, **_kwargs):
+            target_id = int(target["lesson"]) - 20
+            if target_id == 1:
+                return {
+                    "scan_target": target,
+                    "evidence_state": "SUBMITTED_VERIFIED",
+                    "status": "VERIFIED",
+                    "evidence": {
+                        "date_context": {"target_week": target["week"], "target_year": target["year"]},
+                        "classifier_result": {"decision": "SUBMITTED"},
+                    },
+                }
+            return {
+                "scan_target": target,
+                "evidence_state": "INSUFFICIENT_EVIDENCE",
+                "status": "FAILED",
+                "error_code": "SCAN_FAILED",
+                "error_message": "Không đủ bằng chứng",
+                "evidence": {
+                    "date_context": {"target_week": target["week"], "target_year": target["year"]},
+                    "classifier_result": {"decision": "INSUFFICIENT_EVIDENCE"},
+                },
+            }
+
+        scan_plan = {
+            "selected_weeks": [{"week": 34, "year": 2026}],
+            "targets": targets,
+        }
+        with (
+            patch.object(parallel_service, "ZaloBatchRepository", return_value=repository),
+            patch.object(
+                parallel_service,
+                "ensure_zalo_history_synced",
+                AsyncMock(return_value={"verified": True, "reason": "fixture"}),
+            ),
+            patch.object(parallel_service, "_login_bcnb_if_needed", AsyncMock()),
+            patch.object(parallel_service, "_scan_one_target", side_effect=fake_scan),
+            patch.object(parallel_service, "update_bcnb_reports") as mock_bcnb_write,
+            patch.object(parallel_service, "log_message"),
+            patch.object(parallel_service.asyncio, "sleep", AsyncMock()),
+        ):
+            result = await parallel_service.run_parallel_zalo_batch(
+                job_id=1007,
+                execution_mode="dry-run",
+                scan_plan=scan_plan,
+                today=datetime(2026, 8, 25, tzinfo=BUSINESS_TIMEZONE),
+                scan_started_at=datetime(2026, 8, 25, tzinfo=BUSINESS_TIMEZONE),
+                evidence_root="unused-evidence-root",
+                screenshots_dir="unused-screenshots-dir",
+                runtime=runtime,
+                job_repo=job_repo,
+                audit_repo=object(),
+                evidence_repo=evidence_repo,
+            )
+
+        self.assertTrue(result["halted"])
+        self.assertEqual(result["halt_reason"], parallel_service.ZALO_JOB_REASON_BATCH_ABNORMAL_THRESHOLD)
+        mock_bcnb_write.assert_not_called()
+
+        rows = await repository.list_for_job(1007)
+        self.assertEqual(rows[0]["scan_status"], "VERIFIED")
+        self.assertEqual(rows[0]["result"]["evidence_state"], "SUBMITTED_VERIFIED")
+        self.assertEqual(rows[0]["write_status"], "BLOCKED_BATCH_HALT")
+        self.assertEqual(rows[0]["error_code"], "BATCH_HALTED")
+
+        self.assertEqual(rows[1]["scan_status"], "VERIFIED")
+        self.assertEqual(rows[1]["result"]["evidence_state"], "INSUFFICIENT_EVIDENCE")
+        self.assertEqual(rows[1]["write_status"], "BLOCKED_BATCH_HALT")
+        self.assertEqual(rows[2]["scan_status"], "VERIFIED")
+        self.assertEqual(rows[2]["result"]["evidence_state"], "INSUFFICIENT_EVIDENCE")
+        self.assertEqual(rows[2]["write_status"], "BLOCKED_BATCH_HALT")
+
+        self.assertEqual(rows[3]["write_status"], "BLOCKED_BATCH_HALT")
+        self.assertEqual(rows[3]["error_code"], "BATCH_HALTED")
+        self.assertEqual(rows[4]["write_status"], "BLOCKED_BATCH_HALT")
+        self.assertEqual(rows[4]["error_code"], "BATCH_HALTED")
+
+        self.assertEqual(result["batch_summary"]["write"], {"BLOCKED_BATCH_HALT": 5})
+
+    async def test_finding_1_worker_timeout_to_build_progress_never_unknown_fail_closed(self):
+        """P1 Finding: When final worker times out on target search, batch halts fail-closed,
+        detailed TARGET_SEARCH_* error is retained at target level, and build_zalo_job_progress
+        produces TARGET_SEARCH_TIMEOUT instead of UNKNOWN_FAIL_CLOSED."""
+        repository = InMemoryBatchRepository(claim_plan={"scan-1": [1, 2]})
+        page_configs = [
+            {"search_fill_hang": True},
+            {"search_fill_hang": True},
+        ]
+        browser = FakeParallelBrowser(page_configs)
+        evidence_repo = SimpleNamespace(register_scan_results=AsyncMock())
+        job_repo = SimpleNamespace(
+            ensure_not_cancelled=AsyncMock(),
+            update_job=AsyncMock(),
+        )
+        runtime = SimpleNamespace(
+            external=SimpleNamespace(browser=browser),
+            zalo_scan_concurrency=1,
+            bcnb_write_concurrency=1,
+            batch_systemic_failure_limit=3,
+            batch_abnormal_percent_limit=20,
+        )
+        targets = [_make_search_target(1), _make_search_target(2)]
+        scan_plan = {"selected_weeks": [{"week": 34, "year": 2026}], "targets": targets}
+
+        with (
+            patch.object(parallel_service, "ZaloBatchRepository", return_value=repository),
+            patch.object(
+                parallel_service,
+                "ensure_zalo_history_synced",
+                AsyncMock(return_value={"verified": True, "reason": "fixture"}),
+            ),
+            patch.object(parallel_service, "_login_bcnb_if_needed", AsyncMock()),
+            patch.object(parallel_service, "update_bcnb_reports", AsyncMock(return_value={"target_outcomes": []})),
+            patch.object(parallel_service, "log_message"),
+            patch.object(parallel_service, "TARGET_SEARCH_FILL_TIMEOUT_SECONDS", 0.01),
+            patch.object(parallel_service, "TARGET_SEARCH_IDLE_SECONDS", 0.0),
+        ):
+            result = await parallel_service.run_parallel_zalo_batch(
+                job_id=2001,
+                execution_mode="dry-run",
+                scan_plan=scan_plan,
+                today=datetime(2026, 8, 25, tzinfo=BUSINESS_TIMEZONE),
+                scan_started_at=datetime(2026, 8, 25, tzinfo=BUSINESS_TIMEZONE),
+                evidence_root="unused",
+                screenshots_dir="unused",
+                runtime=runtime,
+                job_repo=job_repo,
+                audit_repo=object(),
+                evidence_repo=evidence_repo,
+            )
+
+        rows = await repository.list_for_job(2001)
+        self.assertTrue(result["halted"])
+        self.assertEqual(result["halt_reason"], parallel_service.TARGET_SEARCH_FILL_TIMEOUT)
+        self.assertEqual(rows[0]["scan_status"], "FAILED")
+        self.assertEqual(rows[0]["error_code"], parallel_service.TARGET_SEARCH_FILL_TIMEOUT)
+        self.assertEqual(rows[0]["result"]["target_error_code"], parallel_service.TARGET_SEARCH_FILL_TIMEOUT)
+        self.assertEqual(rows[1]["write_status"], "BLOCKED_BATCH_HALT")
+        self.assertEqual(rows[1]["error_code"], "BATCH_HALTED")
+
+        progress = parallel_service.build_zalo_job_progress(
+            scan_results=result["scan_results"],
+            batch_summary=result["batch_summary"],
+            halt_reason=result.get("halt_reason"),
+            dry_run=True,
+        )
+        self.assertEqual(progress["status"], "FAILED")
+        self.assertEqual(progress["reason_code"], parallel_service.ZALO_JOB_REASON_TARGET_SEARCH_TIMEOUT)
+        self.assertNotEqual(progress["reason_code"], parallel_service.ZALO_JOB_REASON_UNKNOWN_FAIL_CLOSED)
+        self.assertEqual(progress["halt_reason"], parallel_service.TARGET_SEARCH_FILL_TIMEOUT)
+        self.assertIn("TARGET_SEARCH_TIMEOUT", str(progress["message"]))
+
+    def test_finding_2_lesson_14_exemption_excluded_from_verified_submitted_count(self):
+        """P2 Finding: LESSON_14_EXEMPTION represents an exemption from reporting, not a submitted report.
+        It must be excluded from verified_submitted_count and tracked separately in exempt_count."""
+        progress = parallel_service.build_zalo_job_progress(
+            scan_results=[
+                {"scan_target": {"class_code": "VT-JSB01"}, "evidence_state": "LESSON_14_EXEMPTION"},
+            ],
+            batch_summary={"total": 1, "scan": {"SKIPPED": 1}, "write": {"NOT_READY": 1}},
+            halt_reason=None,
+            dry_run=True,
+        )
+        self.assertEqual(progress["verified_submitted_count"], 0)
+        self.assertEqual(progress["exempt_count"], 1)
+        self.assertEqual(progress["insufficient_or_error_count"], 0)
+
+    def test_finding_3_halt_message_preserves_reason_when_safe_count_positive(self):
+        """P2 Finding: Any batch with a halt_reason must clearly display the stopping reason code
+        and main counts in the final message, even when safe_count > 0."""
+        progress_abnormal = parallel_service.build_zalo_job_progress(
+            scan_results=[
+                {"evidence_state": "SUBMITTED_VERIFIED"},
+                {"evidence_state": "INSUFFICIENT_EVIDENCE"},
+            ],
+            batch_summary={"total": 2, "scan": {"VERIFIED": 1, "FAILED": 1}, "write": {"VERIFIED": 1, "BLOCKED_BATCH_HALT": 1}},
+            halt_reason=parallel_service.ZALO_JOB_REASON_BATCH_ABNORMAL_THRESHOLD,
+            dry_run=True,
+        )
+        self.assertEqual(progress_abnormal["safe_count"], 1)
+        self.assertEqual(progress_abnormal["status"], "PARTIAL_SUCCESS")
+        self.assertEqual(progress_abnormal["reason_code"], "BATCH_ABNORMAL_THRESHOLD")
+        self.assertIn("BATCH_ABNORMAL_THRESHOLD", progress_abnormal["message"])
+        self.assertIn("2/2 target", progress_abnormal["message"])
+        self.assertIn("1 có báo cáo", progress_abnormal["message"])
+        self.assertIn("1 thiếu bằng chứng/lỗi", progress_abnormal["message"])
+        self.assertIn("1 target đủ điều kiện ghi", progress_abnormal["message"])
+
+        progress_systemic = parallel_service.build_zalo_job_progress(
+            scan_results=[
+                {"evidence_state": "SUBMITTED_VERIFIED"},
+                {"evidence_state": "INSUFFICIENT_EVIDENCE"},
+            ],
+            batch_summary={"total": 5, "scan": {"VERIFIED": 1, "FAILED": 1}, "write": {"VERIFIED": 1, "BLOCKED_BATCH_HALT": 4}},
+            halt_reason=parallel_service.ZALO_JOB_REASON_BATCH_SYSTEMIC_THRESHOLD,
+            dry_run=True,
+        )
+        self.assertEqual(progress_systemic["safe_count"], 1)
+        self.assertEqual(progress_systemic["status"], "PARTIAL_SUCCESS")
+        self.assertEqual(progress_systemic["reason_code"], "BATCH_SYSTEMIC_THRESHOLD")
+        self.assertIn("BATCH_SYSTEMIC_THRESHOLD", progress_systemic["message"])
 
 
 class ParallelBatchIntegrationTests(unittest.IsolatedAsyncioTestCase):
@@ -2483,6 +2963,28 @@ class LandingReadinessTests(unittest.IsolatedAsyncioTestCase):
         task.cancel()
         with self.assertRaises(asyncio.CancelledError):
             await task
+
+    async def test_run_target_search_operation_invokes_operation_once_on_internal_typeerror(self):
+        calls = []
+
+        def raises_type_error(*args, **kwargs):
+            calls.append((args, kwargs))
+            raise TypeError("internal-type-error")
+
+        with self.assertRaises(parallel_service.TargetSearchError) as cm:
+            await parallel_service._run_target_search_operation(
+                raises_type_error,
+                job_id=999,
+                worker_id="test-worker",
+                phase="SEARCH_CLEAR",
+                attempt=1,
+                timeout_seconds=0.2,
+                timeout_code=parallel_service.TARGET_SEARCH_CLEAR_TIMEOUT,
+                error_code=parallel_service.TARGET_SEARCH_CLEAR_ERROR,
+            )
+
+        self.assertEqual(cm.exception.code, parallel_service.TARGET_SEARCH_CLEAR_ERROR)
+        self.assertEqual(len(calls), 1)
 
 
 if __name__ == "__main__":

@@ -79,10 +79,18 @@ class JobRepository:
         retry_of_job_id: int | None = None,
         attempt: int = 1,
         message: str = "Khởi tạo job...",
+        reject_if_active: bool = False,
     ) -> int:
         created_at = utc_now()
         async with get_db_connection() as db:
             await db.execute("BEGIN IMMEDIATE")
+            if reject_if_active:
+                async with db.execute(
+                    "SELECT 1 FROM scan_jobs WHERE status IN ('PENDING', 'RUNNING') LIMIT 1"
+                ) as cursor:
+                    if await cursor.fetchone() is not None:
+                        await db.rollback()
+                        raise JobStateError("Đang có một job khác hoạt động.")
             cursor = await db.execute(
                 """
                 INSERT INTO scan_jobs (

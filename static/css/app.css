@@ -425,46 +425,13 @@ input::placeholder {
 
 .evidence-meta,
 .status-detail,
-.result-target-meta,
-.manual-verification-meta {
+.result-target-meta {
     width: 100%;
     margin-top: 5px;
     color: #64748b;
     font-size: 11px;
     line-height: 1.35;
 }
-
-.manual-verification-meta {
-    color: #7c3aed;
-    font-weight: 600;
-}
-
-.manual-verify-actions {
-    display: flex;
-    flex-wrap: wrap;
-    justify-content: center;
-    gap: 5px;
-    width: 100%;
-    margin-top: 6px;
-}
-
-.manual-verify-button {
-    border: 1px solid currentColor;
-    border-radius: 6px;
-    padding: 4px 7px;
-    font-size: 11px;
-    font-weight: 700;
-    background: #fff;
-    cursor: pointer;
-}
-
-.manual-verify-button:disabled {
-    opacity: .55;
-    cursor: not-allowed;
-}
-
-.manual-verify-button--reported { color: #147a58; }
-.manual-verify-button--not-reported { color: #c74554; }
 
 .status-detail {
     max-width: 320px;

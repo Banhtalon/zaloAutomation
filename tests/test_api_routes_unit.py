@@ -1,6 +1,6 @@
 from datetime import datetime
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from fastapi import HTTPException
 
@@ -44,6 +44,7 @@ from api.zalo_routes import (
     get_bcnb_zalo_gaps,
     get_class_lifecycles,
     get_groups,
+    get_zalo_scan_preflight,
     get_zalo_scan_plan,
     run_scan,
 )
@@ -279,6 +280,9 @@ class FakeAuditRepo:
     async def list_for_job(self, _job_id, limit):
         return [{"id": 2, "limit": limit}]
 
+    async def count_unresolved(self):
+        return 0
+
 
 class FakeLmsRepo:
     def __init__(self, confirmation=None, error=None):
@@ -400,12 +404,109 @@ class ApiRoutesUnitTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["job_id"], 41)
         self.assertEqual(payload["summary"]["total"], 2)
         self.assertEqual(payload["targets"][0]["scan_status"], "RUNNING")
+        self.assertEqual(payload["report"]["checked"], 0)
+        self.assertEqual(payload["review_queue"], [])
+
+    async def test_target_progress_route_exposes_safe_review_queue(self):
+        container = FakeContainer()
+        container.zalo_batch_repo.summary = AsyncMock(
+            return_value={"total": 1, "scan": {"FAILED": 1}, "write": {"BLOCKED_BATCH_HALT": 1}}
+        )
+        container.zalo_batch_repo.list_for_job = AsyncMock(
+            return_value=[
+                {
+                    "id": 7,
+                    "class_code": "VT-JSB16",
+                    "lesson": "6",
+                    "class_date": "20/09/2026",
+                    "scan_status": "FAILED",
+                    "write_status": "BLOCKED_BATCH_HALT",
+                    "error_code": "TARGET_SEARCH_CLEAR_TIMEOUT",
+                    "evidence_path": "/api/evidence/41/report.png",
+                    "result": {
+                        "evidence_state": "INSUFFICIENT_EVIDENCE",
+                        "evidence": {
+                            "images": {
+                                "report": {"path": "/api/evidence/41/report.png"}
+                            }
+                        },
+                    },
+                }
+            ]
+        )
+
+        payload = await get_job_targets(41, container)
+
+        self.assertEqual(payload["report"]["scan_failed"], 1)
+        self.assertEqual(payload["report"]["blocked_batch_halt"], 1)
+        self.assertEqual(len(payload["review_queue"]), 1)
+        self.assertEqual(payload["review_queue"][0]["class_code"], "VT-JSB16")
+        self.assertEqual(payload["review_queue"][0]["reason_code"], "TARGET_SEARCH_CLEAR_TIMEOUT")
+        self.assertEqual(payload["review_queue"][0]["evidence_paths"], ["/api/evidence/41/report.png"])
+
+    async def test_zalo_preflight_reports_safe_read_only_summary(self):
+        container = FakeContainer()
+        report = await get_zalo_scan_preflight(container)
+
+        self.assertEqual(report["status"], "GREEN")
+        self.assertTrue(report["run_allowed"])
+        self.assertEqual(report["mode"], "dry-run")
+        self.assertEqual(report["target_count"], 1)
+        self.assertTrue(any(item["code"] == "SCAN_PLAN_READY" for item in report["checks"]))
+
+    async def test_zalo_preflight_blocks_an_active_job(self):
+        container = FakeContainer()
+
+        async def active_job(*, active_only=False):
+            return {"id": 99, "status": "RUNNING"} if active_only else None
+
+        container.job_repo.get_latest_job = active_job
+        report = await get_zalo_scan_preflight(container)
+
+        self.assertEqual(report["status"], "RED")
+        self.assertFalse(report["run_allowed"])
+        self.assertIn("ACTIVE_JOB_PRESENT", {item["code"] for item in report["checks"]})
+
+    async def test_zalo_preflight_blocks_unresolved_external_audit(self):
+        container = FakeContainer()
+        container.audit_repo.count_unresolved = AsyncMock(return_value=1)
+
+        report = await get_zalo_scan_preflight(container)
+
+        self.assertEqual(report["status"], "RED")
+        self.assertFalse(report["run_allowed"])
+        self.assertIn("AUDIT_PENDING", {item["code"] for item in report["checks"]})
+
+    async def test_production_yellow_requires_explicit_confirmation(self):
+        container = FakeContainer()
+        container.settings.bcnb_dry_run = False
+        yellow = {
+            "status": "YELLOW",
+            "checks": [{"code": "ZALO_SESSION_RUNTIME_CHECK", "status": "YELLOW", "message": "Cần xác nhận."}],
+        }
+        with patch(
+            "api.zalo_routes.assess_zalo_scan_preflight",
+            new=AsyncMock(return_value=yellow),
+        ):
+            with self.assertRaises(HTTPException) as caught:
+                await run_scan(container)
+            self.assertEqual(
+                caught.exception.detail["code"],
+                "SCAN_PREFLIGHT_CONFIRMATION_REQUIRED",
+            )
+
+            response = await run_scan(container, confirm_yellow=True)
+            self.assertEqual(response["dry_run"], False)
 
     async def test_scan_requires_a_trusted_complete_two_week_snapshot(self):
         container = FakeContainer()
         container.group_repo.snapshot = None
-        with self.assertRaises(HTTPException) as required:
-            await run_scan(container)
+        with patch(
+            "api.zalo_routes.assess_zalo_scan_preflight",
+            new=AsyncMock(return_value={"status": "GREEN", "checks": []}),
+        ):
+            with self.assertRaises(HTTPException) as required:
+                await run_scan(container)
         self.assertEqual(required.exception.detail["code"], "SCAN_PLAN_REQUIRED")
 
         container.group_repo.snapshot = {
@@ -413,8 +514,12 @@ class ApiRoutesUnitTests(unittest.IsolatedAsyncioTestCase):
             "status": "REJECTED",
             "plan": {},
         }
-        with self.assertRaises(HTTPException) as untrusted:
-            await run_scan(container)
+        with patch(
+            "api.zalo_routes.assess_zalo_scan_preflight",
+            new=AsyncMock(return_value={"status": "GREEN", "checks": []}),
+        ):
+            with self.assertRaises(HTTPException) as untrusted:
+                await run_scan(container)
         self.assertEqual(untrusted.exception.detail["code"], "SCAN_PLAN_NOT_TRUSTED")
 
         container.group_repo.snapshot = {
@@ -422,17 +527,102 @@ class ApiRoutesUnitTests(unittest.IsolatedAsyncioTestCase):
             "status": "OBSERVED_ONLY",
             "plan": {"bcnb_week_plan": {"selected_weeks": [{"week": 32, "year": 2026}]}},
         }
-        with self.assertRaises(HTTPException) as incomplete:
-            await run_scan(container)
+        with patch(
+            "api.zalo_routes.assess_zalo_scan_preflight",
+            new=AsyncMock(return_value={"status": "GREEN", "checks": []}),
+        ):
+            with self.assertRaises(HTTPException) as incomplete:
+                await run_scan(container)
         self.assertEqual(incomplete.exception.detail["code"], "SCAN_PLAN_INCOMPLETE")
+
+    async def test_run_scan_keeps_legacy_validation_branches_fail_closed(self):
+        green = {"status": "GREEN", "checks": []}
+
+        container = FakeContainer()
+        with patch("api.zalo_routes.assess_zalo_scan_preflight", new=AsyncMock(return_value=green)):
+            response = await run_scan(container, snapshot_id=9, confirm_yellow=False)
+        self.assertEqual(response["job_id"], 41)
+
+        container = FakeContainer()
+        with patch(
+            "api.zalo_routes.assess_zalo_scan_preflight",
+            new=AsyncMock(return_value=green),
+        ):
+            container.group_repo.snapshot["plan"]["bcnb_week_plan"]["selected_weeks"] = [
+                None,
+                {"week": "not-a-week", "year": 2026},
+            ]
+            with self.assertRaises(HTTPException) as malformed_periods:
+                await run_scan(container, snapshot_id=9, confirm_yellow=False)
+            self.assertEqual(malformed_periods.exception.detail["code"], "SCAN_PLAN_INCOMPLETE")
+
+            container = FakeContainer()
+            container.group_repo.snapshot["plan"]["bcnb_week_plan"]["latest_week"] = {
+                "week": "not-a-week",
+                "year": 2026,
+            }
+            with self.assertRaises(HTTPException) as malformed_latest:
+                await run_scan(container, snapshot_id=9)
+            self.assertEqual(malformed_latest.exception.detail["code"], "SCAN_PLAN_INCOMPLETE")
+
+            container = FakeContainer()
+            container.group_repo.snapshot["plan"]["scan_targets"] = [None]
+            with self.assertRaises(HTTPException) as invalid_target:
+                await run_scan(container, snapshot_id=9)
+            self.assertEqual(invalid_target.exception.detail["code"], "SCAN_PLAN_INVALID_TARGET")
+
+            container = FakeContainer()
+            original = container.group_repo.snapshot["plan"]["scan_targets"][0]
+            container.group_repo.snapshot["plan"]["scan_targets"].append(dict(original))
+            with self.assertRaises(HTTPException) as duplicate:
+                await run_scan(container, snapshot_id=9)
+            self.assertEqual(duplicate.exception.detail["code"], "SCAN_PLAN_DUPLICATE_TARGET")
+
+            container = FakeContainer()
+            container.group_repo.snapshot["observed_at"] = "2020-01-01T00:00:00+00:00"
+            container.settings.zalo_plan_max_age_minutes = 30
+            with self.assertRaises(HTTPException) as stale:
+                await run_scan(container, snapshot_id=9)
+            self.assertEqual(stale.exception.detail["code"], "SCAN_PLAN_STALE")
+
+            container = FakeContainer()
+            container.group_repo.snapshot["observed_at"] = None
+            with patch("api.zalo_routes._snapshot_is_stale", return_value=False):
+                with self.assertRaises(HTTPException) as missing_timestamp:
+                    await run_scan(container, snapshot_id=9)
+            self.assertEqual(missing_timestamp.exception.detail["code"], "SCAN_PLAN_STALE")
+
+    async def test_run_scan_blocks_non_plan_preflight_red(self):
+        container = FakeContainer()
+        blocked = {
+            "status": "RED",
+            "checks": [
+                {
+                    "status": "RED",
+                    "code": "ACTIVE_JOB_PRESENT",
+                    "message": "Đang có job khác.",
+                }
+            ],
+        }
+        with patch(
+            "api.zalo_routes.assess_zalo_scan_preflight",
+            new=AsyncMock(return_value=blocked),
+        ):
+            with self.assertRaises(HTTPException) as caught:
+                await run_scan(container)
+        self.assertEqual(caught.exception.detail["code"], "SCAN_PREFLIGHT_BLOCKED")
 
     async def test_scan_rejects_snapshot_older_than_configured_limit(self):
         container = FakeContainer()
         container.settings.zalo_plan_max_age_minutes = 30
         container.group_repo.snapshot["observed_at"] = "2020-01-01T00:00:00+00:00"
 
-        with self.assertRaises(HTTPException) as stale:
-            await run_scan(container)
+        with patch(
+            "api.zalo_routes.assess_zalo_scan_preflight",
+            new=AsyncMock(return_value={"status": "GREEN", "checks": []}),
+        ):
+            with self.assertRaises(HTTPException) as stale:
+                await run_scan(container)
 
         self.assertEqual(stale.exception.detail["code"], "SCAN_PLAN_STALE")
         self.assertEqual(container.job_repo.created, [])
@@ -517,12 +707,23 @@ class ApiRoutesUnitTests(unittest.IsolatedAsyncioTestCase):
         preview = await get_zalo_scan_plan(container)
         self.assertFalse(preview["available"])
 
+        container = FakeContainer()
+        container.group_repo.snapshot["plan"]["bcnb_week_plan"]["latest_week"] = {
+            "week": "not-a-week",
+            "year": 2026,
+        }
+        preview = await get_zalo_scan_plan(container)
+        self.assertFalse(preview["available"])
+
     async def test_scan_plan_read_route_exposes_snapshot_periods(self):
         container = FakeContainer()
         plan = await get_zalo_scan_plan(container)
         self.assertTrue(plan["available"])
         self.assertEqual(plan["latest_week"], {"week": 33, "year": 2026})
         self.assertEqual(plan["required_week"], {"week": 32, "year": 2026})
+
+        container.group_repo.snapshot["observed_at"] = None
+        self.assertFalse((await get_zalo_scan_plan(container))["available"])
 
         container.group_repo.snapshot = None
         self.assertEqual(
@@ -557,6 +758,7 @@ class ApiRoutesUnitTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertFalse(scan["dry_run"])
+        self.assertEqual(scan["worker_count"], 1)
         zalo_job = container.job_repo.created[0]
         self.assertEqual(zalo_job[1]["execution_mode"], "production")
         self.assertTrue(zalo_job[2]["mutates_external"])

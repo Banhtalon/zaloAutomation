@@ -25,6 +25,11 @@ with tempfile.TemporaryDirectory() as temp_dir:
         dashboard_html = dashboard.text
         for dom_id in (
             "results-table",
+            "zalo-preflight",
+            "zalo-preflight-status",
+            "zalo-preflight-checks",
+            "zalo-review-queue",
+            "zalo-review-queue-items",
             "paste-area",
             "groups-table-body",
             "full-log-terminal",
@@ -49,6 +54,9 @@ with tempfile.TemporaryDirectory() as temp_dir:
         ready = client.get("/api/health/ready")
         if ready.status_code != 200 or not ready.json().get("ready"):
             raise SystemExit("readiness-smoke-failed")
+        preflight = client.get("/api/zalo-scan-preflight")
+        if preflight.status_code != 200 or preflight.json().get("status") not in {"GREEN", "YELLOW", "RED"}:
+            raise SystemExit("zalo-preflight-smoke-failed")
         metrics = client.get("/api/metrics/jobs")
         if metrics.status_code != 200 or "jobs" not in metrics.json():
             raise SystemExit("metrics-smoke-failed")
@@ -61,6 +69,7 @@ with tempfile.TemporaryDirectory() as temp_dir:
             "/": {"get"},
             "/auto-discover": {"post"},
             "/run-scan": {"post"},
+            "/api/zalo-scan-preflight": {"get"},
             "/api/groups": {"get"},
             "/api/logs": {"get"},
             "/api/uploads": {"post"},

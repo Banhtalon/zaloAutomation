@@ -211,6 +211,19 @@ class AuditRepository:
                 rows = await cursor.fetchall()
         return [self._row(row) for row in rows]
 
+    async def count_unresolved(self) -> int:
+        """Count external actions that still need read-back or review."""
+        async with get_db_connection() as db:
+            async with db.execute(
+                """
+                SELECT COUNT(*)
+                FROM external_action_audit
+                WHERE outcome IN ('INTENT_RECORDED', 'UNKNOWN')
+                """
+            ) as cursor:
+                row = await cursor.fetchone()
+        return int(row[0] or 0) if row else 0
+
     @staticmethod
     def _row(row) -> dict:
         return {

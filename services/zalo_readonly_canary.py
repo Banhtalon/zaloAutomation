@@ -66,6 +66,12 @@ PTI10_CANARY_ARTIFACT_PREFIX = "zalo-vt-c4k-pti10-canary"
 PTI10_CANARY_WORKER_ID = "pti10-canary"
 PTI10_CANARY_PERSON = "PTI10_READ_ONLY_CANARY"
 PTI10_CANARY_DEADLINE = "2026-09-16T23:59:59+07:00"
+JSB16_CANARY_PHASE = "ZALO_VT_JSB16_READ_ONLY_CANARY"
+JSB16_CANARY_SCHEMA_VERSION = "zalo-vt-jsb16-read-only-canary-v1"
+JSB16_CANARY_ARTIFACT_PREFIX = "zalo-vt-jsb16-canary"
+JSB16_CANARY_WORKER_ID = "jsb16-canary"
+JSB16_CANARY_PERSON = "JSB16_READ_ONLY_CANARY"
+JSB16_CANARY_DEADLINE = "2026-09-22T16:00:00+07:00"
 CANARY_DESCRIPTOR_INVALID = "INVALID_CANARY_DESCRIPTOR"
 CANARY_TARGET_MISMATCH = "CANARY_DESCRIPTOR_MISMATCH"
 CANARY_MAX_RUNTIME_SECONDS = 300.0
@@ -241,9 +247,27 @@ PTI10_DESCRIPTOR = CanaryDescriptor(
     zalo_deadline=PTI10_CANARY_DEADLINE,
 )
 
+JSB16_DESCRIPTOR = CanaryDescriptor(
+    class_code="VT-JSB16",
+    group_name="MindX - Lập trình WEB VT-JSB16 CN (14H-16H)",
+    week=38,
+    year=2026,
+    lesson="6",
+    class_date_iso="2026-09-20",
+    message_window_start="2026-09-12",
+    message_window_end="2026-09-22",
+    phase=JSB16_CANARY_PHASE,
+    schema_version=JSB16_CANARY_SCHEMA_VERSION,
+    artifact_prefix=JSB16_CANARY_ARTIFACT_PREFIX,
+    worker_id=JSB16_CANARY_WORKER_ID,
+    person=JSB16_CANARY_PERSON,
+    zalo_deadline=JSB16_CANARY_DEADLINE,
+)
+
 _ARMB19_TARGET_KEY = "ARMB19"
 _GA38_TARGET_KEY = "GA38"
 _PTI10_TARGET_KEY = "PTI10"
+_JSB16_TARGET_KEY = "JSB16"
 
 
 def _descriptor_for_target_key(value: object) -> CanaryDescriptor | None:
@@ -253,6 +277,8 @@ def _descriptor_for_target_key(value: object) -> CanaryDescriptor | None:
         return GA38_DESCRIPTOR
     if value == _PTI10_TARGET_KEY:
         return PTI10_DESCRIPTOR
+    if value == _JSB16_TARGET_KEY:
+        return JSB16_DESCRIPTOR
     return None
 
 
@@ -299,6 +325,12 @@ def pti10_descriptor_dict() -> dict[str, object]:
     """Return a copy of the fixed reviewed PTI10 descriptor."""
 
     return PTI10_DESCRIPTOR.as_dict()
+
+
+def jsb16_descriptor_dict() -> dict[str, object]:
+    """Return a copy of the fixed reviewed JSB16 descriptor."""
+
+    return JSB16_DESCRIPTOR.as_dict()
 
 
 def _bounded_int(value: object, *, maximum: int) -> int:
@@ -514,6 +546,28 @@ class ReadOnlyCanaryRunner:
         )
         runner._target_key = _PTI10_TARGET_KEY
         runner.descriptor = PTI10_DESCRIPTOR
+        return runner
+
+    @classmethod
+    def from_jsb16(
+        cls,
+        *,
+        profile_path: str | Path,
+        profile_lock_path: str | Path,
+        artifact_root: str | Path,
+        bounds: CanaryBounds | None = None,
+    ) -> "ReadOnlyCanaryRunner":
+        """Compose the fixed JSB16 target with the production gateway."""
+
+        gateway = ExternalGateways.production(profile_path=str(profile_path)).browser
+        runner = cls(
+            browser_gateway=gateway,
+            profile_lock_path=profile_lock_path,
+            artifact_root=artifact_root,
+            bounds=bounds,
+        )
+        runner._target_key = _JSB16_TARGET_KEY
+        runner.descriptor = JSB16_DESCRIPTOR
         return runner
 
     def _validated_descriptor(self) -> CanaryDescriptor | None:
@@ -1046,6 +1100,9 @@ __all__ = [
     "GA38_CANARY_PHASE",
     "GA38_CANARY_SCHEMA_VERSION",
     "GA38_DESCRIPTOR",
+    "JSB16_CANARY_PHASE",
+    "JSB16_CANARY_SCHEMA_VERSION",
+    "JSB16_DESCRIPTOR",
     "PTI10_CANARY_PHASE",
     "PTI10_CANARY_SCHEMA_VERSION",
     "PTI10_DESCRIPTOR",
@@ -1054,5 +1111,6 @@ __all__ = [
     "ReadOnlyCanaryRunner",
     "canary_descriptor_dict",
     "ga38_descriptor_dict",
+    "jsb16_descriptor_dict",
     "pti10_descriptor_dict",
 ]

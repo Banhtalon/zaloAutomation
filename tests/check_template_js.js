@@ -45,6 +45,8 @@ const templateFiles = [indexPath, ...fs.readdirSync('templates/partials')
 const templates = templateFiles.map(file => fs.readFileSync(file, 'utf8')).join('\n');
 const requiredIds = [
   'header-title', 'status-text', 'results-table', 'searchInput',
+  'zalo-preflight', 'zalo-preflight-status', 'zalo-preflight-checks',
+  'zalo-review-queue', 'zalo-review-queue-items',
   'paste-area', 'ocr-results-table', 'mapping-table', 'form-history-table',
   'groups-table-body', 'ignored-groups-table-body', 'full-log-terminal',
   'bcnb-zalo-gaps-summary', 'bcnb-zalo-gaps-stale', 'bcnb-zalo-gaps-table-body',

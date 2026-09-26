@@ -77,6 +77,19 @@ class JobLifecycleTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(JobStateError):
             await dispatcher.retry_job(blocked_id)
 
+    async def test_exclusive_job_admission_rejects_active_job_atomically(self):
+        active_id = await self.jobs.create_job("ZALO_SCAN", {"version": 1})
+        await self.jobs.mark_running(active_id)
+
+        with self.assertRaises(JobStateError):
+            await self.jobs.create_job(
+                "ZALO_SCAN",
+                {"version": 2},
+                reject_if_active=True,
+            )
+
+        self.assertEqual((await self.jobs.get_latest_job())['id'], active_id)
+
 
 if __name__ == "__main__":
     unittest.main()

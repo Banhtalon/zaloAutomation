@@ -168,6 +168,42 @@ ZALO_JOB_REASON_COMPLETED = "COMPLETED"
 ZALO_JOB_REASON_TARGETS_NEED_REVIEW = "TARGETS_NEED_REVIEW"
 ZALO_JOB_REASON_NO_TARGET_ATTEMPTED = "NO_TARGET_ATTEMPTED"
 ZALO_JOB_REASON_UNKNOWN_FAIL_CLOSED = "UNKNOWN_FAIL_CLOSED"
+ZALO_JOB_REASON_BATCH_ABNORMAL_THRESHOLD = "BATCH_ABNORMAL_THRESHOLD"
+ZALO_JOB_REASON_BATCH_SYSTEMIC_THRESHOLD = "BATCH_SYSTEMIC_THRESHOLD"
+ZALO_JOB_REASON_TARGET_SEARCH_TIMEOUT = "TARGET_SEARCH_TIMEOUT"
+ZALO_JOB_REASON_TARGET_SEARCH_ERROR = "TARGET_SEARCH_ERROR"
+
+SETUP_CODES = frozenset(
+    {
+        SETUP_OK,
+        SELECTOR_READINESS_TIMEOUT,
+        SETUP_NAVIGATION_ERROR,
+        SETUP_SELECTOR_ERROR,
+        SETUP_SYNC_TIMEOUT,
+        SETUP_SYNC_ERROR,
+        SETUP_PAGE_CREATE_ERROR,
+        SETUP_PAGE_CREATE_TIMEOUT,
+        SETUP_PAGE_CLOSE_ERROR,
+        SETUP_PAGE_CLOSE_TIMEOUT,
+    }
+)
+
+TARGET_SEARCH_TIMEOUT_CODES = frozenset(
+    {
+        TARGET_SEARCH_CLEAR_TIMEOUT,
+        TARGET_SEARCH_FILL_TIMEOUT,
+        TARGET_SEARCH_RESULT_TIMEOUT,
+    }
+)
+
+TARGET_SEARCH_ERROR_CODES = frozenset(
+    {
+        TARGET_SEARCH_CLEAR_ERROR,
+        TARGET_SEARCH_FILL_ERROR,
+        TARGET_SEARCH_RESULT_ERROR,
+    }
+)
+
 _ZALO_JOB_REASON_CODES = frozenset(
     {
         ZALO_JOB_REASON_QUEUED,
@@ -175,8 +211,12 @@ _ZALO_JOB_REASON_CODES = frozenset(
         ZALO_JOB_REASON_TARGETS_NEED_REVIEW,
         ZALO_JOB_REASON_NO_TARGET_ATTEMPTED,
         ZALO_JOB_REASON_UNKNOWN_FAIL_CLOSED,
+        ZALO_JOB_REASON_BATCH_ABNORMAL_THRESHOLD,
+        ZALO_JOB_REASON_BATCH_SYSTEMIC_THRESHOLD,
+        ZALO_JOB_REASON_TARGET_SEARCH_TIMEOUT,
+        ZALO_JOB_REASON_TARGET_SEARCH_ERROR,
         *LANDING_SETUP_CODES,
-        SETUP_OK,
+        *SETUP_CODES,
     }
 )
 
@@ -992,6 +1032,139 @@ def _emit_target_telemetry(
     return fields
 
 
+def _invoke_search_operation(operation, *, timeout_ms: float):
+    """Invoke search operation passing timeout_ms only if supported, invoking exactly once."""
+    try:
+        sig = inspect.signature(operation)
+    except (ValueError, TypeError):
+        return operation()
+
+    params = list(sig.parameters.values())
+    accepts_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params)
+    accepts_timeout_kw = any(p.name == "timeout_ms" for p in params)
+    if accepts_kw or accepts_timeout_kw:
+        return operation(timeout_ms=timeout_ms)
+    if len(params) == 1 and params[0].kind in (
+        inspect.Parameter.POSITIONAL_ONLY,
+        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+    ):
+        return operation(timeout_ms)
+    return operation()
+
+
+def _extract_playwright_connections(operation=None, awaitable=None) -> set[Any]:
+    conns: set[Any] = set()
+
+    def _is_real_playwright_connection(conn: Any) -> bool:
+        return (
+            conn is not None
+            and type(conn).__name__ == "Connection"
+            and getattr(type(conn), "__module__", "").startswith("playwright")
+            and isinstance(getattr(conn, "_callbacks", None), dict)
+        )
+
+    def _inspect_obj(obj: Any) -> None:
+        if obj is None:
+            return
+        if getattr(type(obj), "__module__", "").startswith("unittest.mock"):
+            return
+        impl = getattr(obj, "_impl_obj", obj)
+        if getattr(type(impl), "__module__", "").startswith("unittest.mock"):
+            return
+        frame = getattr(impl, "_frame", None)
+        chan = getattr(impl, "_channel", None) or getattr(frame, "_channel", None)
+        conn = getattr(chan, "_connection", None)
+        if _is_real_playwright_connection(conn):
+            conns.add(conn)
+
+    if operation is not None:
+        if hasattr(operation, "__closure__") and operation.__closure__:
+            for cell in operation.__closure__:
+                try:
+                    _inspect_obj(cell.cell_contents)
+                except Exception:
+                    pass
+        if hasattr(operation, "__self__"):
+            try:
+                _inspect_obj(operation.__self__)
+            except Exception:
+                pass
+
+    if awaitable is not None:
+        coro = (
+            getattr(awaitable, "get_coro", lambda: None)()
+            or getattr(awaitable, "_coro", None)
+            or awaitable
+        )
+        if hasattr(coro, "cr_frame") and coro.cr_frame:
+            try:
+                for val in coro.cr_frame.f_locals.values():
+                    _inspect_obj(val)
+            except Exception:
+                pass
+
+    return conns
+
+
+def _get_callback_task(cb: Any) -> asyncio.Task | None:
+    fut = getattr(cb, "future", None)
+    if fut is None:
+        return None
+    callbacks = getattr(fut, "_callbacks", None)
+    if not callbacks:
+        return None
+    items = callbacks if isinstance(callbacks, list) else [callbacks]
+    for item in items:
+        fn = item[0] if isinstance(item, tuple) else item
+        closure = getattr(fn, "__closure__", None)
+        if closure:
+            for cell in closure:
+                try:
+                    val = cell.cell_contents
+                    if isinstance(val, asyncio.Task):
+                        return val
+                except Exception:
+                    pass
+    return None
+
+
+def _cleanup_operation_playwright_callbacks(
+    conns: set[Any],
+    before_cbs: dict[int, set[int]],
+    current_task: asyncio.Task | None,
+) -> None:
+    if not conns:
+        return
+    for conn in conns:
+        callbacks = getattr(conn, "_callbacks", None)
+        if not isinstance(callbacks, dict):
+            continue
+        prev_ids = before_cbs.get(id(conn), set())
+        new_ids = set(callbacks.keys()) - prev_ids
+        for cid in new_ids:
+            cb = callbacks.get(cid)
+            if cb is None:
+                continue
+            # CRITICAL: Only cancel callbacks belonging to this operation/task.
+            # Do NOT cancel callbacks belonging to other workers/tasks on a shared connection.
+            if current_task is not None and _get_callback_task(cb) is not current_task:
+                continue
+
+            fut = getattr(cb, "future", None)
+            if fut is not None:
+                if not fut.done():
+                    fut.cancel()
+
+                def _swallow_exc(f: asyncio.Future) -> None:
+                    if not f.cancelled():
+                        try:
+                            f.exception()
+                        except Exception:
+                            pass
+
+                fut.add_done_callback(_swallow_exc)
+
+
 async def _run_target_search_operation(
     operation,
     *,
@@ -1005,15 +1178,34 @@ async def _run_target_search_operation(
 ):
     """Run one clear/fill/result operation with a finite typed boundary."""
     started_at = asyncio.get_running_loop().time()
+    current_task = asyncio.current_task()
+    timeout_seconds_val = max(0.001, float(timeout_seconds))
+    timeout_ms = max(1.0, timeout_seconds_val * 1000.0)
+    watchdog_timeout = timeout_seconds_val + min(0.5, max(0.05, timeout_seconds_val * 0.1))
+
+    conns = _extract_playwright_connections(operation)
+    before_cbs = {id(conn): set(conn._callbacks.keys()) for conn in conns}
+
     try:
-        awaitable = operation()
-        return await asyncio.wait_for(
-            awaitable,
-            timeout=max(0.001, float(timeout_seconds)),
-        )
-    except JobCancelledError:
+        awaitable = _invoke_search_operation(operation, timeout_ms=timeout_ms)
+        more_conns = _extract_playwright_connections(operation, awaitable=awaitable)
+        if more_conns:
+            for conn in more_conns:
+                if id(conn) not in before_cbs:
+                    before_cbs[id(conn)] = set(conn._callbacks.keys())
+            conns.update(more_conns)
+
+        if inspect.isawaitable(awaitable):
+            return await asyncio.wait_for(
+                awaitable,
+                timeout=watchdog_timeout,
+            )
+        return awaitable
+    except (JobCancelledError, asyncio.CancelledError):
+        _cleanup_operation_playwright_callbacks(conns, before_cbs, current_task)
         raise
     except Exception as exc:
+        _cleanup_operation_playwright_callbacks(conns, before_cbs, current_task)
         typed_code = timeout_code if _is_timeout_error(exc) else error_code
         _emit_target_telemetry(
             job_id=job_id,
@@ -1108,12 +1300,61 @@ def build_zalo_job_progress(
         )
     )
     attempted = max(0, len(scan_results))
-    supplied_reason = str(halt_reason or "").strip()
-    safe_halt_reason = (
-        supplied_reason
-        if supplied_reason in _ZALO_JOB_REASON_CODES
-        else ZALO_JOB_REASON_UNKNOWN_FAIL_CLOSED
+    raw_total = batch_summary.get("total")
+    total_targets = (
+        int(raw_total)
+        if isinstance(raw_total, (int, float))
+        else sum(int(v) for v in scan_counts.values())
     )
+    if total_targets == 0:
+        total_targets = max(attempted, sum(int(v) for v in write_counts.values()))
+
+    verified_submitted_count = sum(
+        1
+        for r in scan_results
+        if str(r.get("evidence_state") or "")
+        in {
+            "SUBMITTED_VERIFIED",
+            "SUBMITTED_LATE_VERIFIED",
+        }
+    )
+    exempt_count = sum(
+        1
+        for r in scan_results
+        if str(r.get("evidence_state") or "") == "LESSON_14_EXEMPTION"
+    )
+    verified_not_found_count = sum(
+        1
+        for r in scan_results
+        if str(r.get("evidence_state") or "") == "NOT_FOUND_VERIFIED"
+    )
+    insufficient_or_error_count = sum(
+        1
+        for r in scan_results
+        if str(r.get("evidence_state") or "")
+        not in {
+            "SUBMITTED_VERIFIED",
+            "SUBMITTED_LATE_VERIFIED",
+            "LESSON_14_EXEMPTION",
+            "NOT_FOUND_VERIFIED",
+        }
+    )
+
+    supplied_reason = str(halt_reason or "").strip()
+    if supplied_reason in _ZALO_JOB_REASON_CODES:
+        safe_halt_reason = supplied_reason
+    elif supplied_reason in TARGET_SEARCH_TIMEOUT_CODES or (
+        supplied_reason.startswith("TARGET_SEARCH_") and supplied_reason.endswith("_TIMEOUT")
+    ):
+        safe_halt_reason = ZALO_JOB_REASON_TARGET_SEARCH_TIMEOUT
+    elif supplied_reason in TARGET_SEARCH_ERROR_CODES or (
+        supplied_reason.startswith("TARGET_SEARCH_") and supplied_reason.endswith("_ERROR")
+    ):
+        safe_halt_reason = ZALO_JOB_REASON_TARGET_SEARCH_ERROR
+    elif supplied_reason in SETUP_CODES:
+        safe_halt_reason = supplied_reason
+    else:
+        safe_halt_reason = ZALO_JOB_REASON_UNKNOWN_FAIL_CLOSED
 
     if attempted == 0:
         reason_code = safe_halt_reason or ZALO_JOB_REASON_NO_TARGET_ATTEMPTED
@@ -1126,10 +1367,22 @@ def build_zalo_job_progress(
         if reason_code == ZALO_JOB_REASON_UNKNOWN_FAIL_CLOSED and not supplied_reason:
             reason_code = ZALO_JOB_REASON_TARGETS_NEED_REVIEW
         final_status = "FAILED" if safe_count == 0 else "PARTIAL_SUCCESS"
-        message = (
-            f"Hoàn tất một phần: {safe_count} target an toàn, "
-            f"{review_count} target cần xem trạng thái chi tiết."
-        )
+        if supplied_reason:
+            exempt_clause = f", {exempt_count} miễn báo cáo" if exempt_count else ""
+            message = (
+                f"Đợt quét dừng do {reason_code}: "
+                f"đã quét {attempted}/{total_targets} target "
+                f"({verified_submitted_count} có báo cáo"
+                f"{exempt_clause}, "
+                f"{verified_not_found_count} chưa có báo cáo, "
+                f"{insufficient_or_error_count} thiếu bằng chứng/lỗi), "
+                f"{safe_count} target đủ điều kiện ghi."
+            )
+        else:
+            message = (
+                f"Hoàn tất một phần: {safe_count} target an toàn, "
+                f"{review_count} target cần xem trạng thái chi tiết."
+            )
     else:
         reason_code = ZALO_JOB_REASON_COMPLETED
         final_status = "SUCCESS"
@@ -1142,7 +1395,15 @@ def build_zalo_job_progress(
     return {
         "phase": ZALO_JOB_PHASE,
         "reason_code": reason_code,
+        "total_targets": total_targets,
         "attempted_target_count": attempted,
+        "verified_submitted_count": verified_submitted_count,
+        "exempt_count": exempt_count,
+        "verified_not_found_count": verified_not_found_count,
+        "insufficient_or_error_count": insufficient_or_error_count,
+        "write_eligible_count": safe_count,
+        "safe_count": safe_count,
+        "halt_reason": supplied_reason or None,
         "status": final_status,
         "message": message,
         "items": list(scan_results),
@@ -1184,15 +1445,13 @@ class BatchFailurePolicy:
                 > self.total_targets * self.abnormal_percent_limit
             )
             systemic_limit_hit = self.consecutive_systemic >= self.systemic_limit
-            if systemic_limit_hit or abnormal_limit_hit:
-                self.halt_reason = (
-                    reason
-                    or (
-                        f"{self.consecutive_systemic} lỗi hệ thống liên tiếp"
-                        if systemic_limit_hit
-                        else f"{self.abnormal_targets}/{self.total_targets} target bất thường"
-                    )
-                )
+            if systemic_limit_hit:
+                if self.halt_reason is None:
+                    self.halt_reason = ZALO_JOB_REASON_BATCH_SYSTEMIC_THRESHOLD
+                self.halted.set()
+            elif abnormal_limit_hit:
+                if self.halt_reason is None:
+                    self.halt_reason = ZALO_JOB_REASON_BATCH_ABNORMAL_THRESHOLD
                 self.halted.set()
             return self.halted.is_set()
 
@@ -1217,16 +1476,35 @@ def _empty_result(
     return result
 
 
-async def _wait_for_target_header(locator, group_name: str, ensure_not_cancelled) -> str:
+async def _wait_for_target_header(
+    locator,
+    group_name: str,
+    ensure_not_cancelled,
+    *,
+    timeout_seconds: float | None = None,
+) -> str:
+    deadline = None
+    if timeout_seconds is not None:
+        deadline = asyncio.get_running_loop().time() + max(0.001, float(timeout_seconds))
     while True:
         await ensure_not_cancelled()
+        step_timeout_ms = 500.0
+        if deadline is not None:
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                raise PlaywrightTimeoutError("Target header wait timeout")
+            step_timeout_ms = min(500.0, max(1.0, remaining * 1000.0))
         try:
-            header_text = await locator.first.inner_text(timeout=500)
+            header_text = await locator.first.inner_text(timeout=step_timeout_ms)
         except PlaywrightTimeoutError:
+            if deadline is not None and asyncio.get_running_loop().time() >= deadline:
+                raise
             await asyncio.sleep(0.2)
             continue
         if open_chat_matches(group_name, header_text):
             return header_text.strip()
+        if deadline is not None and asyncio.get_running_loop().time() >= deadline:
+            raise PlaywrightTimeoutError("Target header wait timeout")
         await asyncio.sleep(0.2)
 
 
@@ -1283,7 +1561,7 @@ async def _scan_one_target(
 
     await job_repo.ensure_not_cancelled(job_id)
     await _run_target_search_operation(
-        lambda: page.locator("#contact-search-input").clear(),
+        lambda timeout_ms=None: page.locator("#contact-search-input").clear(timeout=timeout_ms),
         job_id=job_id,
         worker_id=worker_id,
         phase="SEARCH_CLEAR",
@@ -1294,7 +1572,7 @@ async def _scan_one_target(
     )
     search_query = re.sub(r"\s*\([^)]*\)", "", group_name).strip()
     await _run_target_search_operation(
-        lambda: page.locator("#contact-search-input").fill(search_query),
+        lambda timeout_ms=None: page.locator("#contact-search-input").fill(search_query, timeout=timeout_ms),
         job_id=job_id,
         worker_id=worker_id,
         phase="SEARCH_FILL",
@@ -1314,7 +1592,7 @@ async def _scan_one_target(
         error_code=TARGET_SEARCH_RESULT_ERROR,
     )
     body_text = await _run_target_search_operation(
-        lambda: page.locator("body").inner_text(),
+        lambda timeout_ms=None: page.locator("body").inner_text(timeout=timeout_ms),
         job_id=job_id,
         worker_id=worker_id,
         phase="SEARCH_RESULT",
@@ -1361,7 +1639,7 @@ async def _scan_one_target(
             )
         if fallback and fallback != search_query:
             await _run_target_search_operation(
-                lambda: page.locator("#contact-search-input").clear(),
+                lambda timeout_ms=None: page.locator("#contact-search-input").clear(timeout=timeout_ms),
                 job_id=job_id,
                 worker_id=worker_id,
                 phase="SEARCH_CLEAR",
@@ -1371,7 +1649,7 @@ async def _scan_one_target(
                 error_code=TARGET_SEARCH_CLEAR_ERROR,
             )
             await _run_target_search_operation(
-                lambda: page.locator("#contact-search-input").fill(fallback),
+                lambda timeout_ms=None: page.locator("#contact-search-input").fill(fallback, timeout=timeout_ms),
                 job_id=job_id,
                 worker_id=worker_id,
                 phase="SEARCH_FILL",
@@ -1391,7 +1669,7 @@ async def _scan_one_target(
                 error_code=TARGET_SEARCH_RESULT_ERROR,
             )
             body_text = await _run_target_search_operation(
-                lambda: page.locator("body").inner_text(),
+                lambda timeout_ms=None: page.locator("body").inner_text(timeout=timeout_ms),
                 job_id=job_id,
                 worker_id=worker_id,
                 phase="SEARCH_RESULT",
@@ -1422,6 +1700,7 @@ async def _scan_one_target(
             page.locator('.header-title, .chat-title, [class*="conv-header"] .truncate'),
             group_name,
             lambda: job_repo.ensure_not_cancelled(job_id),
+            timeout_seconds=TARGET_SEARCH_RESULT_TIMEOUT_SECONDS,
         ),
         job_id=job_id,
         worker_id=worker_id,
@@ -1580,7 +1859,14 @@ async def run_parallel_zalo_batch(
         landing_readiness_blocked = False
         setup_failure_lock = asyncio.Lock()
         setup_failure_claimed = False
-        scan_worker_count = max(1, int(runtime.zalo_scan_concurrency))
+        # Zalo Web can invalidate one tab when the same profile is opened in
+        # another tab.  Keep dry-run parallelism, but use one scan page for a
+        # production profile until separate profiles are explicitly proven.
+        scan_worker_count = (
+            1
+            if execution_mode == "production"
+            else max(1, int(runtime.zalo_scan_concurrency))
+        )
         active_scan_workers = {
             f"scan-{worker_index + 1}" for worker_index in range(scan_worker_count)
         }
@@ -1636,12 +1922,12 @@ async def run_parallel_zalo_batch(
                     if setup_failure_claimed:
                         return
                     setup_failure_claimed = True
+                    await policy.halt(setup_error.code)
                     await policy.record(
                         abnormal=True,
                         systemic=False,
                         reason=setup_error.code,
                     )
-                    await policy.halt(setup_error.code)
                     if setup_error.code in LANDING_SETUP_CODES:
                         landing_readiness_blocked = True
                         await repository.halt_unclaimed(job_id, setup_error.code)
@@ -1920,12 +2206,12 @@ async def run_parallel_zalo_batch(
                                 error_message=terminal_error.safe_message,
                             )
                             await remember_result(claimed, result)
+                            await retire_scan_worker(owner, terminal_error.code)
                             await policy.record(
                                 abnormal=True,
                                 systemic=False,
                                 reason=terminal_error.code,
                             )
-                            await retire_scan_worker(owner, terminal_error.code)
                             return
                         if retry_result is None:
                             # Defensive guard: a retry either returns a result
@@ -1997,10 +2283,12 @@ async def run_parallel_zalo_batch(
                         ),
                         result=result,
                     )
-                    abnormal = result.get("evidence_state") not in {
+                    evidence_state = str(result.get("evidence_state") or "")
+                    abnormal = evidence_state not in {
                         "SUBMITTED_VERIFIED",
                         "SUBMITTED_LATE_VERIFIED",
                         "LESSON_14_EXEMPTION",
+                        "NOT_FOUND_VERIFIED",
                     }
                     systemic = result.get("evidence", {}).get(
                         "classifier_result", {}
@@ -2035,7 +2323,7 @@ async def run_parallel_zalo_batch(
                 # completed healthy worker as unavailable.  Only the bounded
                 # retry path retires a worker from this set.
 
-        workers = max(1, int(runtime.zalo_scan_concurrency))
+        workers = scan_worker_count
         if not reconciliation_only:
             await _gather_workers(scan_worker(index) for index in range(workers))
         await halt_unclaimed_if_needed()
@@ -2051,10 +2339,7 @@ async def run_parallel_zalo_batch(
                 "halted": policy.halted.is_set(),
                 "halt_reason": policy.halt_reason,
                 "abnormal_targets": policy.abnormal_targets,
-                "worker_count": max(
-                    int(runtime.zalo_scan_concurrency),
-                    int(runtime.bcnb_write_concurrency),
-                ),
+                "worker_count": scan_worker_count,
             }
 
         scan_results = list(scan_results_by_key.values())
@@ -2363,9 +2648,7 @@ async def run_parallel_zalo_batch(
         "halted": policy.halted.is_set(),
         "halt_reason": policy.halt_reason,
         "abnormal_targets": policy.abnormal_targets,
-        "worker_count": max(
-            int(runtime.zalo_scan_concurrency), int(runtime.bcnb_write_concurrency)
-        ),
+        "worker_count": scan_worker_count,
     }
 
 

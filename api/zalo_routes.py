@@ -1,6 +1,6 @@
 from datetime import timedelta
 
-from fastapi import APIRouter, Body, Depends
+from fastapi import APIRouter, Body, Depends, Query
 
 from api.dependencies import enqueue_job, get_container, require_operator, require_viewer
 from api.errors import public_error
@@ -9,7 +9,12 @@ from core.container import AppContainer
 from core.time_utils import now_business
 from core.time_utils import now_utc, parse_timestamp, utc_iso
 from repositories.zalo_batch_repository import canonical_target_key
+from repositories.job_repository import JobStateError
 from services.zalo_target_eligibility import split_scan_targets_for_execution
+from services.zalo_preflight import (
+    assess_zalo_scan_preflight,
+    effective_scan_worker_count,
+)
 
 
 router = APIRouter()
@@ -20,6 +25,38 @@ def _snapshot_is_stale(snapshot: dict, max_age_minutes: int) -> bool:
     if observed is None:
         return True
     return (now_utc() - observed).total_seconds() > max(1, max_age_minutes) * 60
+
+
+def _enforce_scan_preflight(
+    preflight: dict,
+    *,
+    dry_run: bool,
+    confirm_yellow: bool,
+) -> None:
+    """Turn the latest admission report into a fail-closed route decision."""
+    status = str(preflight.get("status") or "RED")
+    checks = preflight.get("checks") or []
+    if status == "RED":
+        blocker = next(
+            (item for item in checks if item.get("status") == "RED"),
+            None,
+        )
+        if blocker and str(blocker.get("code", "")).startswith("SCAN_PLAN_"):
+            raise public_error(409, blocker["code"], blocker["message"])
+        raise public_error(
+            409,
+            "SCAN_PREFLIGHT_BLOCKED",
+            (blocker or {}).get(
+                "message",
+                "Chưa thể chạy vì kiểm tra an toàn chưa đạt.",
+            ),
+        )
+    if status == "YELLOW" and not dry_run and not confirm_yellow:
+        raise public_error(
+            409,
+            "SCAN_PREFLIGHT_CONFIRMATION_REQUIRED",
+            "Có cảnh báo an toàn trước khi chạy production; hãy đọc và xác nhận rồi thử lại.",
+        )
 
 
 @router.post("/auto-discover", dependencies=[Depends(require_operator)])
@@ -40,9 +77,25 @@ async def auto_discover(container: AppContainer = Depends(get_container)):
 async def run_scan(
     container: AppContainer = Depends(get_container),
     snapshot_id: int | None = Body(default=None, embed=True),
+    confirm_yellow: bool = Body(default=False, embed=True),
 ):
+    # Direct unit calls do not pass through FastAPI's dependency/body parser;
+    # normalize its ``Body(...)`` sentinel values before using them.
+    if not isinstance(snapshot_id, int) or isinstance(snapshot_id, bool):
+        snapshot_id = None
+    if not isinstance(confirm_yellow, bool):
+        confirm_yellow = False
     dry_run = container.settings.bcnb_dry_run
     execution_mode = "dry-run" if dry_run else "production"
+    preflight = await assess_zalo_scan_preflight(
+        container,
+        snapshot_id=snapshot_id,
+    )
+    _enforce_scan_preflight(
+        preflight,
+        dry_run=dry_run,
+        confirm_yellow=confirm_yellow,
+    )
     snapshot = (
         await container.group_repo.get_discovery_snapshot(snapshot_id)
         if snapshot_id is not None
@@ -146,6 +199,15 @@ async def run_scan(
             "SCAN_TARGETS_DEFERRED",
             "Chưa có lớp đủ giờ học để quét. Các lớp hôm nay sẽ tự khả dụng sau giờ kết thúc buổi học.",
         )
+    latest_preflight = await assess_zalo_scan_preflight(
+        container,
+        snapshot_id=snapshot_id,
+    )
+    _enforce_scan_preflight(
+        latest_preflight,
+        dry_run=dry_run,
+        confirm_yellow=confirm_yellow,
+    )
     scan_plan = {
         "snapshot_id": snapshot["snapshot_id"],
         "observed_at": snapshot.get("observed_at"),
@@ -156,22 +218,30 @@ async def run_scan(
         "targets": scan_targets,
         "deferred_targets": deferred_targets,
     }
-    job_id = await container.job_repo.create_job(
-        "ZALO_SCAN",
-        {
-            "phase": "ZALO_SCAN",
-            "reason_code": "QUEUED",
-            "attempted_target_count": 0,
-            "version": 5,
-            "dry_run": dry_run,
-            "execution_mode": execution_mode,
-            "scan_plan": scan_plan,
-        },
-        retryable=dry_run,
-        recoverable=dry_run,
-        mutates_external=not dry_run,
-        message="Đang chờ quét Zalo/BCNB...",
-    )
+    try:
+        job_id = await container.job_repo.create_job(
+            "ZALO_SCAN",
+            {
+                "phase": "ZALO_SCAN",
+                "reason_code": "QUEUED",
+                "attempted_target_count": 0,
+                "version": 5,
+                "dry_run": dry_run,
+                "execution_mode": execution_mode,
+                "scan_plan": scan_plan,
+            },
+            retryable=dry_run,
+            recoverable=dry_run,
+            mutates_external=not dry_run,
+            message="Đang chờ quét Zalo/BCNB...",
+            reject_if_active=True,
+        )
+    except JobStateError as exc:
+        raise public_error(
+            409,
+            "ACTIVE_JOB_PRESENT",
+            "Một job khác vừa được bắt đầu; hãy chờ job đó kết thúc rồi thử lại.",
+        ) from exc
     await enqueue_job(container, job_id)
     return {
         "message": "Bắt đầu quét trong nền...",
@@ -179,10 +249,23 @@ async def run_scan(
         "dry_run": dry_run,
         "target_count": len(scan_targets),
         "worker_count": int(
-            getattr(container.settings, "zalo_scan_concurrency", 2)
+            effective_scan_worker_count(container.settings, execution_mode)
         ),
         "deferred_target_count": len(deferred_targets),
     }
+
+
+@router.get(
+    "/api/zalo-scan-preflight",
+    dependencies=[Depends(require_viewer)],
+)
+async def get_zalo_scan_preflight(
+    container: AppContainer = Depends(get_container),
+    snapshot_id: int | None = Query(default=None),
+):
+    """Return a sanitized, read-only admission report for the dashboard."""
+
+    return await assess_zalo_scan_preflight(container, snapshot_id=snapshot_id)
 
 
 @router.get("/api/zalo-scan-plan", dependencies=[Depends(require_viewer)])

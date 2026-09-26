@@ -85,11 +85,15 @@
 
         function renderZaloTargetProgress(payload) {
             const container = document.getElementById('zalo-target-progress');
+            const review = document.getElementById('zalo-review-queue');
+            const reviewItems = document.getElementById('zalo-review-queue-items');
             if (!container) return;
             const summary = payload && payload.summary;
             if (!summary || !summary.total) {
                 container.classList.add('hidden');
                 container.textContent = '';
+                if (review) review.classList.add('hidden');
+                if (reviewItems) reviewItems.replaceChildren();
                 return;
             }
             const scan = summary.scan || {};
@@ -101,8 +105,15 @@
             const failedBeforeWrite = Number(write.FAILED_BEFORE_WRITE || 0);
             const needsReview = Number(write.OUTCOME_UNKNOWN || 0);
             const blocked = Number(write.BLOCKED_BATCH_HALT || 0);
-            container.textContent = [
+            const report = payload.report && typeof payload.report === 'object' ? payload.report : {};
+            const reportLines = [
                 `${Number(payload.worker_count || 1)} worker · ${summary.total} target`,
+                `đã kiểm tra ${Number(report.checked || 0)}`,
+                `đã nộp hợp lệ ${Number(report.submitted_verified || 0)}`,
+                `không tìm thấy sau khi kiểm tra đủ ${Number(report.not_found_verified || 0)}`,
+                `thiếu bằng chứng ${Number(report.insufficient_evidence || 0)}`,
+                `lỗi kỹ thuật ${Number(report.scan_failed || 0)}`,
+                `batch halt ${Number(report.blocked_batch_halt || 0)}`,
                 `đang xử lý ${processing}`,
                 `verified ${verified}`,
                 `đã có sẵn ${alreadyDone}`,
@@ -110,8 +121,36 @@
                 `lỗi trước ghi ${failedBeforeWrite}`,
                 `cần kiểm tra ${needsReview}`,
                 `bị chặn ${blocked}`
-            ].join(' · ');
+            ];
+            container.textContent = reportLines.join(' · ');
             container.classList.remove('hidden');
+
+            if (!review || !reviewItems) return;
+            const queue = Array.isArray(payload.review_queue) ? payload.review_queue : [];
+            reviewItems.replaceChildren();
+            if (!queue.length) {
+                review.classList.add('hidden');
+                return;
+            }
+            queue.slice(0, 100).forEach(item => {
+                const line = document.createElement('div');
+                line.className = 'flex flex-wrap items-center gap-2';
+                const label = document.createElement('span');
+                label.textContent = `${String(item.class_code || 'Không rõ mã lớp')} · Buổi ${String(item.lesson || '?')} · ${String(item.reason || 'Cần xem lại')}`;
+                line.appendChild(label);
+                const paths = Array.isArray(item.evidence_paths) ? item.evidence_paths : [];
+                paths.slice(0, 4).forEach(path => {
+                    if (typeof openImageModal !== 'function') return;
+                    const button = document.createElement('button');
+                    button.type = 'button';
+                    button.className = 'table-link';
+                    button.textContent = 'Xem evidence';
+                    button.addEventListener('click', () => openImageModal(evidenceUrl(path)));
+                    line.appendChild(button);
+                });
+                reviewItems.appendChild(line);
+            });
+            review.classList.remove('hidden');
         }
 
         async function refreshZaloTargetProgress(job) {
@@ -599,7 +638,6 @@
                     meta.className = 'evidence-meta';
                     const oldest = evidence.oldest_message_date || '?';
                     const newest = evidence.newest_message_date || '?';
-                    meta.textContent = `${evidence.messages_checked || 0} tin · ${oldest} → ${newest}`;
                     const actualGroup = evidence.actual_group_name || 'Chưa xác minh';
                     meta.title = `Nhóm Zalo: ${actualGroup}\nQuét lúc: ${evidence.scanned_at || '?'}`;
                     const requiredStart = evidence.required_window_start || '?';
@@ -609,37 +647,6 @@
                         : 'UNKNOWN';
                     meta.textContent = `${evidence.messages_checked || 0} tin · ${oldest} → ${newest} · Cửa sổ ${requiredStart} → ${requiredEnd} · Evidence: ${states}`;
                     actions.appendChild(meta);
-                }
-                const manual = r.manual_verification && typeof r.manual_verification === 'object'
-                    ? r.manual_verification
-                    : null;
-                if (manual && manual.active) {
-                    const manualMeta = document.createElement('div');
-                    manualMeta.className = 'manual-verification-meta';
-                    manualMeta.textContent = `Đã xác minh thủ công: ${manual.decision === 'REPORTED' ? 'Đã báo cáo' : 'Chưa báo cáo'} · ${manual.verifier_username || '?'} · ${manual.verified_at || '?'}`;
-                    manualMeta.title = String(manual.note || '');
-                    actions.appendChild(manualMeta);
-                } else if (String(r.evidence_state || '') === 'INSUFFICIENT_EVIDENCE') {
-                    const target = r.manual_target && typeof r.manual_target === 'object'
-                        ? r.manual_target
-                        : null;
-                    const manualActions = document.createElement('div');
-                    manualActions.className = 'manual-verify-actions';
-                    [['REPORTED', 'Đã báo cáo'], ['NOT_REPORTED', 'Chưa báo cáo']].forEach(([decision, label]) => {
-                        const button = document.createElement('button');
-                        button.type = 'button';
-                        button.className = decision === 'REPORTED'
-                            ? 'manual-verify-button manual-verify-button--reported'
-                            : 'manual-verify-button manual-verify-button--not-reported';
-                        button.textContent = label;
-                        button.disabled = !target;
-                        button.title = target
-                            ? 'Ghi nhận xác minh thủ công; không tự tích BCNB.'
-                            : 'Thiếu phạm vi lớp/tuần/buổi để ghi nhận an toàn.';
-                        button.addEventListener('click', () => manualVerifyResult(r, decision, button));
-                        manualActions.appendChild(button);
-                    });
-                    actions.appendChild(manualActions);
                 }
                 action.appendChild(actions);
                 tr.appendChild(action);
@@ -656,47 +663,6 @@
                     : 'Chưa có tuần cần báo cáo để hiển thị';
                 tr.appendChild(td);
                 tbody.appendChild(tr);
-            }
-        }
-
-        async function manualVerifyResult(result, decision, button) {
-            const target = result && result.manual_target;
-            if (!target || !currentJobId) {
-                alert('Không đủ phạm vi lớp/tuần/buổi hoặc chưa có job nguồn.');
-                return;
-            }
-            const label = decision === 'REPORTED' ? 'ĐÃ BÁO CÁO' : 'CHƯA BÁO CÁO';
-            const note = window.prompt(`Ghi chú xác minh thủ công (${label}):`, 'Đã kiểm tra trực tiếp trên Zalo.');
-            if (note === null) return;
-            if (String(note).trim().length < 3) {
-                alert('Ghi chú phải có ít nhất 3 ký tự.');
-                return;
-            }
-            if (button) button.disabled = true;
-            try {
-                const response = await fetch('/api/manual-verifications', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        class_code: target.class_code,
-                        week: target.week,
-                        year: target.year,
-                        lesson: target.lesson,
-                        decision,
-                        note: String(note).trim(),
-                        group_name: result.group,
-                        source_job_id: currentJobId,
-                    }),
-                });
-                const data = await response.json();
-                if (!response.ok) {
-                    const detail = data && data.detail;
-                    throw new Error(typeof detail === 'object' ? (detail.message || detail.code) : (detail || 'Không thể ghi nhận xác minh.'));
-                }
-                await updateDashboardData();
-            } catch (error) {
-                if (button) button.disabled = false;
-                alert(error.message || 'Không thể ghi nhận xác minh.');
             }
         }
 
