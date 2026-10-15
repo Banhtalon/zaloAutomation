@@ -1,0 +1,95 @@
+{
+  "schema_version": "qq.workflow.profile.v10",
+  "routing_mode": "ASSISTED",
+  "billing": "SUBSCRIPTION_ONLY",
+  "max_repairs": 2,
+  "max_senior_passes": 1,
+  "max_writers": 1,
+  "bridge_installed": false,
+  "bindings": {
+    "fast": {
+      "provider": "google",
+      "model": null,
+      "effort": null,
+      "verified": false
+    },
+    "senior": {
+      "provider": "openai",
+      "model": null,
+      "effort": null,
+      "verified": false
+    },
+    "elevated_review": {
+      "provider": "openai",
+      "model": null,
+      "effort": "high",
+      "verified": false
+    },
+    "review": {
+      "provider": "openai",
+      "model": null,
+      "effort": null,
+      "verified": false
+    }
+  },
+  "host_project": {
+    "name": "Zalo Automation",
+    "workflow_source_head": "3056879dc47d9a3b2846b99c1178b9fd8b553b8f",
+    "migration_base_head": "12c465c9001822994c12bb79af4a0bcec3897159",
+    "default_entry": "scripts/direct.mjs",
+    "workflow_python": ".venv/Scripts/python.exe",
+    "workflow_requirements": "requirements-workflow.txt",
+    "application_python": "venv/Scripts/python.exe",
+    "application_requirements": "requirements.txt",
+    "capability_status": "UNVERIFIED",
+    "gates": [
+      {
+        "id": "product-isolated-quality",
+        "argv": [
+          "powershell",
+          "-NoProfile",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-File",
+          "CHECK_QUALITY.ps1",
+          "-Isolated"
+        ],
+        "timeout_seconds": 600
+      },
+      {
+        "id": "workflow-node",
+        "argv": [
+          "node",
+          "--test",
+          "scripts/lib/*.test.mjs"
+        ],
+        "timeout_seconds": 300
+      },
+      {
+        "id": "workflow-mcp-synthetic",
+        "argv": [
+          ".venv/Scripts/python.exe",
+          "-X",
+          "utf8",
+          "mcp/test_antigravity_server.py"
+        ],
+        "timeout_seconds": 120
+      }
+    ],
+    "exclusions": [
+      ".env",
+      ".env.*",
+      "database.db",
+      "database.db-*",
+      "zalo_session/**",
+      "groups_dump.json",
+      "jobs_dump.json",
+      "runtime/**",
+      "evidence/**",
+      "temp_lms/**",
+      "googleform_autosubmit/uploads/**"
+    ],
+    "live_actions": "Separate exact-target Owner authorization and fresh safety evidence required",
+    "profile_budget_note": "Legacy profile fields are schema compatibility only; Direct budgets are frozen per canonical task."
+  }
+}

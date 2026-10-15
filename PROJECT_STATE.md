@@ -5,6 +5,37 @@
 
 ## Trạng thái ngắn
 
+- 2026-09-26 (Fix lỗi Discovery Job #295 và badge mode): Đã sửa điểm khiến
+  lỗi mở/đọc BCNB hoặc đọc nhóm Zalo bị đẩy lên dispatcher thành thông báo mơ
+  hồ “Worker dừng an toàn do lỗi nội bộ”. Các lỗi trình duyệt/nguồn ngoài giờ
+  được chuyển thành `DiscoverySafetyError`, job dừng fail-closed với hướng dẫn
+  tiếng Việt có thể làm theo; log chỉ ghi loại lỗi an toàn, không ghi traceback,
+  cookie hay dữ liệu thô. Badge trên header giờ lấy mode từ job đang xem (kể cả
+  `mutates_external` khi API không trả trực tiếp mode), nên job
+  `ZALO_DISCOVERY` #295 hiện là `Dò tìm · chỉ đọc`, không còn hiện nhầm
+  `PRODUCTION`; preflight không ghi đè mode của job hiện tại. Regression mới:
+  kiểm tra BCNB navigation failure, lỗi đọc nhóm Zalo và mode production/dry-run
+  của UI. Bằng chứng: `node tests/check_template_js.js` pass;
+  `tests.test_zalo_discovery_service` + `tests.test_job_dispatcher_unit` 35/35
+  pass; `CHECK_QUALITY.ps1 -Isolated` exit `0`, `QUALITY GATE PASSED`, 562
+  test, coverage 76,9%. Chưa chạy Discovery live, Zalo live hoặc ghi BCNB thật.
+
+- 2026-09-26 (UI-UX Phase 1): Đã làm gọn luồng dashboard Zalo trên nền
+  checkpoint `12c465c` (`chore: checkpoint before UI UX refresh`). Khu vực kế
+  hoạch và preflight được đưa lên trước nút chạy; thêm workflow 3 bước để Owner
+  biết đang ở Dò tìm, Kiểm tra an toàn hay Bắt đầu quét; mode Production/Dry-run
+  hiển thị từ response preflight thay vì chữ cố định; nút quét bị khóa khi chưa
+  có preflight hoặc gặp RED; response status lạ cũng fail-closed như RED; các
+  nhãn hành động được đổi sang tiếng Việt dễ hiểu. Phạm vi source UI gồm 5 file
+  giao diện/JavaScript/CSS; thêm một kiểm
+  tra frontend và ba tài liệu trạng thái/quyết định. Không đổi API, database,
+  `.env`, browser profile, cookie hoặc dữ liệu thật. Bằng chứng mới:
+  `git diff --check` pass; `node tests/check_template_js.js` pass với
+  `scripts=7 handlers=24 behavior=6`; `tests/check_app_smoke.py` pass;
+  `CHECK_QUALITY.ps1 -Isolated` exit `0`, `QUALITY GATE PASSED`, 560 test,
+  coverage 76,9%. Chưa mở trình duyệt để kiểm tra trực quan và chưa chạy
+  Zalo/BCNB thật; Phase UI-2 (báo cáo sau job/lịch sử nâng cao) chưa bắt đầu.
+
 - 2026-09-26 (đợt dọn code/UI trước): Hoàn tất theo phạm vi `Gọn giao diện`;
   đã xóa phần xác minh thủ công không có API backend khỏi `static/js/jobs.js` và
   `static/css/app.css`, xóa hai nhãn thông tin cố định khỏi dashboard/sidebar,
@@ -223,3 +254,156 @@ Ngày 2026-09-18:
 3. Canary Zalo này không thay thế nghiệm thu ghi thật. Mọi lần dùng profile thật
    tiếp theo cần target khóa cứng mới, preflight, artifact ngoài repository và
    duyệt riêng của Owner.
+
+
+## Cập nhật mới nhất — chuyển flow hiện hành, 2026-10-03
+
+Xác minh lúc 2026-10-03T09:33:09+07:00. Phần mã nguồn/cài đặt local đã kiểm chứng; chưa nghiệm thu
+AI thật hoặc production. Các mục ngày cũ phía trên là lịch sử, không thay thế
+bằng chứng của lần chuyển flow này.
+
+### Nguồn, quyết định và phạm vi
+
+- Đã kiểm tra trước sửa: repo nguồn sạch, main/HEAD/origin/main và main trên
+  remote cùng commit 3056879dc47d9a3b2846b99c1178b9fd8b553b8f; canonical
+  QQ AI Workflow 10.1.0-rc.9. Nguồn: F:/MINDX_project test/Trạm Điều Phối AI.
+- Đã đọc DEC-027 (gỡ workflow trước đây). Yêu cầu hiện tại của Owner cho phép
+  đưa flow trở lại; giữ nguyên PROJECT_DECISIONS.md và lịch sử quyết định.
+- Dự án vẫn ở branch chore/adopt-qq-ai-workflow-v9, HEAD
+  12c465c9001822994c12bb79af4a0bcec3897159. Không commit, push, deploy,
+  seed/migrate dữ liệu thật, gọi provider AI thật hoặc thao tác ứng dụng live.
+- Đã bổ sung bộ .ai-workflow/, scripts workflow và mcp; hướng dẫn HANDOFF.md,
+  OWNER_QUICKSTART.md, project profile và template Direct riêng cho Zalo.
+  AGENTS.md/GEMINI.md chỉ nối thêm hướng dẫn; .gitignore thêm .workflow-local/.
+  package.json giữ CommonJS cho test .js hiện tại, workflow dùng .mjs.
+- Flow việc mới: Gemini thực hiện -> controller kiểm tra -> Luna Max review
+  độc lập -> Product Check nếu áp dụng -> Owner nghiệm thu; quyền gộp/phát hành
+  được duyệt riêng. Profile ở ASSISTED, capability UNVERIFIED; tên model trong
+  template không phải bằng chứng model/tài khoản đã chạy.
+- MCP 2.2.0 dùng requirements-workflow.txt và .venv/Scripts/python.exe mới,
+  tách khỏi venv/requirements.txt của ứng dụng. Kiểm tra tương thích dạng
+  dry-run với requirements.lock.txt không thấy xung đột; không cài MCP vào
+  venv ứng dụng hoặc Python toàn máy.
+
+### Kiểm tra mới và giới hạn
+
+| Lệnh/bằng chứng | Kết quả mới |
+|---|---|
+| venv/Scripts/python.exe -m pip install --dry-run --disable-pip-version-check -r requirements.lock.txt mcp==2.2.0 | Exit 0; không cài vào môi trường ứng dụng |
+| .venv/Scripts/python.exe -m pip check; import MCPServer/Client | Exit 0; MCP 2.2.0 |
+| .venv/Scripts/python.exe -X utf8 mcp/test_antigravity_server.py | Exit 0; CLI giả lập, không gọi provider thật |
+| node --test scripts/lib/*.test.mjs | Exit 0; 112/112, 0 fail; PATH ưu tiên Python flow riêng |
+| powershell -NoProfile -ExecutionPolicy Bypass -File scripts/provisioning-safety.test.ps1 | Exit 0; 57/57, fixture tạm/dry-run |
+| node tests/check_template_js.js | Exit 0; scripts=7, handlers=24, behavior=6 |
+| Profile schema + Direct reviewer binding/worker isolation | Exit 0; host-check.log; không gọi provider |
+| node scripts/workflow.mjs help | Exit 0 |
+| workflow init khi workspace dirty | Exit 1 như mong đợi: candidate must be clean; không tạo packet |
+| CHECK_QUALITY.ps1 -Isolated trong repo đang chạy ứng dụng | Exit 1; 562 test, 3 fail tại LMS do ProfileLockTimeout; Ruff/mypy đạt |
+| Targeted tests.test_lms_service trên bản sao source riêng | Exit 0; 7/7 |
+| CHECK_QUALITY.ps1 -Isolated trên bản sao source riêng | Exit 0; 562/562 trong 319.832s, coverage 77.0%; QUALITY GATE PASSED |
+
+Lệnh đầy đủ của gate cuối:
+powershell -NoProfile -ExecutionPolicy Bypass -File CHECK_QUALITY.ps1 -Isolated
+-LogPath <audit-root>/quality-snapshot-full.log; chạy tại
+<audit-root>/source-snapshot. Bản sao chỉ chứa source, không chứa .env/database/
+browser state; dùng lại interpreter/thư viện của venv qua junction, không
+cài lại venv ứng dụng. SHA-256 của 270 file source đã được đối chiếu với repo
+trước khi bổ sung mục trạng thái này. Ruff đạt; mypy đạt 75 file; các cổng
+Phase 3–9B, thư viện, schema, app smoke giả lập, frontend và compile đều đạt.
+Đây là gate đầy đủ trên bản sao local, không phải nghiệm thu live/staging.
+
+Ba lỗi lần đầu xuất phát từ tests/test_lms_service.py dùng runtime lock mặc
+định tại runtime/locks/zalo-profile.lock dù bật -Isolated; ứng dụng Owner
+đang dùng giữ cùng lock. Không sửa test/runtime để che lỗi, không dừng ứng dụng.
+Với ứng dụng đang mở, gate sau này phải chạy trong source workspace tách riêng;
+-Isolated đơn lẻ tại repo đang chạy app chưa đủ cách ly đường dẫn lock này.
+
+### Đối chiếu thay đổi và dữ liệu đang dùng
+
+- Manifest source: PASS. 10 file dirty ban đầu ngoài PROJECT_STATE.md giữ
+  nguyên SHA-256 và trạng thái Git; PROJECT_STATE.md giữ nguyên toàn bộ nội
+  dung cũ và chỉ nối mục này. 65 file toolkit giữ byte-exact theo nguồn;
+  71 file mới đều thuộc allowlist. Không sửa source sản phẩm.
+- requirements.txt, requirements.lock.txt, .env và .env.bak giữ nguyên.
+  Không ghi đè database/browser state hay khôi phục dữ liệu từ baseline.
+- Guard yêu cầu dữ liệu runtime giữ nguyên tuyệt đối: CHANGED/FAIL, không
+  được đổi thành PASS. Database/browser state đã thay đổi trong thời gian
+  Owner sử dụng ứng dụng; Owner xác nhận "Có, tôi đang dùng ứng dụng".
+  Đối chiếu process cho thấy app chạy trước task và browser là con của app,
+  tách khỏi tiến trình test. Không khẳng định database/profile giữ nguyên
+  từng byte và không mở rộng sự xác nhận này thành quyền thao tác live.
+- Baseline bất biến, backup source gốc, log và final-manifest.json ở ngoài
+  repository: C:\Users\QQ\AppData\Local\Temp\zalo-flow-migration-20261003-3vri0054. Không đưa fingerprint/dữ liệu runtime vào tài liệu.
+  Chỉ dùng backup để đối chiếu/khôi phục đúng source theo yêu cầu; không
+  ghi đè dữ liệu Owner đang sử dụng.
+
+### Blocker và bước an toàn tiếp theo
+
+Bộ flow đã áp dụng ở source/local. Điều kiện dữ liệu runtime bất biến không
+đạt do phiên Owner đang hoạt động; capability/provider và nghiệm thu thật
+chưa kiểm chứng. Có agy/codex CLI trên máy nhưng chưa xác minh đăng nhập,
+model/quota hoặc review độc lập thật. Không tạo task từ HEAD cũ khi 11 file
+đang sửa chưa được đóng gói; không coi template Direct là task runnable.
+
+Task sau đọc HANDOFF.md và bản cập nhật này, lập scope/gate theo đúng source.
+Khi Owner yêu cầu riêng, có thể chuẩn bị checkpoint source sạch đã kiểm chứng
+rồi tạo contract/task Direct với write_paths/gate_paths chính xác. Việc chuyển
+flow này không cấp quyền commit/push, đăng nhập, quét hay ghi hệ thống thật.
+# Cập nhật 2026-10-03 09:54 (Asia/Saigon) — Phân biệt cảnh báo báo cáo và BCNB
+
+- Theo xác nhận Owner: SA26 buổi 8 và JSB15 buổi 10 đã có báo cáo; các buổi
+  mới nhất còn lại trong danh sách đang xem chưa báo cáo. Chỉ sửa diễn đạt tại
+  `api/job_routes.py`, thêm regression tại `tests/test_api_routes_unit.py`.
+- Target có `SUBMITTED_VERIFIED`/`SUBMITTED_LATE_VERIFIED` nhưng cần review hiện
+  "Đã có báo cáo đúng buổi nhưng bước cập nhật BCNB cần kiểm tra.";
+  `NOT_FOUND_VERIFIED` hiện "Chưa tìm thấy báo cáo đúng buổi.". Cảnh báo lỗi
+  kỹ thuật vẫn được ưu tiên; thiếu bằng chứng/không rõ vẫn giữ câu thận trọng.
+  Không đổi điều kiện review, số đếm, evidence, luồng quét hoặc ghi BCNB.
+- Thực hiện ASSISTED do Direct không thể dùng HEAD cũ thay cho workspace dirty
+  và chưa có quyền commit. Không gọi Gemini/Direct. Review độc lập yêu cầu
+  `gpt-6-luna`, effort `max`, PASS trên hai file nguồn đã khóa SHA-256; không
+  coi đây là completion canonical gắn commit hoặc nghiệm thu Owner.
+- Kiểm chứng trên bản sao source riêng, không chứa `.env`, database/profile
+  thật, dùng interpreter `F:/FINAL_PROJECT/zaloAutomation/venv/Scripts/python.exe`
+  và `ZALO_QUALITY_ISOLATED=1`, đường dẫn dữ liệu/lock/log tạm, dry-run:
+  `python -X utf8 -B -m unittest tests.test_api_routes_unit
+  tests.test_zalo_evidence tests.test_app_factory -v`: exit 0, 46/46.
+  Regression chạy trước sửa: exit 1 với đúng 3 subcase diễn đạt cũ.
+  `node tests/check_template_js.js`: exit 0, scripts=7 handlers=24 behavior=6;
+  `python -m ruff check api/job_routes.py tests/test_api_routes_unit.py`: exit 0;
+  `python -m mypy api/job_routes.py`: exit 0, 1 source file;
+  `git diff --check -- api/job_routes.py tests/test_api_routes_unit.py`: exit 0.
+- Product Check: đã nhìn bản giả lập cục bộ dùng hàm tạo cảnh báo và renderer/
+  markup hiện có; hai dòng có báo cáo và hai dòng chưa tìm thấy hiển thị đúng.
+  CSS của bản giả lập được giản lược. Chưa xác nhận trên dashboard đang chạy;
+  chưa chạy quality gate đầy đủ hoặc quét Zalo/BCNB thật trong task này.
+- Hồ sơ/baseline/backup source và bằng chứng ở ngoài repository:
+  `C:/Users/QQ/AppData/Local/Temp/zalo-warning-fix-20261003-zvknc88z`.
+  Allowlist chỉ gồm hai file nguồn/test trên và `PROJECT_STATE.md`; 84 path
+  dirty ngoài phạm vi giữ nguyên trạng thái Git và SHA-256 khi đối chiếu.
+- Bước tiếp theo: khi không có job đang chạy, khởi động lại ứng dụng rồi mở
+  kết quả quét cũ để xem câu cảnh báo mới; không cần quét lại hoặc ghi BCNB.
+
+
+## Cập nhật 2026-10-05 — Sửa báo đỏ giả của bộ quét bí mật
+
+- Xác minh lúc 2026-10-05T16:24:27+07:00; Owner yêu cầu "sao lưu và tiến hành" cho bản sửa nhỏ đã đề xuất.
+- Sao lưu 270 file mã nguồn hiện tại, gồm công việc chưa commit, tại `C:/Users/QQ/Documents/Codex Backups/zaloAutomation/20261005-secret-scan-1a95b8f2/source-before-fix.zip`; CRC và SHA-256 từng file khớp baseline. Bản này không chứa cấu hình thật, database hoặc browser profile; hướng dẫn khôi phục ở `RESTORE.txt` cùng thư mục. Không chuyển/xóa backup cũ.
+- Chỉ thêm `.venv` vào `EXCLUDED_PARTS` trong `scripts/phase9a_audit.py`; thêm một unittest tại `tests/test_phase9a_audit.py`. Không đổi secret patterns hoặc điều kiện ghi dữ liệu. Fixture chứng minh `venv`/`.venv` được bỏ qua nhưng `app.py`/`.venv-source` vẫn bị phát hiện khi chứa chuỗi giống credential.
+- Regression: `./venv/Scripts/python.exe -X utf8 -B -m unittest tests.test_phase9a_audit -v` chạy trước sửa exit 1 với đúng 1 failure; sau sửa exit 0, 1/1. Ruff và scoped diff check exit 0.
+- Bộ audit tại dự án thật: `./venv/Scripts/python.exe -X utf8 -B -m scripts.phase9a_audit` exit 0, secret findings=0, dependency lock khớp 73 entry. Không chạy pip-audit qua mạng.
+- Gate đầy đủ tại `C:/Users/QQ/Documents/Codex Backups/zaloAutomation/20261005-secret-scan-1a95b8f2/source-snapshot`: `powershell -NoProfile -ExecutionPolicy Bypass -File CHECK_QUALITY.ps1 -Isolated -LogPath "C:/Users/QQ/Documents/Codex Backups/zaloAutomation/20261005-secret-scan-1a95b8f2/full-quality.log"` exit 0, `QUALITY GATE PASSED`, 564/564 trong 328.478s, coverage 77.0%; Ruff, mypy 75 file và mọi bước còn lại đạt. Snapshot không chứa `.env`, database hoặc profile thật; dùng interpreter/thư viện qua junction `venv` và `.venv`, không cài lại môi trường.
+- ASSISTED được chọn trước dispatch vì HEAD không đại diện workspace dirty và chưa có quyền commit. Không gọi Direct/Gemini. Reviewer độc lập yêu cầu `gpt-6-luna`/`max`, PASS trên hai SHA nguồn đã khóa; reviewer chạy lại 1/1 test (exit 0), không có finding. Đây là review source/local, không phải completion canonical gắn commit hoặc nghiệm thu production.
+- Allowlist chỉ gồm `scripts/phase9a_audit.py`, `tests/test_phase9a_audit.py`, `PROJECT_STATE.md`; nội dung trạng thái cũ giữ nguyên và chỉ nối mục này. Manifest cuối và bằng chứng ở thư mục backup ngoài repo. Không sửa dữ liệu/cấu hình/profile, không mở Zalo/BCNB/Form, không commit/push/deploy.
+- Bước tiếp theo: tiếp tục sử dụng ứng dụng; bản sửa công cụ kiểm tra không yêu cầu khởi động lại. Việc dọn ổ F và chốt mã nguồn vẫn là công việc riêng. Test xanh chỉ xác nhận source/local.
+
+## Cập nhật 2026-10-05 — Dọn file cũ, giữ bản khôi phục trên ổ C
+
+- Owner yêu cầu dọn các file quá cũ không dùng. Đã hoàn tất xóa bản gốc lúc `2026-10-05T17:02:38+07:00`, sau khi chép và đối chiếu SHA-256 nguồn/đích từng file. Phạm vi chỉ gồm artifact bị Git bỏ qua: các nhánh `.backups` cũ trước 2026-09-01, `.pytest_cache`, `groups_dump.json`, `jobs_dump.json`; không xóa file nguồn đang được quản lý hoặc công việc chưa commit.
+- Chuyển 4.558 file / 5.000.197.178 byte sang `C:/Users/QQ/Documents/Codex Backups/zaloAutomation/20261005-legacy-cleanup-bbb81bf7/archived`, rồi xóa đúng các file trong manifest và 343 thư mục đã rỗng. Hai phase `cleanup.ps1 -Phase Archive` và `-Phase Delete` đều exit 0; post-delete xác nhận 0 file/thư mục candidate còn lại, tổng file/byte trên ổ C khớp. Ổ F còn 11.894.530.048 byte trống khi hoàn tất (khoảng 11,9 GB).
+- Giữ `.backups/db` đang dùng và ba ZIP hoàn chỉnh gần nhất của nhóm cũ: `pre-required-week-dashboard-20260815-170153.zip`, `pre-ui-lag-fix-source-state-20260814-230450.zip`, `pre-scan-target-timing-fix-source-state-20260814-173859.zip`; SHA-256 ba ZIP không đổi. Cấu hình, database thật, browser profile, ảnh bằng chứng, `scratch`, `venv` và `.venv` nằm ngoài allowlist xóa. Không lấy byte/hash của database hoặc profile đang chạy làm bằng chứng bất biến.
+- Bản lưu có thể chứa mật khẩu/dữ liệu lịch sử: ACL giới hạn đúng tài khoản hiện tại, SYSTEM và Administrators; không đưa nội dung, tên file dữ liệu chi tiết hoặc manifest nhạy cảm vào Git. `RESTORE.txt` cùng thư mục hướng dẫn yêu cầu khôi phục từng file, không ghi đè công việc mới. Hai ZIP nén dở cũ được giữ nguyên byte; không khẳng định giải nén được. Đây là bản lưu trên cùng máy, chưa phải sao lưu ngoài máy.
+- Trước dọn đã sao lưu 271 file nguồn hiện tại vào `source-before-cleanup.zip`, kiểm tra CRC và SHA từng file; không chứa cấu hình thật/database/profile. `source_manifest.py` đối chiếu path, trạng thái Git và SHA ngoài `PROJECT_STATE.md`, cấu hình thật được kiểm tra riêng trong artifact private; nội dung trạng thái cũ giữ nguyên và chỉ nối mục này.
+- ASSISTED chọn trước dispatch vì HEAD không đại diện workspace dirty và chưa có quyền commit; không gọi Direct/Gemini. Reviewer độc lập yêu cầu `gpt-6-luna`/`max`, PASS trên SHA helper/summary đã khóa và kiểm tra ACL; hồ sơ `independent-review.json` ngoài repo. Check `verify_backup_root.py` exit 0 xác nhận cấu hình theo `START.bat` bảo vệ đúng `.backups/db`, không khởi động server/mở DB; không quan sát môi trường bên trong tiến trình ứng dụng nếu được khởi động bằng cách khác. Đây là review an toàn local, không completion canonical gắn commit hoặc nghiệm thu production.
+- Sau dọn: `./venv/Scripts/python.exe -X utf8 -B -m scripts.phase9a_audit` exit 0, secret findings=0, dependency lock khớp 73 entry; pip-audit qua mạng không chạy. Không chạy lại quality gate đầy đủ trong task chỉ dọn artifact, không đổi code ứng dụng. Manifest cuối và diff riêng của tài liệu ở thư mục lưu trữ trên ổ C.
+- Bước tiếp theo: tiếp tục dùng ứng dụng bình thường, không cần khởi động lại vì lượt dọn này. Khi cần file cũ, đối chiếu `transfer-manifest.json` private và chỉ khôi phục file cần thiết từ `archived`. Không mở Zalo/BCNB/Form, không ghi dữ liệu thật, không commit/push/deploy.

@@ -39,6 +39,56 @@
         </div>
     </div>
 
+    <div id="zalo-scan-plan" class="rounded-xl border border-indigo-200 bg-indigo-50 px-4 py-3 text-sm text-indigo-900" role="status">
+        Chưa có kế hoạch tuần BCNB. Hãy bấm “Dò tìm” trước khi quét.
+    </div>
+
+    <section id="zalo-preflight" class="preflight-card rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-700" role="status" aria-live="polite" aria-labelledby="zalo-preflight-title">
+        <div class="preflight-header flex flex-wrap items-center justify-between gap-3">
+            <div>
+                <p class="section-eyebrow">Chốt an toàn trước khi chạy</p>
+                <h2 id="zalo-preflight-title" class="mt-1 font-semibold">Kiểm tra trước khi chạy</h2>
+                <p id="zalo-preflight-summary" class="mt-1 text-xs text-slate-500">Đang kiểm tra ứng dụng, kế hoạch và phiên Zalo...</p>
+                <p id="zalo-preflight-checked-at" class="mt-1 text-[11px] text-slate-400">Chưa có lần kiểm tra gần nhất</p>
+            </div>
+            <div class="preflight-actions flex items-center gap-2">
+                <span id="zalo-preflight-status" class="rounded-full px-3 py-1 text-[11px] font-bold uppercase tracking-wide">Đang kiểm tra</span>
+                <button id="zalo-preflight-refresh" type="button" onclick="refreshCurrentZaloPreflight()" class="preflight-refresh" aria-label="Kiểm tra lại điều kiện an toàn">
+                    <i class="fa-solid fa-rotate-right" aria-hidden="true"></i>
+                    Kiểm tra lại
+                </button>
+            </div>
+        </div>
+        <details id="zalo-preflight-details" class="preflight-details mt-3 hidden">
+            <summary id="zalo-preflight-detail-summary">Xem kiểm tra chi tiết</summary>
+            <div id="zalo-preflight-checks" class="mt-3 space-y-1 text-xs"></div>
+        </details>
+    </section>
+
+    <div id="zalo-run-workflow" class="workflow-stepper" aria-label="Quy trình quét Zalo">
+        <div id="zalo-step-discover" class="workflow-step" data-state="current">
+            <span class="workflow-step__number">1</span>
+            <div>
+                <p class="workflow-step__title">Dò tìm kế hoạch</p>
+                <p id="zalo-step-discover-detail" class="workflow-step__detail">Lấy hai tuần dữ liệu cần xử lý</p>
+            </div>
+        </div>
+        <div id="zalo-step-preflight" class="workflow-step" data-state="blocked">
+            <span class="workflow-step__number">2</span>
+            <div>
+                <p class="workflow-step__title">Kiểm tra an toàn</p>
+                <p id="zalo-step-preflight-detail" class="workflow-step__detail">Chờ kế hoạch hợp lệ</p>
+            </div>
+        </div>
+        <div id="zalo-step-scan" class="workflow-step" data-state="blocked">
+            <span class="workflow-step__number">3</span>
+            <div>
+                <p class="workflow-step__title">Bắt đầu quét</p>
+                <p id="zalo-step-scan-detail" class="workflow-step__detail">Chưa đủ điều kiện để chạy</p>
+            </div>
+        </div>
+    </div>
+
     <div class="dashboard-action-bar flex flex-wrap items-center justify-between shrink-0">
         <label class="search-box glass-panel rounded-xl flex items-center overflow-hidden" for="searchInput">
             <span class="pl-4 text-slate-400" aria-hidden="true"><i class="fa-solid fa-search"></i></span>
@@ -51,31 +101,16 @@
                 <i class="fa-solid fa-check-double" aria-hidden="true"></i> Tick LMS
             </button>
             <button type="button" id="btn-filter-unreported" onclick="toggleUnreportedFilter()" class="action-button action-button--filter">
-                <i class="fa-solid fa-filter" aria-hidden="true"></i> Lọc lỗi
+                <i class="fa-solid fa-filter" aria-hidden="true"></i> Cần xem lại
             </button>
             <button type="button" onclick="startAutoDiscover()" class="action-button action-button--discover">
-                <i class="fa-solid fa-satellite-dish" aria-hidden="true"></i> Dò tìm
+                <i class="fa-solid fa-satellite-dish" aria-hidden="true"></i> Dò tìm lại
             </button>
-            <button type="button" onclick="startScan()" class="action-button action-button--scan">
-                <i class="fa-solid fa-bolt" aria-hidden="true"></i> Bắt đầu Quét
+            <button type="button" onclick="startScan()" class="action-button action-button--scan" title="Kiểm tra trước khi chạy rồi mới bắt đầu quét">
+                <i class="fa-solid fa-bolt" aria-hidden="true"></i> Bắt đầu quét
             </button>
         </div>
     </div>
-
-    <div id="zalo-scan-plan" class="rounded-xl border border-indigo-200 bg-indigo-50 px-4 py-3 text-sm text-indigo-900" role="status">
-        Chưa có kế hoạch tuần BCNB. Hãy bấm “Dò tìm” trước khi quét.
-    </div>
-
-    <section id="zalo-preflight" class="rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-700" role="status" aria-live="polite" aria-labelledby="zalo-preflight-title">
-        <div class="flex flex-wrap items-center justify-between gap-2">
-            <div>
-                <h2 id="zalo-preflight-title" class="font-semibold">Kiểm tra trước khi chạy</h2>
-                <p id="zalo-preflight-summary" class="mt-1 text-xs text-slate-500">Đang kiểm tra ứng dụng, kế hoạch và phiên Zalo...</p>
-            </div>
-            <span id="zalo-preflight-status" class="rounded-full px-3 py-1 text-[11px] font-bold uppercase tracking-wide">Đang kiểm tra</span>
-        </div>
-        <div id="zalo-preflight-checks" class="mt-3 hidden space-y-1 text-xs"></div>
-    </section>
 
     <div id="zalo-target-progress" class="hidden rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-700" role="status" aria-live="polite"></div>
 
@@ -104,7 +139,7 @@
                                     <i class="fa-regular fa-folder-open text-4xl" aria-hidden="true"></i>
                                 </div>
                                 <p class="font-semibold text-slate-700">Chưa có dữ liệu</p>
-                                <p class="mt-1 text-sm text-slate-500">Hãy bấm “Bắt đầu Quét” để kiểm tra báo cáo.</p>
+                                <p class="mt-1 text-sm text-slate-500">Hãy Dò tìm kế hoạch, kiểm tra an toàn rồi bắt đầu quét.</p>
                             </div>
                         </td>
                     </tr>

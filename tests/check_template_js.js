@@ -148,6 +148,11 @@ function createFrontendHarness(fetchImpl) {
       if (!elements.has(id)) elements.set(id, createFakeElement(id));
       return elements.get(id);
     },
+    querySelector(selector) {
+      return selector === '.action-button--scan'
+        ? this.getElementById('scan-button')
+        : null;
+    },
     querySelectorAll: () => [],
     createElement: tag => createFakeElement(tag),
     createDocumentFragment: () => createFakeElement('fragment'),
@@ -268,6 +273,16 @@ async function checkJobPollingAndTerminalDetails() {
   assertFrontend(
     !harness.elements.get('job-retry-button').classList.contains('hidden'),
     'Retry restriction must remain scoped to Google Form jobs',
+  );
+  vm.runInContext("renderJobControls({id: 905, job_type: 'ZALO_DISCOVERY', status: 'FAILED', execution_mode: 'dry-run', retryable: true, cancel_allowed: false})", harness.context);
+  assertFrontend(
+    harness.elements.get('runtime-mode-badge').textContent === 'Dò tìm · chỉ đọc',
+    'Discovery job must show its read-only mode',
+  );
+  vm.runInContext("renderJobControls({id: 906, job_type: 'ZALO_SCAN', status: 'SUCCESS', mutates_external: true, retryable: false, cancel_allowed: false})", harness.context);
+  assertFrontend(
+    harness.elements.get('runtime-mode-badge').textContent === 'Production',
+    'A mutating job without an exposed mode must still show production',
   );
 }
 
@@ -422,6 +437,70 @@ async function checkRequiredWeekDashboardView() {
   assertFrontend(vm.runInContext('latestZaloResults.length', harness.context) === 0, 'Empty Zalo job must clear old target rows');
 }
 
+async function checkZaloPreflightUiSafety() {
+  const harness = createFrontendHarness(async () => {
+    throw new Error('Preflight UI check must not call the network');
+  });
+  vm.runInContext(scriptSourceByPath.get('/static/js/state.js'), harness.context);
+
+  vm.runInContext('renderZaloPreflight(null)', harness.context);
+  assertFrontend(
+    harness.elements.get('scan-button').disabled,
+    'Scan must stay disabled until a fresh preflight report exists',
+  );
+  assertFrontend(
+    harness.elements.get('runtime-mode-badge').textContent === 'Chưa xác định',
+    'Missing preflight must not claim a runtime mode',
+  );
+
+  vm.runInContext(
+    "zaloScanPlan = {snapshot_id: 7, target_count: 12, required_week: {week: 38, year: 2026}}; renderZaloPreflight({status: 'GREEN', mode: 'production', target_count: 12, worker_count: 1, checked_at: '2026-09-26T10:00:00+00:00', checks: []})",
+    harness.context,
+  );
+  assertFrontend(
+    !harness.elements.get('scan-button').disabled,
+    'GREEN preflight with a plan must enable scanning',
+  );
+  assertFrontend(
+    harness.elements.get('runtime-mode-badge').textContent === 'Production',
+    'Runtime mode badge must use the server preflight mode',
+  );
+  assertFrontend(
+    harness.elements.get('zalo-step-scan-detail').textContent === 'Sẵn sàng bắt đầu quét',
+    'Workflow must explain that a GREEN scan is ready',
+  );
+  vm.runInContext("currentJobExecutionMode = 'dry-run'; currentJobType = 'ZALO_DISCOVERY'; renderRuntimeMode(currentJobExecutionMode, currentJobType)", harness.context);
+  assertFrontend(
+    harness.elements.get('runtime-mode-badge').textContent === 'Dò tìm · chỉ đọc',
+    'Discovery job must show its read-only mode',
+  );
+  vm.runInContext(
+    "renderZaloPreflight({status: 'RED', mode: 'production', target_count: 12, worker_count: 1, checks: []})",
+    harness.context,
+  );
+  assertFrontend(
+    harness.elements.get('runtime-mode-badge').textContent === 'Dò tìm · chỉ đọc',
+    'Preflight refresh must not overwrite the current job mode',
+  );
+
+  vm.runInContext(
+    "renderZaloPreflight({status: 'RED', mode: 'production', target_count: 12, worker_count: 1, checks: [{status: 'RED', message: 'blocked'}]})",
+    harness.context,
+  );
+  assertFrontend(
+    harness.elements.get('scan-button').disabled,
+    'RED preflight must disable scanning again',
+  );
+  vm.runInContext(
+    "renderZaloPreflight({status: 'UNKNOWN', mode: 'production', target_count: 12, checks: []})",
+    harness.context,
+  );
+  assertFrontend(
+    harness.elements.get('scan-button').disabled,
+    'Unknown preflight status must fail closed like RED',
+  );
+}
+
 async function checkBcnbZaloGapView() {
   let shouldFail = false;
   const requests = [];
@@ -480,8 +559,9 @@ async function runFrontendBehaviorChecks() {
   await checkGoogleFormHistoryAndHttpError();
   await checkLazyIncrementalLogs();
   await checkRequiredWeekDashboardView();
+  await checkZaloPreflightUiSafety();
   await checkBcnbZaloGapView();
-  console.log(`template-js-contract-ok scripts=${scriptSources.length} handlers=${handlerNames.size} behavior=5`);
+  console.log(`template-js-contract-ok scripts=${scriptSources.length} handlers=${handlerNames.size} behavior=6`);
 }
 
 runFrontendBehaviorChecks().catch(error => {

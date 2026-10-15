@@ -4,6 +4,7 @@
 
     <div class="flex items-center gap-2 min-w-0 justify-end">
         <span id="job-meta" class="hidden text-[10px] font-mono text-slate-500 shrink-0"></span>
+        <span id="runtime-mode-badge" class="mode-badge mode-badge--unknown" aria-label="Chế độ chạy hiện tại">Đang kiểm tra</span>
         <button id="job-cancel-button" type="button" onclick="cancelCurrentJob()" class="hidden px-3 py-1.5 rounded-lg border border-rose-200 bg-rose-50 text-xs font-semibold text-rose-600 hover:bg-rose-100 disabled:opacity-50">
             Hủy job
         </button>
@@ -15,7 +16,7 @@
                 <span id="pulse-dot" class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
                 <span id="status-dot" class="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500"></span>
             </span>
-            <span id="status-text" class="text-xs font-bold text-emerald-600 uppercase tracking-wide">System Ready</span>
+            <span id="status-text" class="text-xs font-bold text-slate-600 tracking-wide">Chưa có job đang chạy</span>
         </div>
     </div>
 </header>

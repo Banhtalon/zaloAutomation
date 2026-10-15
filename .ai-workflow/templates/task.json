@@ -1,0 +1,48 @@
+{
+  "schema_version": "qq.workflow.task.v10.1",
+  "task_id": "TASK-EXAMPLE",
+  "revision": 1,
+  "base_sha": "REPLACE_WITH_FULL_BASE_SHA",
+  "goal": "Describe one feature",
+  "acceptance_criteria": [
+    "Replace with observable expected behavior"
+  ],
+  "gates": [
+    {
+      "id": "relevant-tests",
+      "argv": [
+        "node",
+        "--test",
+        "test/feature.test.mjs"
+      ],
+      "timeout_seconds": 120
+    }
+  ],
+  "user_visible": true,
+  "risk": "LOW",
+  "complexity": "SIMPLE",
+  "execution": {
+    "policy": "CONTROLLED_DELEGATION_V1",
+    "product_evidence_storage": "single_file_v1"
+  },
+  "write_paths": [
+    "src/example.mjs"
+  ],
+  "allowed_paths": [
+    "src/example.mjs"
+  ],
+  "lane": "NORMAL",
+  "initial_lane": "NORMAL",
+  "initial_risk": "LOW",
+  "product_check": {
+    "target_url": "http://localhost:3000",
+    "criteria": [
+      "Replace with an observable product criterion"
+    ],
+    "actions": [
+      "Replace with an ordinary user action"
+    ]
+  },
+  "candidate_head": null,
+  "contract_sha256": null
+}

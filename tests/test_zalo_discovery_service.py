@@ -657,6 +657,52 @@ class ZaloDiscoveryServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.group_repo.get_all_groups_calls, 0)
         self.assertEqual(self.job_repo.updates[-1]["status"], "SUCCESS")
 
+    async def test_bcnb_navigation_failure_becomes_actionable_safety_error(self):
+        page = MagicMock()
+        page.goto = AsyncMock(side_effect=RuntimeError("raw browser detail"))
+
+        with self.assertRaisesRegex(
+            service.DiscoverySafetyError,
+            "Không thể mở hoặc đọc BCNB",
+        ):
+            await service._collect_bcnb_week_plan(page, 22)
+
+        self.assertEqual(self.job_repo.cancel_checks, 1)
+
+    async def test_unexpected_zalo_error_fails_job_without_raw_exception(self):
+        browser = FakeBrowserGateway()
+        runtime = self.runtime(browser)
+        with (
+            patch.object(
+                service,
+                "_collect_bcnb_week_plan",
+                AsyncMock(
+                    return_value={
+                        "latest_data": [],
+                        "required_data": [],
+                        "latest_week": {"week": 33, "year": 2026},
+                        "required_week": {"week": 32, "year": 2026},
+                        "selected_weeks": [],
+                    }
+                ),
+            ),
+            patch.object(
+                service,
+                "_collect_bcnb_class_states",
+                AsyncMock(return_value=None),
+            ),
+            patch.object(
+                service,
+                "_collect_zalo_group_names",
+                AsyncMock(side_effect=RuntimeError("raw browser detail")),
+            ),
+        ):
+            await service.run_auto_discovery(23, runtime=runtime)
+
+        self.assertEqual(self.job_repo.updates[-1]["status"], "FAILED")
+        self.assertIn("danh sách nhóm Zalo", self.job_repo.updates[-1]["message"])
+        self.assertNotIn("raw browser detail", self.job_repo.updates[-1]["message"])
+
     async def test_launch_and_persistence_failures_release_resources(self):
         launch_browser = FakeBrowserGateway(error=RuntimeError("launch failed"))
         launch_runtime = self.runtime(launch_browser)
@@ -802,4 +848,3 @@ class ZaloDiscoveryServiceTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

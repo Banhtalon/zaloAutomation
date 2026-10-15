@@ -149,25 +149,36 @@ async def _collect_bcnb_week_plan(page, job_id: int) -> dict:
     """Read BCNB's current week and its required predecessor from BCNB itself."""
     log_message("Truy cập trang check nhận xét BCNB...")
     await job_repo.ensure_not_cancelled(job_id)
-    await page.goto(Config.BCNB_URL)
-    await _login_bcnb_if_needed(page)
-
     try:
+        await page.goto(Config.BCNB_URL)
+        await _login_bcnb_if_needed(page)
         await dismiss_current_week_notice(page)
         latest_week, latest_year = await read_current_week_checked(page)
         required_week, required_year = previous_iso_week(latest_week, latest_year)
+    except DiscoverySafetyError:
+        raise
     except RuntimeError as exc:
         log_message(
-            "Không kiểm chứng được tuần/năm BCNB trong Auto Discovery.",
+            "Không thể mở hoặc đọc BCNB cho Auto Discovery.",
             level="ERROR",
+            event="discovery.bcnb_read_failed",
             error_type=type(exc).__name__,
-            reason=str(exc),
         )
         raise DiscoverySafetyError(
-            "Không kiểm chứng được tuần/năm BCNB."
+            "Không thể mở hoặc đọc BCNB; hãy kiểm tra kết nối và phiên đăng nhập rồi bấm Dò tìm lại."
         ) from exc
     except ValueError as exc:
         raise DiscoverySafetyError("BCNB trả về cặp tuần/năm không hợp lệ.") from exc
+    except Exception as exc:
+        log_message(
+            "Không thể mở hoặc đọc BCNB cho Auto Discovery.",
+            level="ERROR",
+            event="discovery.bcnb_read_failed",
+            error_type=type(exc).__name__,
+        )
+        raise DiscoverySafetyError(
+            "Không thể mở hoặc đọc BCNB; hãy kiểm tra giao diện và phiên đăng nhập rồi bấm Dò tìm lại."
+        ) from exc
     log_message(
         f"Đã kiểm chứng BCNB: tuần mới nhất W{latest_week}/{latest_year}; "
         f"tuần phải quét W{required_week}/{required_year}."
@@ -326,7 +337,13 @@ async def _run_auto_discovery(
                     event="discovery.bcnb_class_status_unavailable",
                     error_type=type(exc).__name__,
                 )
-            group_names = await _collect_zalo_group_names(page, job_id)
+            try:
+                group_names = await _collect_zalo_group_names(page, job_id)
+            except Exception as exc:
+                log_message("Zalo Discovery lỗi.", level="ERROR", error_type=type(exc).__name__)
+                raise DiscoverySafetyError(
+                    "Không thể đọc danh sách nhóm Zalo; hãy kiểm tra phiên Zalo và tab trùng rồi bấm Dò tìm lại."
+                ) from exc
     except DiscoverySafetyError as exc:
         await job_repo.update_job(
             job_id,
@@ -342,9 +359,6 @@ async def _run_auto_discovery(
         progress=80,
     )
     ignored_groups = await group_repo.get_all_ignored_groups(include_archived=True)
-    # Compare with the operational active set. Historical/ignored/transition
-    # names remain in `groups` for audit, but must not make a healthy fresh
-    # discovery look like an unexpected shrink.
     existing_groups = await group_repo.get_scan_groups()
     plan = _build_discovery_plan(
         group_names,

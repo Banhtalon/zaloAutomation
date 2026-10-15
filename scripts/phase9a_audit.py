@@ -23,6 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 EXCLUDED_PARTS = {
     ".git",
     ".backups",
+    ".venv",
     "runtime",
     "venv",
     "zalo_session",

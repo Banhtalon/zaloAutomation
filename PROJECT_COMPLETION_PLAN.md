@@ -163,6 +163,36 @@ gate riêng.
 - [ ] Chưa chạy dry-run live, canary hoặc production batch trong task này.
 - [ ] Chưa có production acceptance; chỉ Owner mới quyết định mở human gate.
 
+### UI-UX Phase 1 — Làm rõ chốt an toàn và luồng chạy — 2026-09-26
+
+- [x] Tạo checkpoint trước khi sửa UI tại commit `12c465c`
+  (`chore: checkpoint before UI UX refresh`); các thay đổi phase này có thể
+  đối chiếu và quay lại mốc đó khi Owner yêu cầu.
+- [x] Đưa kế hoạch BCNB và preflight lên trước khu vực nút hành động, để Owner
+  nhìn thấy phạm vi và điều kiện trước khi có thể bấm chạy.
+- [x] Hiển thị mode `Production`/`Dry-run` từ response preflight, kèm thời điểm
+  kiểm tra; không dùng nhãn cố định kiểu `Local`.
+- [x] Nút `Bắt đầu quét` bị khóa khi chưa có kế hoạch, chưa có preflight hoặc
+  preflight là `RED`; trạng thái preflight lạ cũng bị khóa; `YELLOW` vẫn yêu
+  cầu xác nhận khi production.
+- [x] Thêm workflow 3 bước Dò tìm → Kiểm tra an toàn → Bắt đầu quét; trạng thái
+  bước cập nhật theo plan, preflight và job đang chạy.
+- [x] Thu gọn kiểm tra chi tiết bằng `<details>`, thêm nút `Kiểm tra lại` dùng
+  đúng snapshot hiện tại và đổi nhãn hành động sang tiếng Việt dễ hiểu.
+- [x] Sửa badge mode để ưu tiên mode của job đang xem; `ZALO_DISCOVERY` hiển
+  thị `Dò tìm · chỉ đọc` và không bị preflight production ghi đè.
+- [x] Sửa Discovery để lỗi mở/đọc BCNB hoặc nhóm Zalo dừng fail-closed với
+  hướng dẫn an toàn, không lộ exception raw; có regression test cho hai lỗi.
+- [x] Không đổi route, policy batch, API nghiệp vụ, database, `.env` hoặc luồng
+  Zalo; không thêm dependency.
+- [x] Kiểm tra ngày 2026-09-26: `git diff --check`; `node
+  tests/check_template_js.js` (`scripts=7 handlers=24 behavior=6`);
+  `tests/check_app_smoke.py`; `CHECK_QUALITY.ps1 -Isolated` exit `0`,
+  `QUALITY GATE PASSED`, 562 test, coverage 76,9%.
+- [ ] Chưa mở trình duyệt local để Owner kiểm tra trực quan responsive/console;
+  chưa chạy dry-run live, canary hoặc production batch. Chỉ đánh dấu sau khi
+  Owner xác nhận bằng mắt trên dashboard.
+
 ### Rollback an toàn
 
 - [x] Rollback chỉ dùng patch ngược/Git checkpoint cho các file thuộc task;

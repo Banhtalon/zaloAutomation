@@ -444,6 +444,49 @@ class ApiRoutesUnitTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["review_queue"][0]["reason_code"], "TARGET_SEARCH_CLEAR_TIMEOUT")
         self.assertEqual(payload["review_queue"][0]["evidence_paths"], ["/api/evidence/41/report.png"])
 
+    async def test_target_review_distinguishes_report_evidence_from_bcnb_issues(self):
+        cases = [
+            ("SUBMITTED_VERIFIED", "TARGET_NOT_UNIQUE_OR_MISSING", "VERIFIED",
+             "Đã có báo cáo đúng buổi nhưng bước cập nhật BCNB cần kiểm tra."),
+            ("SUBMITTED_LATE_VERIFIED", "BCNB_WRITE_FAILED", "VERIFIED",
+             "Đã có báo cáo đúng buổi nhưng bước cập nhật BCNB cần kiểm tra."),
+            ("NOT_FOUND_VERIFIED", "EVIDENCE_NOT_READY", "VERIFIED",
+             "Chưa tìm thấy báo cáo đúng buổi."),
+            ("INSUFFICIENT_EVIDENCE", "EVIDENCE_NOT_READY", "VERIFIED",
+             "Chưa đủ bằng chứng để kết luận."),
+            ("UNKNOWN", "", "VERIFIED", "Chưa đủ bằng chứng để kết luận."),
+            ("INSUFFICIENT_EVIDENCE", "TARGET_SEARCH_CLEAR_TIMEOUT", "FAILED",
+             "Lỗi kỹ thuật cần kiểm tra lại."),
+        ]
+        for state, error_code, scan_status, expected_reason in cases:
+            with self.subTest(state=state, error_code=error_code):
+                container = FakeContainer()
+                container.zalo_batch_repo.list_for_job = AsyncMock(return_value=[{
+                    "id": 7,
+                    "class_code": "SYNTHETIC-CLASS",
+                    "lesson": "8",
+                    "class_date": "01/10/2026",
+                    "scan_status": scan_status,
+                    "write_status": "FAILED_BEFORE_WRITE",
+                    "error_code": error_code,
+                    "evidence_path": "/api/evidence/41/report.png",
+                    "result": {"evidence_state": state},
+                }])
+
+                payload = await get_job_targets(41, container)
+
+                self.assertEqual(len(payload["review_queue"]), 1)
+                item = payload["review_queue"][0]
+                self.assertEqual(item["reason"], expected_reason)
+                self.assertEqual(item["reason_code"], error_code or state)
+                self.assertEqual(item["evidence_paths"], ["/api/evidence/41/report.png"])
+                self.assertEqual(payload["report"]["submitted_verified"], int(
+                    state in {"SUBMITTED_VERIFIED", "SUBMITTED_LATE_VERIFIED"}
+                ))
+                self.assertEqual(payload["report"]["not_found_verified"], int(
+                    state == "NOT_FOUND_VERIFIED"
+                ))
+
     async def test_zalo_preflight_reports_safe_read_only_summary(self):
         container = FakeContainer()
         report = await get_zalo_scan_preflight(container)

@@ -174,6 +174,14 @@
             const meta = document.getElementById('job-meta');
             const cancelButton = document.getElementById('job-cancel-button');
             const retryButton = document.getElementById('job-retry-button');
+            currentJobExecutionMode = job.execution_mode === 'production'
+                || (job.execution_mode !== 'dry-run' && Boolean(job.mutates_external))
+                ? 'production'
+                : 'dry-run';
+            currentJobType = job.job_type || null;
+            if (typeof renderRuntimeMode === 'function') {
+                renderRuntimeMode(currentJobExecutionMode, currentJobType);
+            }
             const heartbeat = Number.isInteger(job.heartbeat_age_seconds)
                 ? ` · heartbeat ${job.heartbeat_age_seconds}s`
                 : '';
@@ -428,6 +436,7 @@
                     const payload = parseJobResults(job.results);
                     const isTerminal = terminalStatuses.has(job.status);
                     currentJobActive = !isTerminal;
+                    if (typeof renderZaloWorkflow === 'function') renderZaloWorkflow();
                     if (isTerminal) stopJobPolling();
                     renderJobControls(job);
                     if (logsTabIsActive()) {
@@ -672,10 +681,10 @@
             const btn = document.getElementById('btn-filter-unreported');
             if (filterUnreported) {
                 btn.classList.add('bg-rose-500/20', 'text-rose-300', 'border-rose-500/40');
-                btn.innerHTML = '<i class="fa-solid fa-filter mr-2"></i> Đang lọc: Trễ / Chưa nộp';
+                btn.innerHTML = '<i class="fa-solid fa-filter mr-2"></i> Đang lọc: Cần xem lại';
             } else {
                 btn.classList.remove('bg-rose-500/20', 'text-rose-300', 'border-rose-500/40');
-                btn.innerHTML = '<i class="fa-solid fa-filter mr-2"></i> Lọc: Chưa báo cáo';
+                btn.innerHTML = '<i class="fa-solid fa-filter mr-2"></i> Cần xem lại';
             }
             renderZaloResults(latestZaloResults, true);
         }

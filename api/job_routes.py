@@ -89,6 +89,10 @@ def _zalo_target_report(targets: list[dict]) -> tuple[dict[str, int], list[dict]
                         or error_code.startswith("TARGET_SEARCH_")
                         or error_code.startswith("SETUP_")
                     )
+                    else "Đã có báo cáo đúng buổi nhưng bước cập nhật BCNB cần kiểm tra."
+                    if evidence_state in {"SUBMITTED_VERIFIED", "SUBMITTED_LATE_VERIFIED"}
+                    else "Chưa tìm thấy báo cáo đúng buổi."
+                    if evidence_state == "NOT_FOUND_VERIFIED"
                     else "Chưa đủ bằng chứng để kết luận."
                 ),
                 "action": "Mở evidence và Nhật ký; không tự ghi lại BCNB từ màn hình này.",

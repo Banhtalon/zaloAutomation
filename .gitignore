@@ -41,3 +41,6 @@ scratch/
 Thumbs.db
 
 node_modules/
+
+# AI workflow local packets, receipts and synthetic fixtures
+.workflow-local/

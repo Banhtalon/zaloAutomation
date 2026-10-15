@@ -927,3 +927,47 @@
 - Evidence: Regression `test_exclusive_job_admission_rejects_active_job_atomically`
   pass; quality gate ngày 2026-09-26 đạt exit 0, 560 test.
 - Supersedes: Không; bổ sung DEC-030.
+
+## DEC-032 — Dashboard đặt chốt an toàn trước nút chạy
+
+- Date: 2026-09-26
+- Status: Accepted for local implementation; chưa phải production acceptance.
+- Context: Owner không nên phải đoán mode đang chạy hoặc bấm nút trước khi biết
+  kế hoạch và preflight đã đạt hay chưa.
+- Decision: Dashboard luôn hiển thị kế hoạch, chốt preflight và workflow trước
+  CTA `Bắt đầu quét`. Mode `Production`/`Dry-run` phải lấy từ server tại lần
+  kiểm tra gần nhất; khi chưa có preflight, trạng thái lạ hoặc trạng thái là
+  `RED`, UI khóa nút và hướng dẫn ngắn gọn. `YELLOW` chỉ hiện là cảnh báo cần
+  xác nhận, không giả thành `GREEN`. Nút `Kiểm tra lại` phải kiểm tra lại đúng
+  snapshot hiện tại.
+- Consequences: UI chỉ làm rõ trạng thái, không thay thế chốt server-side và
+  không tạo force-run. Việc kiểm tra trực quan và nghiệm thu Zalo/BCNB thật vẫn
+  cần Owner thực hiện riêng.
+- Evidence: Source/UI ngày 2026-09-26; `node tests/check_template_js.js`, app
+  smoke và `CHECK_QUALITY.ps1 -Isolated` đạt; không đổi API, database, `.env`,
+  browser profile hoặc dữ liệu thật.
+- Supersedes: Không; bổ sung DEC-030 và DEC-031.
+
+## DEC-033 — Discovery phải dừng an toàn có nguyên nhân và mode hiển thị theo job
+
+- Date: 2026-09-26
+- Status: Accepted for local implementation; chưa phải production acceptance.
+- Context: Job Discovery #295 dừng ngay sau khi truy cập BCNB nhưng dispatcher
+  chỉ lưu “Worker dừng an toàn do lỗi nội bộ”. Đồng thời dashboard lấy badge
+  `Production` từ preflight hiện tại, dù job Discovery là read-only/dry-run.
+- Decision: Các lỗi khi mở/đọc BCNB hoặc lấy nhóm Zalo trong Auto Discovery phải
+  được chuyển thành `DiscoverySafetyError` và kết thúc job `FAILED` với thông
+  báo tiếng Việt hướng dẫn kiểm tra kết nối, phiên đăng nhập hoặc tab trùng.
+  Log chỉ giữ event và `error_type` an toàn; không lưu exception raw. Badge mode
+  ưu tiên mode của job đang hiển thị, lấy từ `execution_mode` hoặc fallback
+  `mutates_external`; preflight chỉ cung cấp mode mặc định khi chưa có job.
+  Discovery được gắn nhãn `Dò tìm · chỉ đọc` để Owner không hiểu nhầm là thao
+  tác production.
+- Consequences: Lỗi thực tế vẫn fail-closed và không mở rộng quyền ghi BCNB;
+  Owner có thể biết bước xử lý tiếp theo thay vì xem traceback. Việc sửa này
+  không tự retry, không đổi `.env`, database, profile trình duyệt hoặc luồng
+  quét production. Cần kiểm tra live riêng nếu muốn xác nhận popup/phiên thật.
+- Evidence: Regression Discovery + frontend mode tests; `CHECK_QUALITY.ps1
+  -Isolated` ngày 2026-09-26 đạt exit `0`, 562 test, coverage 76,9%, toàn bộ
+  invariant/frontend/app smoke/compile đạt.
+- Supersedes: Không; bổ sung DEC-030 và DEC-032.

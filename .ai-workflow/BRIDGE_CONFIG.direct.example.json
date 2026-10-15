@@ -1,0 +1,25 @@
+{
+  "schema_version": "qq.bridge.v2",
+  "billing": "SUBSCRIPTION_ONLY",
+  "mode": "ASSISTED",
+  "timeout_seconds": 300,
+  "write_paths": ["src/example.mjs"],
+  "gate_paths": [],
+  "worker": {
+    "transport": "mcp",
+    "server": "antigravity_worker",
+    "provider": "mcp",
+    "command": ["C:/project/.venv/Scripts/python.exe", "mcp/antigravity_server.py"],
+    "model": "gemini-3.8-flash-high",
+    "local_trial": true,
+    "local_trial_root": "C:/replace-with-absolute-folder-outside-repo-and-packet",
+    "skip_permissions": false
+  },
+  "reviewer": {
+    "provider": "openai",
+    "cli": "codex",
+    "command": ["codex"],
+    "model": "gpt-6-luna",
+    "effort": "max"
+  }
+}

@@ -1,0 +1,2 @@
+# AI workflow only. Keep application requirements.txt and venv unchanged.
+mcp==2.2.0

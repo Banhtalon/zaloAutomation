@@ -109,3 +109,12 @@ Không dùng “toàn bộ test đã xanh” làm bằng chứng duy nhất cho 
 4. Chỉ append `PROJECT_DECISIONS.md` khi có quyết định kiến trúc, nghiệp vụ,
    an toàn hoặc quy trình có giá trị lâu dài.
 5. Không tuyên bố hoàn thành nếu còn tiêu chí `Done when` chưa đạt.
+
+## Flow AI hiện hành — chuyển đổi 2026-10-03
+
+- Nguồn: QQ AI Workflow 10.1.0-rc.9, main commit `3056879dc47d9a3b2846b99c1178b9fd8b553b8f`.
+- [Canonical](.ai-workflow/V10_CANONICAL_SPEC.md) là nguồn quy tắc điều phối AI; [HANDOFF](HANDOFF.md) là điểm vào, [project profile](.ai-workflow/PROJECT_PROFILE.json) ghi thông tin dự án. Các yêu cầu hiện tại của Owner và ranh giới an toàn Zalo ở trên vẫn có ưu tiên.
+- Owner đã yêu cầu chuyển lại sang flow hiện hành; DEC-027 giữ nguyên như lịch sử gỡ flow trước đây. Trạng thái mới nằm trong PROJECT_STATE.md. Không khôi phục packet, tài khoản hoặc receipt cũ.
+- Việc mới dùng Direct theo canonical: Gemini thực hiện, controller kiểm tra, Luna Max review độc lập, kiểm tra sản phẩm nếu áp dụng, Owner nghiệm thu. Ngoại lệ ASSISTED chỉ theo canonical trước dispatch và có lý do được ghi. Tác vụ check vẫn chỉ đọc.
+- Bộ flow dùng requirements-workflow.txt và .venv/Scripts/python.exe riêng; ứng dụng giữ requirements.txt và venv/Scripts/python.exe. Không dùng Python toàn máy để gọi worker.
+- Đây là cài đặt source/local; chưa có bằng chứng gọi Gemini/Luna thật hay nghiệm thu production. Không tạo task từ HEAD cũ khi workspace còn thay đổi chưa commit; giữ nguyên công việc đó và báo điều kiện còn thiếu. Commit/push vẫn cần yêu cầu rõ ràng của Owner.
