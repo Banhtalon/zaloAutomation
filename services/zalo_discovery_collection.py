@@ -1,5 +1,6 @@
 import asyncio
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from logger_utils import log_message
 
@@ -13,6 +14,23 @@ MAX_AGGREGATE_CLASS_STATES = 5_000
 
 class BcnbClassStatusError(RuntimeError):
     pass
+
+
+def complete_class_status_url(status_url: str) -> str:
+    """Request one complete DataTables page instead of the server default.
+
+    BCNB 2026-10 paginates ``hocsinh.php?datatable=students`` (15 rows by
+    default) and ignores ``length=-1``.  The completeness check below still
+    requires ``len(data) == recordsTotal``, so a larger population fails closed.
+    """
+    parts = urlsplit(status_url)
+    query = [
+        (key, value)
+        for key, value in parse_qsl(parts.query, keep_blank_values=True)
+        if key not in {"start", "length"}
+    ]
+    query += [("start", "0"), ("length", str(MAX_CLASS_STATUS_ROWS))]
+    return urlunsplit(parts._replace(query=urlencode(query)))
 
 
 async def collect_bcnb_class_states(
@@ -109,13 +127,18 @@ async def collect_bcnb_class_states(
                 const states = new Map();
                 let validRowCount = 0;
                 for (const row of payload.data) {
+                    // BCNB 2026-10 returns ``class_status: null`` for some
+                    // students.  Keep the row but record it as UNKNOWN so the
+                    // class can never be considered Finished-only.
                     if (!row || typeof row !== 'object' || Array.isArray(row) ||
                         typeof row.class_code !== 'string' ||
-                        typeof row.class_status !== 'string') {
+                        (row.class_status !== null &&
+                         typeof row.class_status !== 'string')) {
                         throw new Error('INVALID_CLASS_STATUS_ROW');
                     }
                     const code = row.class_code.trim().toUpperCase();
-                    const status = row.class_status.trim().toUpperCase();
+                    const status = (row.class_status || '').trim().toUpperCase() ||
+                        'UNKNOWN';
                     if (!code || !status || code.length > maxCodeLength ||
                         status.length > maxStatusLength) {
                         throw new Error('INVALID_CLASS_STATUS_ROW');
@@ -143,7 +166,7 @@ async def collect_bcnb_class_states(
             }
             """,
             {
-                "url": status_url,
+                "url": complete_class_status_url(status_url),
                 "maxBodyBytes": MAX_CLASS_STATUS_BODY_BYTES,
                 "maxRows": MAX_CLASS_STATUS_ROWS,
                 "maxCodeLength": MAX_CLASS_CODE_LENGTH,

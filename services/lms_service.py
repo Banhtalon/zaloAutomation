@@ -461,7 +461,7 @@ async def run_lms_analysis(
             process_lock=getattr(runtime, "profile_lock", None) if runtime else None,
         ):
             async with external.browser.persistent_page(
-                viewport={"width": 1280, "height": 720}
+                viewport={"width": 1920, "height": 1200}
             ) as page:
                 if use_web_lms:
                     await job_repo.update_job(
@@ -500,6 +500,7 @@ async def run_lms_analysis(
                     dry_run,
                     allow_unmatched_missing=use_web_lms,
                     allow_empty_missing=use_web_lms,
+                    allow_checked_missing=use_web_lms,
                     overdue_details=overdue_details,
                 )
 
@@ -682,7 +683,7 @@ async def run_lms_automation(
                 progress=20,
             )
             async with external.browser.persistent_page(
-                viewport={"width": 1280, "height": 720}
+                viewport={"width": 1920, "height": 1200}
             ) as page:
                 (
                     page,
@@ -701,6 +702,7 @@ async def run_lms_automation(
                     dry_run,
                     allow_unmatched_missing=allow_web_mode,
                     allow_empty_missing=allow_web_mode,
+                    allow_checked_missing=allow_web_mode,
                     overdue_details=plan.get("overdue_details"),
                 )
                 if fresh_plan["plan_digest"] != expected_digest:
@@ -1421,7 +1423,7 @@ async def run_googleform_fetch_lms_students(
             process_lock=getattr(runtime, "profile_lock", None) if runtime else None,
         ):
             async with gateways.browser.persistent_page(
-                viewport={"width": 1280, "height": 720}
+                viewport={"width": 1920, "height": 1200}
             ) as page:
                 await job_repo.update_job(
                     job_id,

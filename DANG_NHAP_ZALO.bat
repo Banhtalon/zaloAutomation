@@ -8,4 +8,4 @@ echo Sau khi dang nhap xong va thay danh sach tin nhan:
 echo HAY DONG (TAT) CUA SO TRINH DUYET DO DE HOAN TAT!
 echo ======================================================
 echo.
-start "" "C:\Program Files\Google\Chrome\Application\chrome.exe" --new-window --user-data-dir="%~dp0zalo_session" "https://chat.zalo.me"
+start "" "C:\Program Files\Google\Chrome\Application\chrome.exe" --new-window --window-size=1920,1200 --user-data-dir="%~dp0zalo_session" "https://chat.zalo.me"

@@ -250,6 +250,7 @@ def build_lms_plan(
     *,
     allow_unmatched_missing: bool = False,
     allow_empty_missing: bool = False,
+    allow_checked_missing: bool = False,
     overdue_details: dict[str, str] | None = None,
 ):
     missing = normalize_class_codes(
@@ -295,7 +296,9 @@ def build_lms_plan(
         blocking_issues.append(
             "Mã OCR không tồn tại chính xác trên BCNB: " + ", ".join(unmatched)
         )
-    if missing_but_checked:
+    if missing_but_checked and not (
+        allow_checked_missing or allow_unmatched_missing
+    ):
         blocking_issues.append(
             "Lớp được OCR là chưa làm nhưng BCNB đã tick: "
             + ", ".join(missing_but_checked)
@@ -321,7 +324,7 @@ def build_lms_plan(
         "can_confirm": not blocking_issues,
         "dry_run": bool(dry_run),
     }
-    if allow_unmatched_missing or allow_empty_missing:
+    if allow_unmatched_missing or allow_empty_missing or allow_checked_missing:
         plan["source"] = "lms_web"
     plan["plan_digest"] = compute_plan_digest(plan)
     return plan

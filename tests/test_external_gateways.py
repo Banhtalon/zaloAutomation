@@ -228,6 +228,14 @@ class ExternalGatewayTests(unittest.IsolatedAsyncioTestCase):
                 raise RuntimeError("boom")
         self.assertEqual(other_playwright.chromium.context.close_count, 1)
         self.assertEqual(other_manager.exit_count, 1)
+        self.assertEqual(
+            other_playwright.chromium.persistent_kwargs["viewport"],
+            {"width": 1920, "height": 1200},
+        )
+        self.assertIn(
+            "--window-size=1920,1200",
+            other_playwright.chromium.persistent_kwargs["args"],
+        )
 
     async def test_isolated_quality_denies_persistent_entry_before_playwright(self):
         gateway = PlaywrightBrowserGateway()
@@ -1220,7 +1228,11 @@ class ProbeLifecycleGatewayTests(unittest.IsolatedAsyncioTestCase):
                 "user_data_dir": gateway.profile_path,
                 "headless": False,
                 "channel": "chrome",
-                "args": ["--disable-blink-features=AutomationControlled"],
+                "args": [
+                    "--disable-blink-features=AutomationControlled",
+                    "--window-size=1920,1200",
+                ],
+                "viewport": {"width": 1920, "height": 1200},
             },
         )
         self.assertEqual(context.new_page_calls, 1)

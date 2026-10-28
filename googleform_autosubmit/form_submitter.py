@@ -332,8 +332,9 @@ class FormSubmitter:
         return screenshot_path
 
     async def submit_form(self, student_name, class_code, browser=None):
+        default_viewport = {"width": 1920, "height": 1200}
         if browser:
-            context = await browser.new_context()
+            context = await browser.new_context(viewport=default_viewport)
             page = await context.new_page()
             try:
                 return await self._execute_submission(page, student_name, class_code)
@@ -348,7 +349,7 @@ class FormSubmitter:
                     p.chromium,
                     headless=Config.HEADLESS,
                 )
-                context = await local_browser.new_context()
+                context = await local_browser.new_context(viewport=default_viewport)
                 page = await context.new_page()
                 try:
                     return await self._execute_submission(page, student_name, class_code)

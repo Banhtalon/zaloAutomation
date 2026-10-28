@@ -1054,3 +1054,24 @@
 - Evidence: Kiểm tra live CLI `codex exec -m gpt-6.1-sol -c model_reasoning_effort="xhigh" -s read-only -`
   ngày 2026-10-22 đạt exit `0`.
 - Supersedes: Cập nhật phương thức điều phối thực thi hàng ngày trên repo local.
+
+## DEC-037 - BCNB 2026-10: trạng thái lớp null là UNKNOWN; chọn tuần chỉ qua trigger an toàn
+
+- Date: 2026-10-28
+- Status: Accepted (Lead, Sol 6.1 xhigh `VERDICT: PASS` vòng 3); chờ Owner nghiệm thu.
+- Context: BCNB đổi cấu trúc (kiểm tra live chỉ đọc 2026-10-28): cột `NX Zalo`/`NX LMS`;
+  nút lọc tuần thành nhãn khoảng ngày trong form GET; `hocsinh.php?datatable=students`
+  phân trang (mặc định 15 dòng, bỏ qua `length=-1`) và có dòng `class_status = null`.
+- Decision:
+  1. `class_status` null/rỗng được giữ lại dưới dạng `UNKNOWN`; một mã lớp có
+     `UNKNOWN` không bao giờ được coi là Finished-only (không tự kết thúc lớp).
+  2. Collector luôn yêu cầu `start=0&length=MAX_CLASS_STATUS_ROWS` và vẫn bắt buộc
+     `len(data) == recordsTotal == recordsFiltered`; thiếu dòng là fail-closed.
+  3. Mọi đường chọn tuần (nhãn mới hoặc `Xem`/`Lọc lịch` cũ) chỉ bấm control hiển thị,
+     không disabled, không có `formaction`/`formmethod`, và nếu thuộc form thì form đó
+     phải là form GET sở hữu cả ô tuần và năm. Sau khi lọc, `selectedWeek`/`selectedYear`
+     do server render (khi có) phải khớp tuần yêu cầu.
+- Consequences: Không đoán cột theo vị trí; nhận cột `NX Zalo`/`NX LMS` và `Giảng viên chính` (`resolve_instructor_column`) theo header ngữ nghĩa thay vì chỉ số cột cố định.
+- Evidence: `tests/test_bcnb_dom_contract.py` (Chromium headless, BCNB tổng hợp được
+  route cục bộ); kiểm tra live chỉ đọc với 0 request không phải GET.
+- Supersedes: Không.

@@ -1,9 +1,25 @@
 # PROJECT STATE — Zalo Automation
 
-> Snapshot hiện tại, cập nhật 2026-10-23. Source và kiểm tra runtime mới có độ
+> Snapshot hiện tại, cập nhật 2026-10-28. Source và kiểm tra runtime mới có độ
 > tin cậy cao hơn tài liệu. Không dùng file này làm quyền chạy thao tác thật.
 
 ## Trạng thái ngắn
+
+- 2026-10-28 (Sửa lỗi khóa nút "Xác nhận kế hoạch" khi quét Web LMS có lớp đã tích sẵn trên BCNB — source/local):
+  - Nguyên nhân (Job #9): Khi quét trực tiếp Web LMS (`use_web_lms=True`), lớp `VT-ROB-PREA16 (Buổi 9)` xuất hiện trong danh sách quá hạn trên LMS nhưng dòng `VT-ROB-PREA16` trên BCNB tuần `43/2026` đã được tích sẵn (`checked=True`). `build_lms_plan` vẫn áp dụng chốt chặn của chế độ OCR cũ (`Lớp được OCR là chưa làm nhưng BCNB đã tick`), làm `can_confirm=False`, `confirmation_token=None` và khóa nút **Xác nhận kế hoạch** dù còn 41 lớp hợp lệ trong cột **Dự kiến tick**.
+  - Sửa: Bổ sung `allow_checked_missing: bool = False` trong `services/lms_plan.py` (`build_lms_plan`) và truyền `allow_checked_missing=use_web_lms` / `allow_web_mode` tại `services/lms_service.py` (cả bước lập kế hoạch và bước đối chiếu `fresh_plan` trước khi thực thi). Các lớp `missing_but_checked_classes` vẫn được giữ trong `plan`, gắn nhãn `BCNB: Đã tích ⚠️` ở cột **Không tick**, ràng buộc vào `plan_digest` và loại trừ tuyệt đối khỏi `classes_to_tick`; chế độ OCR ảnh truyền thống vẫn chặn như cũ.
+  - Bằng chứng: `tests.test_lms_plan` + `tests.test_lms_service` (24 test OK); `node tests/check_template_js.js` pass (`scripts=7 handlers=33 behavior=12`); `.\CHECK_QUALITY.ps1 -Isolated` exit `0`, `QUALITY GATE PASSED`, 597 test, coverage `76.2%`; Independent Review `gpt-6.1-sol (xhigh)` đạt `VERDICT: PASS` (Session `01a180cf-809d-7d01-8534-c8b1228e08c5`).
+
+- 2026-10-28 (Cập nhật độ phân giải trình duyệt Chrome mặc định `1920 x 1200` — source/local):
+  - Cấu hình `DEFAULT_BROWSER_VIEWPORT = {"width": 1920, "height": 1200}` và cờ `--window-size=1920,1200` trong `services/external_gateways.py` (`_persistent_launch_options`), đồng bộ `viewport={"width": 1920, "height": 1200}` tại `services/lms_service.py` (3 điểm gọi `persistent_page`), `googleform_autosubmit/form_submitter.py` (`new_context`), và `DANG_NHAP_ZALO.bat` (`--window-size=1920,1200`).
+  - Bằng chứng: targeted 127 test OK; `node tests/check_template_js.js` pass (`scripts=7 handlers=33 behavior=12`); `.\CHECK_QUALITY.ps1 -Isolated` exit `0`, `QUALITY GATE PASSED`, 597 test, coverage `76.2%`; Independent Review `gpt-6.1-sol (xhigh)` đạt `VERDICT: PASS` (Session `01a180c0-9ada-7c32-8588-c9228628a057`).
+
+- 2026-10-28 (Sửa tương thích cấu trúc BCNB mới — source/local, `DEC-037`):
+  - Thay đổi live (kiểm tra chỉ đọc, chặn mọi request không phải GET): cột `STT` chèn ở vị trí 0 đẩy `Giảng viên chính` từ cột 3 sang cột 4 (`cells[3]` thành `Ngày học`); tiêu đề `NX Zalo`/`NX LMS`; nút lọc tuần là nhãn `Tuần (dd/mm/yyyy - dd/mm/yyyy)` trong form GET (`#week-input`, `#year-input`); `hocsinh.php?datatable=students` phân trang 15 dòng, bỏ qua `length=-1`, có 22/1828 dòng `class_status=null`.
+  - Sửa: `services/bcnb_safety.py` (nhận cột `NX ...` khớp chính xác; thêm `resolve_instructor_column` tìm cột `Giảng viên chính` theo header ngữ nghĩa, bỏ qua `Trợ giảng`/`Ghi chú Giảng viên`; `isSafeTrigger` dùng chung cho mọi đường chọn tuần; xác nhận `selectedWeek/selectedYear` do server render), `services/zalo_discovery_service.py` (`_read_bcnb_week_rows` dùng `resolve_instructor_column` thay cho `cells[3]` cố định), `services/zalo_discovery_collection.py` (`complete_class_status_url` thêm `start=0&length=10000`, giữ kiểm tra đủ dòng; null/rỗng → `UNKNOWN`). Test mới `tests/test_bcnb_dom_contract.py` + bổ sung `test_bcnb_columns.py`, `test_bcnb_week_selector.py`, `test_zalo_discovery_service.py`.
+  - Bằng chứng: live chỉ đọc PASS (tuần 44→43, cột `(1,2,8)`/`(1,10)`/`(1,2,3,7)`/`instructor=4`, 47/47 dòng có đủ 2 checkbox và parse được ngày + deadline, 266 trạng thái lớp, `BLOCKED_NON_GET: []`); targeted 48 test OK; `.\CHECK_QUALITY.ps1 -Isolated` exit `0`, `QUALITY GATE PASSED`, 597 test; `git diff --check` exit `0`; Sol 6.1 xhigh `VERDICT: PASS`.
+  - Rủi ro mở: 1 lần gate trước đó (code vòng 2) fail Phase 9A do coverage `bcnb_safety.py` 57.21% < 75; chạy lại riêng lẻ/đầy đủ đều >85% và gate cuối PASS — nghi coverage chập chờn khi test Playwright thật chạy giữa bộ test; theo dõi.
+  - Chưa làm: chưa bấm checkbox thật trên BCNB (luồng ghi `updateCheckbox` chưa được canary). Bước an toàn tiếp theo: Owner chạy Dò tìm lại trên server đã khởi động lại, chạy dry-run quét Zalo/BCNB và xem bản xem trước; chỉ chạy production với một target cụ thể khi Owner duyệt.
 
 - 2026-10-23 (Hoàn tất Phase 3.2 — Tra cứu Lịch sử theo Tuần & Xuất báo cáo CSV/Excel `5/5` ✅ — Hoàn thành 100% lộ trình `UPGRADE_PROGRESS.md` theo flow `DEC-036`):
   Đã thực thi và nghiệm thu độc lập bởi `gpt-6.1-sol (xhigh)`:

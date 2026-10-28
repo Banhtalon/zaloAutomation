@@ -3062,6 +3062,9 @@ async def cleanup_persistent_resources(
 cleanup_persistent_session = cleanup_persistent_resources
 
 
+DEFAULT_BROWSER_VIEWPORT: dict[str, int] = {"width": 1920, "height": 1200}
+
+
 class PlaywrightBrowserGateway:
     """Owns Playwright/browser lifecycles while exposing raw pages to services."""
 
@@ -3128,14 +3131,27 @@ class PlaywrightBrowserGateway:
         viewport: dict[str, int] | None = None,
     ) -> dict[str, Any]:
         """Return the worker's exact persistent Chromium launch contract."""
+        effective_viewport = dict(
+            DEFAULT_BROWSER_VIEWPORT if viewport is None else viewport
+        )
+        width = int(
+            effective_viewport.get("width", DEFAULT_BROWSER_VIEWPORT["width"])
+        )
+        height = int(
+            effective_viewport.get(
+                "height", DEFAULT_BROWSER_VIEWPORT["height"]
+            )
+        )
         launch_options: dict[str, Any] = {
             "user_data_dir": self.profile_path,
             "headless": False,
             "channel": "chrome",
-            "args": ["--disable-blink-features=AutomationControlled"],
+            "args": [
+                "--disable-blink-features=AutomationControlled",
+                f"--window-size={width},{height}",
+            ],
+            "viewport": {"width": width, "height": height},
         }
-        if viewport is not None:
-            launch_options["viewport"] = viewport
         return launch_options
 
     @asynccontextmanager

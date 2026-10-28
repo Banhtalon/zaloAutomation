@@ -57,14 +57,37 @@ async def select_week_checked(page, week: int, year: int) -> tuple[int, int]:
             const controls = Array.from(document.querySelectorAll(
                 'button, input[type="submit"]'
             ));
+            // BCNB 2026-10: the week filter button label became the selected
+            // date range, e.g. "Tuần (26/10/2026 - 01/11/2026)".  Every
+            // selection path (new form submit or legacy "Xem"/"Lọc lịch"
+            // label) must pass the same safety check: visible, enabled, no
+            // formaction/formmethod override, and if it belongs to a form,
+            // that form must be the GET form owning both week and year inputs.
+            const ownerForm = weekInput && yearInput && weekInput.form &&
+                weekInput.form === yearInput.form ? weekInput.form : null;
+            const ownerIsGet = !!ownerForm &&
+                (ownerForm.getAttribute('method') || 'get').trim().toLowerCase() === 'get';
+            const isSafeTrigger = control =>
+                control.offsetParent !== null &&
+                !control.disabled &&
+                !control.hasAttribute('formaction') &&
+                !control.hasAttribute('formmethod') &&
+                (!control.form || (control.form === ownerForm && ownerIsGet));
             const acceptedLabels = /^(xem|lọc lịch)$/i;
             const buttons = controls.filter(control => {
                 const label = (control.innerText || control.value || '')
                     .replace(/\\s+/g, ' ')
                     .trim();
-                return acceptedLabels.test(label) && control.offsetParent !== null;
+                return acceptedLabels.test(label) && isSafeTrigger(control);
             });
-            const button = buttons.length === 1 ? buttons[0] : null;
+            const formSubmits = ownerIsGet ? Array.from(ownerForm.elements).filter(control =>
+                control.matches(
+                    'button[type="submit"], button:not([type]), input[type="submit"]'
+                ) && isSafeTrigger(control)
+            ) : [];
+            const button = formSubmits.length === 1
+                ? formSubmits[0]
+                : (buttons.length === 1 ? buttons[0] : null);
             if (!weekInput || !yearInput || !button) return false;
             weekInput.value = String(targetWeek);
             yearInput.value = String(targetYear);
@@ -116,15 +139,33 @@ async def select_week_checked(page, week: int, year: int) -> tuple[int, int]:
                 inputs.filter(i => /(^|[^a-z])(year|nam)([^a-z]|$)/.test(descriptor(i))),
                 yearNumeric,
             );
+            const source = Array.from(document.scripts)
+                .map(script => script.textContent || '')
+                .join('\\n');
+            const readScriptNumber = name => {
+                const match = source.match(new RegExp(String.raw`(?:const|let|var)\\s+${name}\\s*=\\s*(\\d+)`));
+                return match ? Number.parseInt(match[1], 10) : null;
+            };
             return {
                 week: weekInput ? Number.parseInt(weekInput.value, 10) : null,
                 year: yearInput ? Number.parseInt(yearInput.value, 10) : null,
+                serverWeek: readScriptNumber('selectedWeek'),
+                serverYear: readScriptNumber('selectedYear'),
             };
         }
         """
     )
     if values.get("week") != week or values.get("year") != year:
         raise RuntimeError("BCNB không xác nhận đúng tuần/năm yêu cầu.")
+    # Server-rendered evidence: the input values alone can be changed client-side
+    # without the filter ever being submitted.  When BCNB renders its selected
+    # period into the page script, it must agree with the requested week.
+    server_week = values.get("serverWeek")
+    server_year = values.get("serverYear")
+    if (server_week is not None or server_year is not None) and (
+        server_week != week or server_year != year
+    ):
+        raise RuntimeError("BCNB máy chủ chưa áp dụng đúng tuần/năm yêu cầu.")
     return week, year
 
 
@@ -238,7 +279,9 @@ async def resolve_report_columns(page) -> tuple[int, int, int]:
     ]
     lesson_indexes = [i for i, text in enumerate(headers) if "buoi" in text]
     current_report_indexes = [
-        i for i, text in enumerate(headers) if "nhan xet zalo" in text
+        i
+        for i, text in enumerate(headers)
+        if "nhan xet zalo" in text or re.fullmatch(r"nx\s*zalo", text)
     ]
     legacy_report_indexes = [
         i
@@ -315,6 +358,46 @@ async def resolve_schedule_columns(page) -> tuple[int, int, int, int]:
     )
 
 
+async def resolve_instructor_column(page) -> int | None:
+    """Resolve the main-instructor column from semantic headers.
+
+    Never fall back to a positional column index: BCNB 2026-10 inserted an
+    ``STT`` column at index 0, shifting ``Ngày học`` into index 3 where
+    ``Giảng viên chính`` previously sat.
+    """
+    header_cells = await page.locator("table tr").first.locator("th, td").all()
+    headers = [fold_text((await cell.inner_text()).strip()) for cell in header_cells]
+
+    def _is_excluded(text: str) -> bool:
+        return "tro giang" in text or "ghi chu" in text or "note" in text
+
+    primary_indexes = [
+        i
+        for i, text in enumerate(headers)
+        if not _is_excluded(text)
+        and (
+            "giang vien chinh" in text
+            or "giao vien chinh" in text
+            or text == "main instructor"
+        )
+    ]
+    if len(primary_indexes) == 1:
+        return primary_indexes[0]
+    if len(primary_indexes) > 1:
+        return None
+    fallback_indexes = [
+        i
+        for i, text in enumerate(headers)
+        if not _is_excluded(text)
+        and (
+            "giang vien" in text
+            or "giao vien" in text
+            or text in {"instructor", "teacher", "gv"}
+        )
+    ]
+    return fallback_indexes[0] if len(fallback_indexes) == 1 else None
+
+
 async def resolve_lms_columns(page) -> tuple[int, int]:
     header_cells = await page.locator("table tr").first.locator("th, td").all()
     headers = [fold_text((await cell.inner_text()).strip()) for cell in header_cells]
@@ -322,7 +405,9 @@ async def resolve_lms_columns(page) -> tuple[int, int]:
         i for i, text in enumerate(headers) if "ma lop" in text or "class code" in text
     ]
     current_lms_indexes = [
-        i for i, text in enumerate(headers) if "nhan xet lms" in text
+        i
+        for i, text in enumerate(headers)
+        if "nhan xet lms" in text or re.fullmatch(r"nx\s*lms", text)
     ]
     legacy_lms_indexes = [
         i

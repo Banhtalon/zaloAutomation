@@ -290,6 +290,54 @@ class ZaloDiscoveryServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ambiguous, [])
         self.assertEqual(conflicting, [])
 
+    def test_unknown_status_from_null_bcnb_row_blocks_finished(self):
+        result = _build_bcnb_finished_groups(
+            ["MindX - VT-C4K-SI25"],
+            [
+                {"class_code": "VT-C4K-SI25", "class_status": "FINISHED"},
+                {"class_code": "VT-C4K-SI25", "class_status": "UNKNOWN"},
+            ],
+        )
+
+        self.assertEqual(result, [])
+
+    def test_class_status_url_requests_one_complete_datatables_page(self):
+        from urllib.parse import parse_qs, urlsplit
+
+        from services.zalo_discovery_collection import (
+            MAX_CLASS_STATUS_ROWS,
+            complete_class_status_url,
+        )
+
+        url = complete_class_status_url(
+            "https://bcnb.example.test/hocsinh.php?datatable=students&start=30&length=15"
+        )
+        query = parse_qs(urlsplit(url).query)
+
+        self.assertEqual(urlsplit(url).path, "/hocsinh.php")
+        self.assertEqual(query["datatable"], ["students"])
+        self.assertEqual(query["start"], ["0"])
+        self.assertEqual(query["length"], [str(MAX_CLASS_STATUS_ROWS)])
+
+    async def test_collect_class_states_maps_null_status_to_unknown_in_script(self):
+        page = FakeClassStatusPage(
+            {
+                "body_size_bytes": 128,
+                "received_count": 1,
+                "valid_row_count": 1,
+                "total_count": 1,
+                "rows": [{"class_code": "VT-C4K-SI25", "class_status": "UNKNOWN"}],
+            }
+        )
+
+        await service._collect_bcnb_class_states(page, 39)
+
+        script, arguments = page.calls[0]
+        self.assertIn("row.class_status !== null", script)
+        self.assertIn("'UNKNOWN'", script)
+        self.assertIn("length=", arguments["url"])
+        self.assertIn("INCOMPLETE_CLASS_STATUS_PAYLOAD", script)
+
     async def test_collect_class_states_returns_only_aggregate_identity_and_status(self):
         page = FakeClassStatusPage(
             {
@@ -844,6 +892,86 @@ class ZaloDiscoveryServiceTests(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaises(service.DiscoverySafetyError):
             await service._login_bcnb_if_needed(page)
+
+    async def test_read_bcnb_week_rows_resolves_instructor_by_header_not_position(self):
+        class _Cell:
+            def __init__(self, text: str):
+                self.text = text
+
+            async def inner_text(self) -> str:
+                return self.text
+
+        class _Row:
+            def __init__(self, values: list[str], *, is_header: bool = False):
+                self.cells = [_Cell(value) for value in values]
+                self.is_header = is_header
+
+            def locator(self, selector: str):
+                row = self
+
+                class _Locator:
+                    async def all(self_inner):
+                        if selector == "td" and row.is_header:
+                            return []
+                        return row.cells
+
+                return _Locator()
+
+        header_row = _Row(
+            [
+                "STT",
+                "Mã lớp",
+                "Buổi",
+                "Ngày học",
+                "Giảng viên chính",
+                "Trợ giảng",
+                "Deadline Zalo",
+                "Ghi chú Giảng viên",
+            ],
+            is_header=True,
+        )
+        data_row = _Row(
+            [
+                "1",
+                "VT-C4K-SI25",
+                "5",
+                "28/10/2026",
+                "Lê Thị Dương",
+                "Trợ giảng A",
+                "22:00 29/10/2026",
+                "Ghi chú lớp",
+            ]
+        )
+
+        class _TableRows:
+            first = header_row
+
+            async def all(self):
+                return [header_row, data_row]
+
+        page = MagicMock()
+        page.wait_for_selector = AsyncMock()
+        page.locator = MagicMock(
+            side_effect=lambda selector: _TableRows()
+            if selector == "table tr"
+            else MagicMock(first=MagicMock(count=AsyncMock(return_value=0)))
+        )
+
+        rows = await service._read_bcnb_week_rows(
+            page,
+            99,
+            week=44,
+            year=2026,
+            already_selected=True,
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["ma_lop"], "VT-C4K-SI25")
+        self.assertEqual(rows[0]["buoi_so"], "5")
+        self.assertEqual(rows[0]["ngay_hoc"], "28/10/2026")
+        self.assertEqual(rows[0]["ngay_hoc_iso"], "2026-10-28")
+        self.assertEqual(rows[0]["giao_vien"], "Lê Thị Dương")
+        self.assertEqual(rows[0]["zalo_deadline"], "22:00 29/10/2026")
 
 
 if __name__ == "__main__":

@@ -94,6 +94,15 @@ class BcnbWeekSelectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("lọc lịch", page.evaluate_calls[0].lower())
         self.assertIn("xem", page.evaluate_calls[0].lower())
 
+    async def test_accepts_single_submit_of_week_year_form(self):
+        page = FakeWeekPage()
+
+        await bcnb_safety.select_week_checked(page, 30, 2026)
+
+        script = page.evaluate_calls[0]
+        self.assertIn("weekInput.form === yearInput.form", script)
+        self.assertIn("formSubmits.length === 1", script)
+
     async def test_last_week_uses_business_clock_not_host_clock(self):
         seen = {}
 

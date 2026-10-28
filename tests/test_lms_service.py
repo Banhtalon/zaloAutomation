@@ -263,6 +263,7 @@ class LmsServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ocr.paths, ["lms.png"])
         self.assertEqual(browser.enter_count, 1)
         self.assertEqual(browser.exit_count, 1)
+        self.assertEqual(browser.viewports, [{"width": 1920, "height": 1200}])
         self.assertEqual(len(self.lms_repo.confirmations), 1)
         final = self.job_repo.updates[-1]
         self.assertEqual(final["status"], "SUCCESS")
@@ -325,6 +326,7 @@ class LmsServiceTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(action.await_count, 1)
         self.assertEqual(browser.exit_count, 1)
+        self.assertEqual(browser.viewports, [{"width": 1920, "height": 1200}])
         self.assertEqual(self.job_repo.updates[-1]["status"], "SUCCESS")
         result = json.loads(self.job_repo.updates[-1]["results"])
         self.assertEqual(result["verified_classes"], ["VT-TARGET"])

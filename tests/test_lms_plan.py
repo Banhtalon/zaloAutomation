@@ -49,6 +49,28 @@ class LmsPlanSafetyTests(unittest.TestCase):
         self.assertEqual(plan_with_empty["classes_to_tick"], ["VT-JSB15"])
         self.assertEqual(plan_with_empty.get("source"), "lms_web")
 
+        plan_with_checked_missing = build_lms_plan(
+            ["VT-ROB-PREA16"],
+            [
+                {"class_code": "VT-ROB-PREA16", "checked": True},
+                {"class_code": "VT-JSB15", "checked": False},
+            ],
+            week=43,
+            year=2026,
+            allow_unmatched_missing=True,
+            allow_empty_missing=True,
+            allow_checked_missing=True,
+            overdue_details={"VT-ROB-PREA16": "9"},
+        )
+        self.assertTrue(plan_with_checked_missing["can_confirm"])
+        self.assertEqual(
+            plan_with_checked_missing["missing_but_checked_classes"],
+            ["VT-ROB-PREA16"],
+        )
+        self.assertEqual(plan_with_checked_missing["blocking_issues"], [])
+        self.assertEqual(plan_with_checked_missing["classes_to_tick"], ["VT-JSB15"])
+        self.assertEqual(plan_with_checked_missing.get("source"), "lms_web")
+
     def test_codes_are_normalized_and_deduplicated(self):
         self.assertEqual(
             normalize_class_codes([" vt-jsb14 ", "VT-JSB14", "vt-c4k-si24"]),

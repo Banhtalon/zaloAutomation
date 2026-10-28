@@ -13,6 +13,7 @@ from core.time_utils import previous_iso_week
 from services.bcnb_safety import (
     dismiss_current_week_notice,
     read_current_week_checked,
+    resolve_instructor_column,
     resolve_schedule_columns,
     select_week_checked,
 )
@@ -115,6 +116,7 @@ async def _read_bcnb_week_rows(
     await page.wait_for_selector("table", timeout=60000)
     await asyncio.sleep(1)
     class_index, lesson_index, date_index, deadline_index = await resolve_schedule_columns(page)
+    instructor_index = await resolve_instructor_column(page)
     rows = await page.locator("table tr").all()
     result: list[dict[str, str]] = []
     for row in rows:
@@ -127,15 +129,18 @@ async def _read_bcnb_week_rows(
         class_date = (await cells[date_index].inner_text()).strip()
         if not class_code or not class_date:
             continue
+        instructor_name = (
+            (await cells[instructor_index].inner_text()).strip()
+            if instructor_index is not None and len(cells) > instructor_index
+            else ""
+        )
         result.append(
             {
                 "ma_lop": class_code,
                 "buoi_so": (await cells[lesson_index].inner_text()).strip(),
                 "ngay_hoc": class_date,
                 "ngay_hoc_iso": _schedule_date_iso(class_date) or "",
-                "giao_vien": (await cells[3].inner_text()).strip()
-                if len(cells) > 3
-                else "",
+                "giao_vien": instructor_name,
                 "zalo_deadline": (await cells[deadline_index].inner_text()).strip(),
                 "week": str(week),
                 "year": str(year),
@@ -186,17 +191,10 @@ async def _collect_bcnb_week_plan(page, job_id: int) -> dict:
 
     try:
         latest_data = await _read_bcnb_week_rows(
-            page,
-            job_id,
-            week=latest_week,
-            year=latest_year,
-            already_selected=True,
+            page, job_id, week=latest_week, year=latest_year, already_selected=True
         )
         required_data = await _read_bcnb_week_rows(
-            page,
-            job_id,
-            week=required_week,
-            year=required_year,
+            page, job_id, week=required_week, year=required_year
         )
     except Exception as exc:
         log_message(
