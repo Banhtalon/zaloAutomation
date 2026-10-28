@@ -1,0 +1,123 @@
+<!-- TAB 4: TECHNICAL SPECS -->
+<div id="tab-specs" class="tab-content flex-1 flex-col space-y-5" role="tabpanel" aria-labelledby="btn-specs" hidden>
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-5 shrink-0">
+        <!-- CARD 1: PREFLIGHT & WORKFLOW DETAILS -->
+        <section class="glass-panel p-5 flex flex-col space-y-4" aria-labelledby="zalo-preflight-title">
+            <div class="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                    <p class="section-eyebrow">Chẩn đoán & Chốt an toàn</p>
+                    <h2 id="zalo-preflight-title" class="text-base font-bold text-slate-800 mt-0.5">Kiểm tra trước khi chạy & Quy trình</h2>
+                </div>
+                <button type="button" onclick="refreshCurrentZaloPreflight()" class="preflight-refresh" aria-label="Kiểm tra lại điều kiện an toàn từ tab kỹ thuật">
+                    <i class="fa-solid fa-rotate-right" aria-hidden="true"></i>
+                    Kiểm tra lại
+                </button>
+            </div>
+
+            <div id="zalo-scan-plan" class="rounded-xl border border-indigo-200 bg-indigo-50 px-4 py-3 text-xs text-indigo-900" role="status">
+                Chưa có kế hoạch tuần BCNB. Hãy bấm “Dò tìm” trước khi quét.
+            </div>
+
+            <div id="zalo-run-workflow" class="workflow-stepper" aria-label="Quy trình quét Zalo">
+                <div id="zalo-step-discover" class="workflow-step" data-state="current">
+                    <span class="workflow-step__number">1</span>
+                    <div>
+                        <p class="workflow-step__title">Dò tìm kế hoạch</p>
+                        <p id="zalo-step-discover-detail" class="workflow-step__detail">Lấy hai tuần dữ liệu cần xử lý</p>
+                    </div>
+                </div>
+                <div id="zalo-step-preflight" class="workflow-step" data-state="blocked">
+                    <span class="workflow-step__number">2</span>
+                    <div>
+                        <p class="workflow-step__title">Kiểm tra an toàn</p>
+                        <p id="zalo-step-preflight-detail" class="workflow-step__detail">Chờ kế hoạch hợp lệ</p>
+                    </div>
+                </div>
+                <div id="zalo-step-scan" class="workflow-step" data-state="blocked">
+                    <span class="workflow-step__number">3</span>
+                    <div>
+                        <p class="workflow-step__title">Bắt đầu quét</p>
+                        <p id="zalo-step-scan-detail" class="workflow-step__detail">Chưa đủ điều kiện để chạy</p>
+                    </div>
+                </div>
+            </div>
+
+            <div class="rounded-xl border border-slate-200 bg-slate-50/80 p-3.5 text-xs space-y-2">
+                <div class="flex flex-wrap items-center justify-between gap-2">
+                    <span id="zalo-preflight-summary" class="font-semibold text-slate-700">Đang kiểm tra ứng dụng, kế hoạch và phiên Zalo...</span>
+                    <span id="zalo-preflight-checked-at" class="text-[11px] text-slate-400">Chưa có lần kiểm tra gần nhất</span>
+                </div>
+                <details id="zalo-preflight-details" class="preflight-details hidden" open>
+                    <summary id="zalo-preflight-detail-summary">Xem kiểm tra chi tiết</summary>
+                    <div id="zalo-preflight-checks" class="mt-2.5 space-y-1.5 text-xs"></div>
+                </details>
+            </div>
+        </section>
+
+        <!-- CARD 2: JOB & WORKER TELEMETRY -->
+        <section class="glass-panel p-5 flex flex-col space-y-4" aria-labelledby="specs-telemetry-title">
+            <div class="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                    <p class="section-eyebrow">Thông số vận hành</p>
+                    <h2 id="specs-telemetry-title" class="text-base font-bold text-slate-800 mt-0.5">Phiên Job & Tiến độ Worker</h2>
+                </div>
+                <span id="job-meta" class="hidden rounded-lg border border-slate-200 bg-slate-100 px-2.5 py-1 text-xs font-mono text-slate-600">Chưa có phiên job</span>
+            </div>
+
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+                <div class="rounded-xl border border-slate-200 bg-slate-50/80 p-3">
+                    <p class="text-[10px] font-bold uppercase tracking-wider text-slate-400">Loại Job hiện tại</p>
+                    <p id="specs-job-type" class="mt-1 font-mono font-semibold text-slate-700">Chưa có</p>
+                </div>
+                <div class="rounded-xl border border-slate-200 bg-slate-50/80 p-3">
+                    <p class="text-[10px] font-bold uppercase tracking-wider text-slate-400">Chế độ thực thi</p>
+                    <p id="specs-job-mode" class="mt-1 font-mono font-semibold text-slate-700">Chưa xác định</p>
+                </div>
+                <div class="rounded-xl border border-slate-200 bg-slate-50/80 p-3">
+                    <p class="text-[10px] font-bold uppercase tracking-wider text-slate-400">Mã trạng thái / Reason</p>
+                    <p id="specs-job-reason" class="mt-1 font-mono font-semibold text-slate-700">—</p>
+                </div>
+            </div>
+
+            <div class="flex-1 flex flex-col justify-between rounded-xl border border-slate-200 bg-slate-50/80 p-4 space-y-3">
+                <div>
+                    <p class="text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1.5">Chỉ số tiến độ đợt quét (Target Telemetry)</p>
+                    <div id="zalo-target-progress" class="hidden text-xs leading-relaxed text-slate-700 font-mono" role="status" aria-live="polite"></div>
+                    <p id="specs-target-progress-empty" class="text-xs text-slate-400">Chưa có dữ liệu tiến độ target cho phiên hiện tại.</p>
+                </div>
+                <div id="specs-target-metrics-grid" class="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-2 border-t border-slate-200/80 hidden"></div>
+            </div>
+        </section>
+    </div>
+
+    <!-- CARD 3: EVIDENCE & MESSAGE WINDOW TECHNICAL TABLE -->
+    <section class="data-panel glass-panel flex-1 flex flex-col overflow-hidden" aria-labelledby="specs-evidence-title">
+        <div class="px-6 py-4 border-b border-slate-200/80 flex flex-wrap items-center justify-between gap-2 bg-slate-50/50">
+            <div>
+                <h2 id="specs-evidence-title" class="text-sm font-bold text-slate-800">Thông số Kiểm chứng Tin nhắn & Cửa sổ Thời gian theo Nhóm</h2>
+                <p class="text-xs text-slate-500 mt-0.5">Chi tiết số lượng tin nhắn đã duyệt, khoảng ngày tin nhắn trên Zalo, cửa sổ hạn nộp và trạng thái lưu trữ minh chứng.</p>
+            </div>
+        </div>
+        <div class="table-scroll flex-1">
+            <table class="data-table w-full text-xs text-left tabular-nums">
+                <thead class="text-[10px] uppercase tracking-widest sticky top-0 z-10 border-b">
+                    <tr>
+                        <th class="px-5 py-3.5">Nhóm Zalo / Nhóm thực tế</th>
+                        <th class="px-5 py-3.5">Target BCNB</th>
+                        <th class="px-5 py-3.5">Số tin đã quét</th>
+                        <th class="px-5 py-3.5">Khoảng tin đọc được</th>
+                        <th class="px-5 py-3.5">Cửa sổ yêu cầu</th>
+                        <th class="px-5 py-3.5">Trạng thái Evidence</th>
+                    </tr>
+                </thead>
+                <tbody id="specs-evidence-table-body" class="divide-y bg-transparent">
+                    <tr>
+                        <td colspan="6" class="px-6 py-10 text-center text-slate-400 border-none">
+                            Chưa có thông số kiểm chứng tin nhắn. Dữ liệu sẽ hiển thị khi có kết quả quét Zalo.
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </section>
+</div>

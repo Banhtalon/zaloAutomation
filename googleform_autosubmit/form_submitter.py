@@ -24,14 +24,13 @@ class SubmissionOutcomeUnknownError(RuntimeError):
 
     pass
 
-def _save_stitched_screenshots(screenshots: list[bytes], student_name: str) -> str | None:
+def _save_stitched_screenshots(screenshots: list[bytes], student_name: str = "") -> str | None:
     if not screenshots:
         return None
     try:
         screenshot_dir = Path(Config.RUNTIME_ROOT) / "screenshots" / "googleform"
         screenshot_dir.mkdir(parents=True, exist_ok=True)
-        safe_name = re.sub(r"[^\w\-]", "_", student_name)[:20]
-        filename = f"sub_{int(time.time())}_{safe_name}_{uuid.uuid4().hex[:6]}.png"
+        filename = f"sub_{int(time.time())}_{uuid.uuid4().hex[:8]}.png"
         output_path = screenshot_dir / filename
 
         images = [Image.open(io.BytesIO(b)) for b in screenshots if b]
@@ -50,8 +49,8 @@ def _save_stitched_screenshots(screenshots: list[bytes], student_name: str) -> s
             stitched.save(output_path, format="PNG", optimize=True)
 
         return str(output_path)
-    except Exception as exc:
-        logger.warning(f"Không thể tạo ảnh chụp màn hình ghép: {exc}")
+    except Exception:
+        logger.warning("Không thể tạo ảnh chụp màn hình ghép.")
         return None
 
 
@@ -236,10 +235,14 @@ class FormSubmitter:
             else:
                 raise ValueError(f"Loại trường không được hỗ trợ: {field_type}")
 
-            logger.info(f"Đã điền [{question}] -> {value}")
+            is_name_field = (
+                "tên" in question.casefold() or "name" in question.casefold()
+            )
+            logged_val = "[REDACTED_STUDENT_NAME]" if is_name_field else value
+            logger.info(f"Đã điền [{question}] -> {logged_val}")
 
         except Exception as e:
-            logger.error(f"❌ Lỗi khi điền [{question}]: {e}")
+            logger.error(f"❌ Lỗi khi điền [{question}].")
             raise RuntimeError(f"Không thể điền câu hỏi [{question}]") from e
 
     async def check_captcha(self, page):
@@ -322,7 +325,7 @@ class FormSubmitter:
                 raise SubmissionOutcomeUnknownError(
                     "Không tìm thấy xác nhận Google Form đã ghi nhận câu trả lời."
                 ) from exc
-            logger.info(f"✅ Nộp thành công cho {student_name}")
+            logger.info(f"✅ Nộp thành công form lớp {class_code}")
         else:
             logger.info("Dry-Run: Đã điền form. Mô phỏng thành công.")
 
@@ -335,7 +338,7 @@ class FormSubmitter:
             try:
                 return await self._execute_submission(page, student_name, class_code)
             except Exception as e:
-                logger.error(f"❌ Thất bại cho {student_name}: {e}")
+                logger.error(f"❌ Thất bại khi nộp form lớp {class_code}.")
                 raise e
             finally:
                 await context.close()
@@ -349,8 +352,8 @@ class FormSubmitter:
                 page = await context.new_page()
                 try:
                     return await self._execute_submission(page, student_name, class_code)
-                except Exception as e:
-                    logger.error(f"❌ Thất bại cho {student_name}: {e}")
+                except Exception:
+                    logger.error(f"❌ Thất bại khi nộp form lớp {class_code}.")
                     raise
                 finally:
                     await local_browser.close()

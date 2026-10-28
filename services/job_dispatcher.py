@@ -129,6 +129,17 @@ class JobDispatcher:
             if "scan_plan" in payload:
                 scan_kwargs["scan_plan"] = payload.get("scan_plan")
             await run_zalo_automation(job_id, mode_from_job(job), **scan_kwargs)
+        elif job_type == "ZALO_MANUAL_APPROVE":
+            from services.zalo_bcnb_service import run_zalo_manual_approve
+
+            await run_zalo_manual_approve(
+                job_id,
+                payload,
+                mode_from_job(job),
+                runtime=self.worker_runtime,
+                job_repo=self.job_repo,
+                audit_repo=self.audit_repo,
+            )
         elif job_type == "GOOGLEFORM_OCR":
             from services.googleform_service import run_googleform_ocr
 
@@ -136,6 +147,15 @@ class JobDispatcher:
             await run_googleform_ocr(
                 job_id,
                 paths,
+                runtime=self.worker_runtime,
+            )
+        elif job_type == "GOOGLEFORM_LMS_STUDENTS":
+            from services.lms_service import run_googleform_fetch_lms_students
+
+            mode_from_job(job)
+            await run_googleform_fetch_lms_students(
+                job_id,
+                payload.get("class_codes") or [],
                 runtime=self.worker_runtime,
             )
         elif job_type == "GOOGLEFORM_SUBMIT":
@@ -151,24 +171,33 @@ class JobDispatcher:
         elif job_type == "LMS_ANALYSIS":
             from services.lms_service import run_lms_analysis
 
-            paths = await self.upload_store.paths_for_job(job_id, "lms_analysis")
-            if len(paths) != 1:
-                raise ValueError("Job LMS phải có đúng một ảnh đầu vào.")
+            if payload.get("source") == "lms_web":
+                image_path = None
+            else:
+                paths = await self.upload_store.paths_for_job(job_id, "lms_analysis")
+                if len(paths) != 1:
+                    raise ValueError("Job LMS phải có đúng một ảnh đầu vào.")
+                image_path = paths[0]
             await run_lms_analysis(
                 job_id,
-                paths[0],
+                image_path,
                 normalize_execution_mode(payload.get("execution_mode")),
                 runtime=self.worker_runtime,
             )
         elif job_type == "LMS_AUTOMATION":
             from services.lms_service import run_lms_automation
 
+            lms_kwargs: dict[str, Any] = {"runtime": self.worker_runtime}
+            if "expected_selection_digest" in payload:
+                lms_kwargs["expected_selection_digest"] = payload.get(
+                    "expected_selection_digest"
+                )
             await run_lms_automation(
                 job_id,
                 payload.get("plan") or {},
                 payload.get("expected_digest") or "",
                 mode_from_job(job),
-                runtime=self.worker_runtime,
+                **lms_kwargs,
             )
         else:
             raise ValueError(f"Không có worker cho loại job {job_type}.")

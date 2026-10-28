@@ -38,16 +38,26 @@
             if (!storage) return;
             try {
                 const saved = JSON.parse(storage.getItem(GOOGLEFORM_IDEMPOTENCY_STORAGE_KEY) || 'null');
-                if (saved && saved.key && saved.marker) googleformBatchId = String(saved.key);
+                if (saved && saved.key && saved.marker) {
+                    googleformBatchId = String(saved.key);
+                    googleformBatchMarker = String(saved.marker);
+                }
             } catch (err) {
-                storage.removeItem(GOOGLEFORM_IDEMPOTENCY_STORAGE_KEY);
+                try {
+                    storage.removeItem(GOOGLEFORM_IDEMPOTENCY_STORAGE_KEY);
+                } catch (ignoreErr) {}
             }
         }
 
         function clearGoogleFormIdempotencyState() {
             googleformBatchId = null;
+            googleformBatchMarker = null;
             const storage = googleFormStorage();
-            if (storage) storage.removeItem(GOOGLEFORM_IDEMPOTENCY_STORAGE_KEY);
+            if (storage) {
+                try {
+                    storage.removeItem(GOOGLEFORM_IDEMPOTENCY_STORAGE_KEY);
+                } catch (ignoreErr) {}
+            }
         }
 
         function ensureGoogleFormIdempotencyKey(students) {
@@ -61,15 +71,21 @@
                     saved = null;
                 }
             }
-            if (!googleformBatchId || !saved || saved.marker !== marker || saved.key !== googleformBatchId) {
+            const knownMarker = saved && saved.key === googleformBatchId
+                ? String(saved.marker || '')
+                : (typeof googleformBatchMarker === 'string' ? googleformBatchMarker : null);
+            if (!googleformBatchId || knownMarker !== marker) {
                 googleformBatchId = newGoogleFormIdempotencyKey();
             }
+            googleformBatchMarker = marker;
             if (storage) {
-                storage.setItem(GOOGLEFORM_IDEMPOTENCY_STORAGE_KEY, JSON.stringify({
-                    key: googleformBatchId,
-                    marker,
-                    updated_at: new Date().toISOString()
-                }));
+                try {
+                    storage.setItem(GOOGLEFORM_IDEMPOTENCY_STORAGE_KEY, JSON.stringify({
+                        key: googleformBatchId,
+                        marker,
+                        updated_at: new Date().toISOString()
+                    }));
+                } catch (ignoreErr) {}
             }
             return googleformBatchId;
         }
@@ -144,7 +160,6 @@
             try {
                 const data = await createRuntimeUpload(base64Data, 'googleform_ocr');
                 googleformUploadIds.push(data.upload_id);
-                clearGoogleFormIdempotencyState();
             } catch (err) {
                 alert("Lỗi tải ảnh: " + err.message);
             } finally {
@@ -155,11 +170,64 @@
 
         let ocrStudents = [];
 
+        function parseLmsClassCodesInput(rawText) {
+            const tokens = String(rawText || '')
+                .normalize('NFKC')
+                .toUpperCase()
+                .replace(/[–—]/g, '-')
+                .split(/[,;\s]+/)
+                .map(token => token.trim())
+                .filter(Boolean);
+            const result = [];
+            const seen = new Set();
+            for (const code of tokens) {
+                if (!/^[A-Z0-9]{2,}(?:-[A-Z0-9]{2,})+$/.test(code)) {
+                    throw new Error(`Mã lớp không hợp lệ: ${code}`);
+                }
+                if (!seen.has(code)) {
+                    seen.add(code);
+                    result.push(code);
+                }
+            }
+            return result;
+        }
+
+        function setLmsStudentsFetchBusy(isBusy) {
+            lmsStudentsFetchBusy = Boolean(isBusy);
+            const btn = document.getElementById('btnFetchLmsStudents');
+            const input = document.getElementById('lms-student-class-codes');
+            if (btn) {
+                btn.disabled = lmsStudentsFetchBusy || ocrBusy || googleformUploadInFlight > 0;
+                btn.textContent = lmsStudentsFetchBusy ? 'Đang lấy từ LMS...' : 'Lấy từ LMS';
+            }
+            if (input) {
+                input.disabled = lmsStudentsFetchBusy;
+            }
+            const ocrBtn = document.getElementById('btnRunOcr');
+            if (ocrBtn) {
+                ocrBtn.disabled = ocrBusy || lmsStudentsFetchBusy || googleformUploadInFlight > 0 || googleformUploadIds.length === 0;
+            }
+            const submitBtn = document.getElementById('btnSubmitGoogleForm');
+            if (submitBtn) {
+                submitBtn.disabled = ocrBusy || lmsStudentsFetchBusy || ocrStudents.length === 0;
+            }
+        }
+
         function setOcrBusy(isBusy) {
             ocrBusy = isBusy;
             const button = document.getElementById('btnRunOcr');
-            button.disabled = isBusy || googleformUploadInFlight > 0 || googleformUploadIds.length === 0;
-            button.textContent = isBusy ? 'Đang quét AI...' : 'Quét AI (Gemini Vision)';
+            if (button) {
+                button.disabled = isBusy || (typeof lmsStudentsFetchBusy !== 'undefined' && lmsStudentsFetchBusy) || googleformUploadInFlight > 0 || googleformUploadIds.length === 0;
+                button.textContent = isBusy ? 'Đang quét AI...' : 'Quét AI (Gemini Vision)';
+            }
+            const lmsBtn = document.getElementById('btnFetchLmsStudents');
+            if (lmsBtn) {
+                lmsBtn.disabled = isBusy || (typeof lmsStudentsFetchBusy !== 'undefined' && lmsStudentsFetchBusy) || googleformUploadInFlight > 0;
+            }
+            const submitBtn = document.getElementById('btnSubmitGoogleForm');
+            if (submitBtn) {
+                submitBtn.disabled = isBusy || (typeof lmsStudentsFetchBusy !== 'undefined' && lmsStudentsFetchBusy) || ocrStudents.length === 0;
+            }
         }
 
         function setOcrMessage(message, isError = false) {
@@ -173,8 +241,59 @@
             tbody.replaceChildren(tr);
         }
 
+        async function fetchLmsStudentsForGoogleForm() {
+            if ((typeof lmsStudentsFetchBusy !== 'undefined' && lmsStudentsFetchBusy) || ocrBusy) return;
+            if (!canStartAnotherJob()) return;
+            const input = document.getElementById('lms-student-class-codes');
+            const rawValue = input ? input.value : '';
+            let classCodes = [];
+            try {
+                classCodes = parseLmsClassCodesInput(rawValue);
+            } catch (validationErr) {
+                alert(validationErr.message || 'Mã lớp không hợp lệ.');
+                return;
+            }
+            if (classCodes.length === 0) {
+                alert('Vui lòng nhập ít nhất 1 mã lớp LMS (ví dụ: VT-C4K-GA41).');
+                return;
+            }
+            if (classCodes.length > 20) {
+                alert('Tối đa 20 mã lớp mỗi lần lấy danh sách học viên từ LMS.');
+                return;
+            }
+            ocrStudents = [];
+            setLmsStudentsFetchBusy(true);
+            setOcrMessage(`Đang lấy danh sách học viên từ LMS (${classCodes.join(', ')})...`);
+            try {
+                const res = await fetch('/api/googleform/fetch-lms-students', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ class_codes: classCodes })
+                });
+                let data = {};
+                try {
+                    data = await res.json();
+                } catch (parseErr) {
+                    data = {};
+                }
+                if (!res.ok || !data.job_id) {
+                    const detail = data && data.detail;
+                    const detailMsg = detail && typeof detail === 'object'
+                        ? (detail.message || detail.code)
+                        : detail;
+                    throw new Error(detailMsg || data.error || data.message || 'Không tạo được job lấy học viên từ LMS.');
+                }
+                trackJob(data.job_id);
+            } catch (err) {
+                setLmsStudentsFetchBusy(false);
+                setOcrMessage(err.message || 'Lỗi kết nối máy chủ!', true);
+            }
+        }
+
         async function runOCR() {
+            if (ocrBusy || (typeof lmsStudentsFetchBusy !== 'undefined' && lmsStudentsFetchBusy)) return;
             if (!canStartAnotherJob() || googleformUploadIds.length === 0) return;
+            ocrStudents = [];
             setOcrBusy(true);
             setOcrMessage('Đang xử lý phân tích hình ảnh...');
             try {
@@ -214,6 +333,9 @@
                     input.className = 'bg-black/30 border border-transparent focus:border-brand-blue rounded px-2 py-1 outline-none w-full text-sm';
                     input.addEventListener('change', event => {
                         ocrStudents[index][field] = event.target.value;
+                        if (ocrStudents.length > 0 && typeof ensureGoogleFormIdempotencyKey === 'function') {
+                            ensureGoogleFormIdempotencyKey(ocrStudents);
+                        }
                     });
                     td.appendChild(input);
                     tr.appendChild(td);
@@ -225,6 +347,11 @@
                 remove.textContent = '×';
                 remove.addEventListener('click', () => {
                     ocrStudents.splice(index, 1);
+                    if (ocrStudents.length > 0 && typeof ensureGoogleFormIdempotencyKey === 'function') {
+                        ensureGoogleFormIdempotencyKey(ocrStudents);
+                    } else if (ocrStudents.length === 0) {
+                        clearGoogleFormIdempotencyState();
+                    }
                     renderOCRTable();
                 });
                 action.appendChild(remove);
@@ -377,7 +504,9 @@
         }
 
         async function submitGoogleForm() {
-            if (ocrStudents.length === 0) return alert("Danh sách học viên trống! Hãy quét AI trước.");
+            if (ocrStudents.length === 0) return alert("Danh sách học viên trống! Hãy lấy từ LMS hoặc quét AI trước.");
+            if (ocrStudents.length > 200) return alert("Số lượng học viên vượt quá giới hạn 200 học viên mỗi đợt.");
+            if ((typeof lmsStudentsFetchBusy !== 'undefined' && lmsStudentsFetchBusy) || ocrBusy) return;
             if (!canStartAnotherJob()) return;
             const intentKey = ensureGoogleFormIdempotencyKey(ocrStudents);
             if (!confirm(`Sẽ nộp form cho ${ocrStudents.length} học viên. Bắt đầu ngay?`)) return;

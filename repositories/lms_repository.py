@@ -11,7 +11,10 @@ from services.lms_plan import (
     LMS_PLAN_KIND,
     LMS_PLAN_TARGET,
     LMS_PLAN_VERSION,
+    LmsSafetyError,
     compute_plan_digest,
+    compute_selection_digest,
+    validate_selected_classes_to_tick,
 )
 
 
@@ -93,6 +96,7 @@ class LmsRepository:
         *,
         dry_run: bool | None = None,
         max_age_minutes: int = 30,
+        selected_classes_to_tick: list[str] | None = None,
     ):
         """Atomically consume a valid plan and create exactly one execution job."""
         now_dt = _utc_now()
@@ -246,12 +250,34 @@ class LmsRepository:
                         message="Kế hoạch LMS không được phép xác nhận.",
                     )
 
+                raw_selection = (
+                    plan_payload.get("classes_to_tick", [])
+                    if selected_classes_to_tick is None
+                    else selected_classes_to_tick
+                )
+                try:
+                    selected_subset = validate_selected_classes_to_tick(
+                        raw_selection,
+                        plan_payload.get("classes_to_tick", []),
+                    )
+                except LmsSafetyError as exc:
+                    raise ConfirmationError(
+                        str(exc),
+                        code=getattr(exc, "code", "LMS_SELECTED_CLASSES_INVALID"),
+                    ) from exc
+                selection_digest = compute_selection_digest(
+                    row[1], selected_subset
+                )
+                plan_payload["selected_classes_to_tick"] = selected_subset
+                plan_payload["selection_digest"] = selection_digest
+
                 execution_mode = "dry-run" if plan_dry_run else "production"
                 request_payload = json.dumps(
                     {
                         "version": LMS_PLAN_VERSION,
                         "plan": plan_payload,
                         "expected_digest": row[1],
+                        "expected_selection_digest": selection_digest,
                         "execution_mode": execution_mode,
                         "target": plan_payload["target"],
                         "week": plan_payload["week"],
@@ -301,15 +327,18 @@ class LmsRepository:
                         now,
                     ),
                 )
+                consumed_payload_json = json.dumps(
+                    plan_payload, ensure_ascii=False, sort_keys=True
+                )
                 update_cursor = await db.execute(
                     """
                     UPDATE lms_confirmations
-                    SET consumed_at = ?, execution_job_id = ?
+                    SET consumed_at = ?, execution_job_id = ?, plan_payload = ?
                     WHERE analysis_job_id = ?
                       AND consumed_at IS NULL
                       AND invalidated_at IS NULL
                     """,
-                    (now, execution_job_id, analysis_job_id),
+                    (now, execution_job_id, consumed_payload_json, analysis_job_id),
                 )
                 if update_cursor.rowcount != 1:
                     raise ConfirmationError(
@@ -320,6 +349,8 @@ class LmsRepository:
                 return {
                     "job_id": execution_job_id,
                     "plan_digest": row[1],
+                    "selection_digest": selection_digest,
+                    "selected_classes_to_tick": selected_subset,
                     "plan": plan_payload,
                     "dry_run": plan_dry_run,
                     "execution_mode": execution_mode,
@@ -327,3 +358,114 @@ class LmsRepository:
             except Exception:
                 await db.rollback()
                 raise
+
+    async def get_consumed_selection_digest(
+        self,
+        *,
+        execution_job_id: int | None = None,
+        analysis_job_id: int | None = None,
+        plan_digest: str | None = None,
+        require_record: bool = False,
+    ) -> str | None:
+        row = None
+        async with get_db_connection() as db:
+            if execution_job_id is not None:
+                async with db.execute(
+                    """
+                    SELECT analysis_job_id, execution_job_id, plan_digest,
+                           plan_payload, consumed_at, invalidated_at
+                    FROM lms_confirmations
+                    WHERE execution_job_id = ?
+                    ORDER BY analysis_job_id DESC
+                    LIMIT 1
+                    """,
+                    (int(execution_job_id),),
+                ) as cursor:
+                    row = await cursor.fetchone()
+            if row is None and plan_digest is not None:
+                async with db.execute(
+                    """
+                    SELECT analysis_job_id, execution_job_id, plan_digest,
+                           plan_payload, consumed_at, invalidated_at
+                    FROM lms_confirmations
+                    WHERE plan_digest = ?
+                    ORDER BY analysis_job_id DESC
+                    LIMIT 1
+                    """,
+                    (str(plan_digest),),
+                ) as cursor:
+                    row = await cursor.fetchone()
+            if row is None and analysis_job_id is not None:
+                async with db.execute(
+                    """
+                    SELECT analysis_job_id, execution_job_id, plan_digest,
+                           plan_payload, consumed_at, invalidated_at
+                    FROM lms_confirmations
+                    WHERE analysis_job_id = ?
+                    ORDER BY analysis_job_id DESC
+                    LIMIT 1
+                    """,
+                    (int(analysis_job_id),),
+                ) as cursor:
+                    row = await cursor.fetchone()
+
+        if not row:
+            if require_record:
+                raise LmsSafetyError(
+                    "Không tìm thấy bản xác nhận LMS hợp lệ cho tác vụ thực thi.",
+                    code="LMS_CONFIRMATION_NOT_FOUND",
+                )
+            return None
+
+        row_analysis_id, row_exec_id, row_plan_digest, row_payload_raw, consumed_at, invalidated_at = row
+        if consumed_at is None or invalidated_at is not None:
+            raise LmsSafetyError(
+                "Bản xác nhận LMS chưa được tiêu thụ hợp lệ hoặc đã bị hủy.",
+                code="LMS_CONFIRMATION_INVALID",
+            )
+        if (
+            execution_job_id is not None
+            and row_exec_id is not None
+            and int(row_exec_id) != int(execution_job_id)
+        ):
+            raise LmsSafetyError(
+                "Mã tác vụ thực thi LMS không khớp với bản xác nhận đã lưu.",
+                code="LMS_CONFIRMATION_CONTRACT_MISMATCH",
+            )
+        if (
+            analysis_job_id is not None
+            and row_analysis_id is not None
+            and int(row_analysis_id) != int(analysis_job_id)
+        ):
+            raise LmsSafetyError(
+                "Mã job phân tích LMS không khớp với bản xác nhận đã lưu.",
+                code="LMS_CONFIRMATION_CONTRACT_MISMATCH",
+            )
+        if plan_digest is not None and not secrets.compare_digest(
+            str(row_plan_digest or ""), str(plan_digest)
+        ):
+            raise LmsSafetyError(
+                "Digest kế hoạch LMS không khớp với bản xác nhận đã lưu.",
+                code="LMS_PLAN_DIGEST_MISMATCH",
+            )
+        try:
+            payload = json.loads(row_payload_raw)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise LmsSafetyError(
+                "Không đọc được bản xác nhận LMS đã lưu.",
+                code="LMS_PLAN_INVALID",
+            ) from exc
+        if not isinstance(payload, dict):
+            raise LmsSafetyError(
+                "Nội dung bản xác nhận LMS đã lưu không hợp lệ.",
+                code="LMS_PLAN_INVALID",
+            )
+        stored_sel_digest = payload.get("selection_digest")
+        if isinstance(stored_sel_digest, str) and stored_sel_digest:
+            return stored_sel_digest
+        if require_record:
+            raise LmsSafetyError(
+                "Bản xác nhận LMS thiếu dấu kiểm tra danh sách lớp đã chọn.",
+                code="LMS_SELECTION_DIGEST_MISMATCH",
+            )
+        return None

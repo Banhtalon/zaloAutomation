@@ -19,6 +19,8 @@ SUBMITTED_STATUS = "✅ Đã nộp – Có minh chứng"
 SUBMITTED_LATE_STATUS = "🟡 Đã nộp trễ – Có minh chứng"
 NOT_FOUND_STATUS = "❌ Chưa tìm thấy trong khoảng đã kiểm chứng – Có minh chứng"
 INSUFFICIENT_STATUS = "⚠️ Không đủ bằng chứng – Cần kiểm tra thủ công"
+AI_SUGGESTED_REPORT_DECISION = "AI_SUGGESTED_REPORT_NEEDS_REVIEW"
+AI_SUGGESTED_REPORT_STATUS = "⚠️ AI gợi ý có thể là báo cáo – Cần kiểm tra thủ công"
 LESSON_14_STATUS = "✅ Miễn báo cáo (Buổi 14)"
 
 
@@ -132,6 +134,7 @@ def _has_unresolved_date_candidate(classifier_result: dict[str, Any]) -> bool:
             "BEFORE_CLASS_DATE",
             "FUTURE_UI_SENT_AT",
             "TARGET_SESSION_AMBIGUOUS",
+            AI_SUGGESTED_REPORT_DECISION,
         }
         for candidate in classifier_result.get("candidates", [])
     )
@@ -164,9 +167,31 @@ def build_scan_result(
     if messages_checked <= 0:
         reasons.append("Không đọc được tin nhắn Zalo.")
 
+    is_ai_suggested = (
+        classifier_result.get("decision") == AI_SUGGESTED_REPORT_DECISION
+        or any(
+            candidate.get("decision") == AI_SUGGESTED_REPORT_DECISION
+            for candidate in classifier_result.get("candidates", [])
+        )
+    )
     evidence_state = INSUFFICIENT_EVIDENCE
     status = INSUFFICIENT_STATUS
-    if report_found:
+    if is_ai_suggested:
+        report_found = False
+        submitted_for_bcnb = False
+        if report_detail and report_detail not in reasons:
+            reasons.insert(0, report_detail)
+        if images.get("report") is None:
+            reasons.append(
+                "Không chụp được ảnh tin nhắn do AI gợi ý; cần kiểm tra thủ công trên Zalo."
+            )
+        if not reasons:
+            reasons.append(
+                "AI gợi ý tin nhắn có thể là báo cáo buổi học; bắt buộc duyệt tay trước khi tích BCNB."
+            )
+        if actual_group_name and messages_checked > 0 and images.get("report") is not None:
+            status = AI_SUGGESTED_REPORT_STATUS
+    elif report_found:
         if images.get("report") is None:
             reasons.append(
                 "Không chụp được ảnh tin nhắn báo cáo; đã nhận diện report nhưng không tạo được evidence."

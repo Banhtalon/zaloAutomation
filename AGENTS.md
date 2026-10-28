@@ -118,3 +118,11 @@ Không dùng “toàn bộ test đã xanh” làm bằng chứng duy nhất cho 
 - Việc mới dùng Direct theo canonical: Gemini thực hiện, controller kiểm tra, Luna Max review độc lập, kiểm tra sản phẩm nếu áp dụng, Owner nghiệm thu. Ngoại lệ ASSISTED chỉ theo canonical trước dispatch và có lý do được ghi. Tác vụ check vẫn chỉ đọc.
 - Bộ flow dùng requirements-workflow.txt và .venv/Scripts/python.exe riêng; ứng dụng giữ requirements.txt và venv/Scripts/python.exe. Không dùng Python toàn máy để gọi worker.
 - Đây là cài đặt source/local; chưa có bằng chứng gọi Gemini/Luna thật hay nghiệm thu production. Không tạo task từ HEAD cũ khi workspace còn thay đổi chưa commit; giữ nguyên công việc đó và báo điều kiện còn thiếu. Commit/push vẫn cần yêu cầu rõ ràng của Owner.
+
+
+## Flow AI hiện hành — cập nhật 2026-10-22 (DEC-036: Lead Thực Thi + Sol 6.1 xhigh Review + Báo Cáo Chuẩn Hàng Không)
+
+1. **Điều phối & Thực thi (Lead)**: Lead tự thực hiện từng hạng mục trong phạm vi `allowlist` đã khóa.
+2. **Test**: Chạy unit test mục tiêu + `node tests/check_template_js.js` + `.\CHECK_QUALITY.ps1 -Isolated`.
+3. **Review độc lập (`Sol 6.1 xhigh`)**: Gọi `"<prompt>" | codex exec -m gpt-6.1-sol -c model_reasoning_effort="xhigh" -s read-only -`. Nếu `NEEDS_FIX` -> sửa & re-verify cho tới `PASS`.
+4. **Báo cáo**: Phong cách "Chuẩn Hàng Không" (điện tín/telegram, súc tích, tối ưu token tối đa).

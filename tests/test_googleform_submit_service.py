@@ -150,12 +150,22 @@ class GoogleFormSubmitServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.audit_repo.completions, [])
 
     async def test_safe_failure_is_explicit_in_results_for_selective_retry(self):
-        batch = FakeFormBatch(RuntimeError("radio was not checked"))
+        batch = FakeFormBatch(
+            RuntimeError('fill("StudentSecretName") failed: radio was not checked')
+        )
         external, _browser = self.external(batch)
-        with patch.object(service.asyncio, "sleep", AsyncMock()):
+        logged_messages = []
+        with (
+            patch.object(service.asyncio, "sleep", AsyncMock()),
+            patch.object(
+                service,
+                "log_message",
+                side_effect=lambda msg, *a, **k: logged_messages.append(str(msg)),
+            ),
+        ):
             await service._background_submit_forms(
                 3,
-                [{"name": "Student", "class_code": "vt-code"}],
+                [{"name": "StudentSecretName", "class_code": "vt-code"}],
                 "batch-3",
                 "dry-run",
                 external,
@@ -164,6 +174,9 @@ class GoogleFormSubmitServiceTests(unittest.IsolatedAsyncioTestCase):
         outcomes = json.loads(self.job_repo.updates[-1]["results"])["outcomes"]
         self.assertEqual(outcomes[0]["outcome"], "FAILED")
         self.assertFalse(outcomes[0]["success"])
+        self.assertNotIn("StudentSecretName", outcomes[0]["error"])
+        for msg in logged_messages:
+            self.assertNotIn("StudentSecretName", msg)
 
 
 if __name__ == "__main__":

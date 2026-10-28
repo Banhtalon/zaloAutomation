@@ -9,15 +9,24 @@
         let googleformUploadIds = [];
         let googleformUploadInFlight = 0;
         let googleformBatchId = null;
+        let googleformBatchMarker = null;
         let ocrBusy = false;
+        let lmsStudentsFetchBusy = false;
         let lmsBase64Image = null;
         let lmsUploadId = null;
         let lmsAnalysisJobId = null;
         let lmsConfirmationToken = null;
         let lmsPreviewPlan = null;
+        let lmsSelectedClassesToTick = [];
+        let lmsConfirmInFlight = false;
         let latestZaloResults = [];
         let zaloScanPlan = null;
         let zaloPreflight = null;
+        let weeklyHistoryView = null;
+        let weeklyHistoryAvailableWeeks = [];
+        let weeklyHistoryJobs = [];
+        let weeklyHistoryRequestSeq = 0;
+        let lastExportedWeeklyCsv = '';
 
         function trackJob(jobId) {
             currentJobId = jobId;
@@ -29,6 +38,14 @@
         }
 
         function canStartAnotherJob() {
+            if (typeof lmsConfirmInFlight !== 'undefined' && lmsConfirmInFlight) {
+                alert('Đang gửi xác nhận kế hoạch LMS. Hãy chờ phản hồi từ máy chủ.');
+                return false;
+            }
+            if (typeof lmsStudentsFetchBusy !== 'undefined' && lmsStudentsFetchBusy) {
+                alert('Đang gửi yêu cầu lấy danh sách học viên từ LMS. Hãy chờ hoàn tất.');
+                return false;
+            }
             if (!currentJobActive) return true;
             alert('Đang có một job hoạt động. Hãy chờ hoàn tất hoặc bấm Hủy job.');
             return false;
@@ -57,6 +74,11 @@
                 fetchGroups();
                 fetchIgnoredGroups();
                 if (typeof fetchBcnbZaloGaps === 'function') fetchBcnbZaloGaps();
+            } else if (tabId === 'specs') {
+                headerTitle.innerText = "Thông số kỹ thuật";
+                if (typeof refreshCurrentZaloPreflight === 'function') {
+                    refreshCurrentZaloPreflight();
+                }
             } else if (tabId === 'logs') {
                 headerTitle.innerText = "Nhật ký Hệ thống";
                 if (typeof refreshLogs === 'function') refreshLogs();
@@ -82,6 +104,9 @@
         }
 
         function refreshDashboardRequiredWeekView() {
+            if (typeof syncWeeklyHistoryControlsWithPlan === 'function') {
+                syncWeeklyHistoryControlsWithPlan();
+            }
             if (Array.isArray(latestZaloResults)
                 && latestZaloResults.length > 0
                 && typeof renderZaloResults === 'function') {
@@ -91,6 +116,7 @@
 
         function renderZaloScanPlan(plan) {
             const element = document.getElementById('zalo-scan-plan');
+            const brief = document.getElementById('zalo-dashboard-plan-brief');
             if (!element) return;
             if (typeof document.querySelector !== 'function') return;
             const scanButton = document.querySelector('.action-button--scan');
@@ -99,7 +125,8 @@
                 || plan.selected_weeks.length !== 2) {
                 zaloScanPlan = null;
                 element.textContent = 'Chưa có kế hoạch tuần BCNB. Hãy bấm “Dò tìm” trước khi quét.';
-                element.className = 'rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900';
+                element.className = 'rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-900';
+                if (brief) brief.textContent = 'Chưa có kế hoạch tuần BCNB · Hãy bấm “Dò tìm lại”';
                 if (scanButton) scanButton.disabled = true;
                 refreshDashboardRequiredWeekView();
                 applyZaloRunState();
@@ -111,7 +138,8 @@
             if (!plan.available || Number(plan.target_count || 0) < 1) {
                 zaloScanPlan = null;
                 element.textContent = `Kế hoạch BCNB: mới nhất W${latest.week}/${latest.year} · phải xử lý W${required.week}/${required.year} · Dashboard chỉ hiển thị W${required.week}/${required.year} · ${deferred} lớp chưa đến giờ học, chưa thể quét.`;
-                element.className = 'rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900';
+                element.className = 'rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-900';
+                if (brief) brief.textContent = `Tuần W${required.week}/${required.year} · Chưa có lớp đủ điều kiện (${deferred} lớp chờ giờ học)`;
                 if (scanButton) scanButton.disabled = true;
                 refreshDashboardRequiredWeekView();
                 applyZaloRunState();
@@ -122,7 +150,10 @@
                 ? ` · ${deferred} lớp chưa đến giờ học (chưa quét)`
                 : '';
             element.textContent = `Kế hoạch BCNB: mới nhất W${latest.week}/${latest.year} · phải xử lý W${required.week}/${required.year} · Dashboard chỉ hiển thị W${required.week}/${required.year} · ${plan.target_count || 0} target${deferredText}`;
-            element.className = 'rounded-xl border border-indigo-200 bg-indigo-50 px-4 py-3 text-sm text-indigo-900';
+            element.className = 'rounded-xl border border-indigo-200 bg-indigo-50 px-4 py-3 text-xs text-indigo-900';
+            if (brief) {
+                brief.textContent = `Tuần báo cáo W${required.week}/${required.year} · ${plan.target_count || 0} lớp cần xử lý${deferred > 0 ? ` (${deferred} lớp chờ giờ học)` : ''}`;
+            }
             if (scanButton) scanButton.disabled = false;
             refreshDashboardRequiredWeekView();
             applyZaloRunState();
@@ -137,6 +168,7 @@
 
         function renderRuntimeMode(mode, jobType = '') {
             const modeBadge = document.getElementById('runtime-mode-badge');
+            const specsMode = document.getElementById('specs-job-mode');
             if (!modeBadge) return;
             const normalized = mode === 'production'
                 ? 'production'
@@ -148,11 +180,15 @@
                     : 'Chưa xác định');
             modeBadge.textContent = label;
             modeBadge.className = `mode-badge mode-badge--${normalized}`;
+            if (specsMode) specsMode.textContent = label;
         }
 
         function applyZaloRunState() {
             if (typeof document === 'undefined' || typeof document.querySelector !== 'function') return;
             const scanButton = document.querySelector('.action-button--scan');
+            const rescanButton = typeof document.getElementById === 'function'
+                ? document.getElementById('btn-rescan-failed')
+                : null;
             const hasPlan = Boolean(zaloScanPlan && zaloScanPlan.snapshot_id);
             const hasPreflight = Boolean(zaloPreflight);
             const blocked = getZaloPreflightStatus() === 'RED';
@@ -163,6 +199,11 @@
                     : (!hasPreflight
                         ? 'Bấm “Kiểm tra lại” trước khi chạy.'
                         : (blocked ? 'Cần xử lý kiểm tra đỏ trước khi chạy.' : ''));
+            }
+            if (rescanButton) {
+                const inHistoricalView = typeof isHistoricalWeekViewActive === 'function'
+                    && isHistoricalWeekViewActive();
+                rescanButton.disabled = !hasPlan || !hasPreflight || blocked || inHistoricalView;
             }
             renderZaloWorkflow();
         }
@@ -234,7 +275,7 @@
                 if (checkedAt) checkedAt.textContent = 'Chưa có lần kiểm tra gần nhất';
                 if (!currentJobExecutionMode) renderRuntimeMode(null);
                 if (details) details.classList.add('hidden');
-                panel.className = 'rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900';
+                panel.className = 'preflight-compact flex flex-wrap items-center justify-between gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3.5 py-2 text-xs text-amber-900';
                 applyZaloRunState();
                 return;
             }
@@ -251,8 +292,8 @@
             const level = labels[report.status] ? report.status : 'RED';
             const style = styles[level];
             status.textContent = labels[level];
-            status.className = `rounded-full ${style[3]} px-3 py-1 text-[11px] font-bold uppercase tracking-wide ${style[4]}`;
-            panel.className = `rounded-xl border ${style[0]} ${style[1]} ${style[2]} px-4 py-3 text-sm`;
+            status.className = `rounded-full ${style[3]} px-2.5 py-1 text-[10px] font-bold uppercase tracking-wide ${style[4]} shrink-0`;
+            panel.className = `preflight-compact flex flex-wrap items-center justify-between gap-2 rounded-xl border ${style[0]} ${style[1]} ${style[2]} px-3.5 py-2 text-xs`;
             const mode = report.mode === 'production' ? 'production' : 'dry-run';
             const targets = Number(report.target_count || 0);
             if (currentJobExecutionMode) {
@@ -316,8 +357,13 @@
             }
         }
 
-        async function startScan() {
+        async function startScan(selectedTargetKeys = null) {
             if (!canStartAnotherJob()) return;
+            const isSelective = Array.isArray(selectedTargetKeys);
+            if (isSelective && selectedTargetKeys.length === 0) {
+                alert('Không có lớp hợp lệ nào được chọn để quét lại.');
+                return;
+            }
             if (!zaloScanPlan || !zaloScanPlan.snapshot_id) {
                 await refreshZaloScanPlan();
             }
@@ -334,25 +380,40 @@
                 alert(blocker ? `${blocker.message}${blocker.action ? `\n${blocker.action}` : ''}` : 'Chưa thể chạy; hãy xem phần kiểm tra an toàn.');
                 return;
             }
+            const targetCountLabel = isSelective
+                ? selectedTargetKeys.length
+                : Number(zaloScanPlan.target_count || 0);
             let confirmYellow = false;
             if (preflightStatus === 'YELLOW' && zaloPreflight.mode === 'production') {
                 confirmYellow = window.confirm(
-                    `Có cảnh báo an toàn trước khi chạy production (${Number(zaloScanPlan.target_count || 0)} target). `
+                    `Có cảnh báo an toàn trước khi chạy production (${targetCountLabel} target). `
                     + 'Hãy đọc phần cảnh báo và chỉ tiếp tục khi bạn chắc chắn muốn chạy.'
                 );
                 if (!confirmYellow) return;
+            }
+            const requestBody = {
+                snapshot_id: zaloScanPlan.snapshot_id,
+                confirm_yellow: confirmYellow,
+            };
+            if (isSelective) {
+                requestBody.selected_target_keys = selectedTargetKeys;
+                if (typeof rememberSelectiveScanBaseline === 'function') {
+                    rememberSelectiveScanBaseline();
+                }
+            } else if (typeof clearSelectiveScanBaseline === 'function') {
+                clearSelectiveScanBaseline();
             }
             try {
                 const res = await fetch('/run-scan', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        snapshot_id: zaloScanPlan.snapshot_id,
-                        confirm_yellow: confirmYellow,
-                    }),
+                    body: JSON.stringify(requestBody),
                 });
                 const data = await res.json();
                 if (!res.ok) {
+                    if (isSelective && typeof clearSelectiveScanBaseline === 'function') {
+                        clearSelectiveScanBaseline();
+                    }
                     const detail = data.detail;
                     const message = detail && typeof detail === 'object'
                         ? (detail.message || detail.code)
@@ -361,5 +422,10 @@
                 } else {
                     if(data.job_id) { trackJob(data.job_id); }
                 }
-            } catch (err) { alert("Lỗi kết nối đến server!"); }
+            } catch (err) {
+                if (isSelective && typeof clearSelectiveScanBaseline === 'function') {
+                    clearSelectiveScanBaseline();
+                }
+                alert("Lỗi kết nối đến server!");
+            }
         }

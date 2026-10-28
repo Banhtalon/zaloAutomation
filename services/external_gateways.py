@@ -59,6 +59,17 @@ class LmsOcrGateway(Protocol):
     async def extract_missing_classes(self, image_path: str) -> list[str]: ...
 
 
+class ZaloAiReportClassifierGateway(Protocol):
+    async def evaluate_ambiguous_message(
+        self,
+        raw_content: str,
+        *,
+        group_name: str = "",
+        lesson: str = "",
+        class_date_iso: str = "",
+    ) -> dict[str, Any]: ...
+
+
 class QualityIsolationViolation(RuntimeError):
     """Raised before a real production browser entry in isolated quality mode."""
 
@@ -3471,11 +3482,124 @@ class GeminiLmsOcrGateway:
             image.close()
 
 
+class GeminiZaloReportClassifierGateway:
+    """Lazy Gemini adapter for secondary review-only classification of ambiguous Zalo messages."""
+
+    def __init__(
+        self,
+        *,
+        api_key_provider: Callable[[], str | None] = lambda: _config_value(
+            "GEMINI_API_KEY", None
+        ),
+        model_provider: Callable[[], str] = lambda: _config_value(
+            "GEMINI_MODEL", "gemini-3.1-flash-lite"
+        ),
+        client_factory: Callable[[str], Any] | None = None,
+        timeout_seconds: float = 10.0,
+    ):
+        self._api_key_provider = api_key_provider
+        self._model_provider = model_provider
+        self._client_factory = client_factory
+        self._timeout_seconds = max(0.5, float(timeout_seconds))
+
+    async def evaluate_ambiguous_message(
+        self,
+        raw_content: str,
+        *,
+        group_name: str = "",
+        lesson: str = "",
+        class_date_iso: str = "",
+    ) -> dict[str, Any]:
+        if os.getenv("ZALO_QUALITY_ISOLATED") == "1" and self._client_factory is None:
+            return {
+                "is_likely_report": False,
+                "confidence": 0.0,
+                "reason": "ISOLATED_QUALITY_MODE_DISABLED",
+            }
+        api_key = self._api_key_provider()
+        if not api_key:
+            return {
+                "is_likely_report": False,
+                "confidence": 0.0,
+                "reason": "MISSING_GEMINI_API_KEY",
+            }
+        text = str(raw_content or "").strip()[:2000]
+        if len(text) < 80:
+            return {
+                "is_likely_report": False,
+                "confidence": 0.0,
+                "reason": "MESSAGE_TOO_SHORT",
+            }
+        try:
+            client = (
+                self._client_factory(api_key)
+                if self._client_factory
+                else genai.Client(api_key=api_key)
+            )
+            prompt = (
+                "Bạn là bộ trợ lý phân loại tin nhắn báo cáo buổi học trên nhóm Zalo lớp học.\n"
+                "Tin nhắn dưới đây đã trượt bộ lọc từ khóa chuẩn. Hãy đánh giá xem đây có thực sự là "
+                "báo cáo tổng kết/nhận xét buổi học của giáo viên gửi cho phụ huynh hay không "
+                "(ví dụ: tóm tắt kiến thức đã học, tình hình học tập của học viên, bài tập về nhà).\n"
+                "Lưu ý: Thông báo khai giảng, thông báo nghỉ lễ, nhắc đóng học phí, hoặc chỉ điểm danh "
+                "đơn thuần KHÔNG phải là báo cáo buổi học.\n"
+                "Chỉ trả về JSON hợp lệ theo cấu trúc:\n"
+                '{"is_likely_report": true/false, "confidence": 0.0..1.0, "reason": "giải thích ngắn gọn không chứa tên học sinh"}\n\n'
+                f"Nhóm lớp: {group_name}\n"
+                f"Buổi học mục tiêu: {lesson} (ngày {class_date_iso})\n"
+                f"Nội dung tin nhắn:\n{text}"
+            )
+            response = await asyncio.wait_for(
+                client.aio.models.generate_content(
+                    model=self._model_provider(),
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json"
+                    ),
+                ),
+                timeout=self._timeout_seconds,
+            )
+            if not response or not getattr(response, "text", None):
+                return {
+                    "is_likely_report": False,
+                    "confidence": 0.0,
+                    "reason": "EMPTY_AI_RESPONSE",
+                }
+            parsed = json.loads(response.text)
+            if not isinstance(parsed, dict):
+                return {
+                    "is_likely_report": False,
+                    "confidence": 0.0,
+                    "reason": "INVALID_AI_JSON_SHAPE",
+                }
+            is_likely = bool(parsed.get("is_likely_report") is True)
+            raw_conf = parsed.get("confidence", 0.0)
+            try:
+                confidence = max(0.0, min(1.0, float(raw_conf)))
+            except (TypeError, ValueError):
+                confidence = 0.0
+            reason = str(parsed.get("reason") or "").strip()[:160]
+            return {
+                "is_likely_report": is_likely,
+                "confidence": confidence,
+                "reason": reason or ("AI_SUGGESTED_REPORT" if is_likely else "AI_REJECTED"),
+            }
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return {
+                "is_likely_report": False,
+                "confidence": 0.0,
+                "reason": "AI_CLASSIFIER_ERROR",
+            }
+
+
 @dataclass(slots=True)
 class ExternalGateways:
     browser: BrowserGateway
     lms_ocr: LmsOcrGateway
     student_ocr_factory: Callable[[], StudentOcrGateway]
+    zalo_ai_classifier: ZaloAiReportClassifierGateway | None = None
 
     @classmethod
     def production(cls, *, profile_path: str | None = None) -> ExternalGateways:
@@ -3491,4 +3615,5 @@ class ExternalGateways:
             ),
             lms_ocr=GeminiLmsOcrGateway(),
             student_ocr_factory=_default_student_ocr_factory,
+            zalo_ai_classifier=GeminiZaloReportClassifierGateway(),
         )

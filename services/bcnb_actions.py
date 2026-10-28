@@ -35,6 +35,7 @@ async def execute_verified_checkbox_action(
     lesson: str | None = None,
     evidence_path: str | None = None,
     evidence_sha256: str | None = None,
+    evidence_job_id: int | None = None,
     require_evidence_registry: bool = False,
     settle_seconds: float = 0.5,
     should_halt: Callable[[], bool] | None = None,
@@ -57,7 +58,7 @@ async def execute_verified_checkbox_action(
             verified_artifact = await evidence_repo.verify(
                 evidence_path,
                 expected_sha256=normalized_sha256,
-                job_id=job_id,
+                job_id=job_id if evidence_job_id is None else evidence_job_id,
             )
             if not verified_artifact or verified_artifact.get("status") != "AVAILABLE":
                 raise ValueError("Evidence không khả dụng hoặc SHA-256 không khớp.")

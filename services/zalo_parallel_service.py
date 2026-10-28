@@ -727,6 +727,23 @@ async def prepare_frozen_scan_execution(
 
     admitted_targets = list(plan.get("targets") or [])
     previously_deferred = list(plan.get("deferred_targets") or [])
+    selected_keys_raw = plan.get("selected_target_keys")
+    if isinstance(selected_keys_raw, list):
+        selected_key_set = {
+            str(item).strip() for item in selected_keys_raw if str(item).strip()
+        }
+        admitted_targets = [
+            target
+            for target in admitted_targets
+            if isinstance(target, dict)
+            and canonical_target_key(target) in selected_key_set
+        ]
+        previously_deferred = [
+            target
+            for target in previously_deferred
+            if isinstance(target, dict)
+            and canonical_target_key(target) in selected_key_set
+        ]
     ready_targets, newly_deferred = split_scan_targets_for_execution(
         admitted_targets,
         latest_week=plan.get("latest_week"),
@@ -1523,6 +1540,7 @@ async def _scan_one_target(
     capture_max_messages: int | None = None,
     capture_window_start: datetime | None = None,
     capture_window_end: datetime | None = None,
+    ai_report_classifier: Any = None,
 ) -> dict[str, Any]:
     group_name = str(target.get("group_name") or "").strip()
     person = str(target.get("person") or "Chưa xác định").strip()
@@ -1711,6 +1729,9 @@ async def _scan_one_target(
         error_code=TARGET_SEARCH_RESULT_ERROR,
     )
 
+    scan_extra_kwargs: dict[str, Any] = {}
+    if ai_report_classifier is not None:
+        scan_extra_kwargs["ai_report_classifier"] = ai_report_classifier
     result = await scan_open_zalo_chat(
         page,
         job_id=job_id,
@@ -1728,6 +1749,7 @@ async def _scan_one_target(
         capture_max_messages=capture_max_messages,
         capture_window_start=capture_window_start,
         capture_window_end=capture_window_end,
+        **scan_extra_kwargs,
     )
     context = result.setdefault("evidence", {}).setdefault("date_context", {})
     context.update(
@@ -2055,6 +2077,16 @@ async def run_parallel_zalo_batch(
                         job_repo=job_repo,
                         worker_id=owner,
                         attempt=2,
+                        **(
+                            {
+                                "ai_report_classifier": getattr(
+                                    runtime.external, "zalo_ai_classifier", None
+                                )
+                            }
+                            if getattr(runtime.external, "zalo_ai_classifier", None)
+                            is not None
+                            else {}
+                        ),
                     )
                 except JobCancelledError:
                     raise
@@ -2189,6 +2221,16 @@ async def run_parallel_zalo_batch(
                             job_repo=job_repo,
                             worker_id=owner,
                             attempt=1,
+                            **(
+                                {
+                                    "ai_report_classifier": getattr(
+                                        runtime.external, "zalo_ai_classifier", None
+                                    )
+                                }
+                                if getattr(runtime.external, "zalo_ai_classifier", None)
+                                is not None
+                                else {}
+                            ),
                         )
                     except TargetSearchError as first_error:
                         retry_result, terminal_error = await retry_target_once(source)
@@ -2715,6 +2757,15 @@ async def run_and_finalize_parallel_zalo_batch(
         halt_reason=result.get("halt_reason"),
         dry_run=dry_run,
     )
+    if scan_plan.get("snapshot_id") is not None:
+        progress["snapshot_id"] = scan_plan.get("snapshot_id")
+    if isinstance(scan_plan.get("required_week"), dict):
+        progress["required_week"] = dict(scan_plan["required_week"])
+    if scan_plan.get("selective_rescan"):
+        progress["selective_rescan"] = True
+        progress["selected_target_keys"] = list(
+            scan_plan.get("selected_target_keys") or []
+        )
     await job_repo.update_job(
         job_id,
         status=progress["status"],

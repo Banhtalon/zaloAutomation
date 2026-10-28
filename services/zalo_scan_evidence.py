@@ -6,17 +6,21 @@ from datetime import datetime, timedelta
 import hashlib
 import os
 from typing import Any, cast
+import unicodedata
 import uuid
 
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from classifiers.rule_classifier import (
+    MAX_AI_ASSIST_CANDIDATES,
     classify_report_content,
+    is_eligible_for_ai_assist,
     parse_zalo_date_header,
 )
 from core.time_utils import now_utc, utc_iso
 from logger_utils import log_message
 from services.zalo_evidence import (
+    AI_SUGGESTED_REPORT_DECISION,
     SUBMITTED_LATE_VERIFIED,
     SUBMITTED_VERIFIED,
     build_image_evidence,
@@ -51,6 +55,27 @@ MAX_CANARY_MESSAGES = 1000
 # Tick eligibility is no longer decided by a fixed number of days; the exact
 # BCNB deadline is resolved per row in the service layer.
 BCNB_TICK_MAX_DELAY_DAYS = 6
+_AI_ASSIST_GROUP_BUDGET_LOCK = asyncio.Lock()
+_AI_ASSIST_GROUP_COUNTS: dict[int, dict[str, int]] = {}
+
+
+async def _try_claim_ai_assist_group_slot(job_id: int, group_name: str) -> bool:
+    """Enforce MAX_AI_ASSIST_CANDIDATES per group across all targets in one job."""
+    group_key = (
+        unicodedata.normalize("NFC", str(group_name or "")).strip().casefold()
+        or "__unnamed_group__"
+    )
+    async with _AI_ASSIST_GROUP_BUDGET_LOCK:
+        if len(_AI_ASSIST_GROUP_COUNTS) >= 128 and int(job_id) not in _AI_ASSIST_GROUP_COUNTS:
+            oldest_job_id = next(iter(_AI_ASSIST_GROUP_COUNTS))
+            _AI_ASSIST_GROUP_COUNTS.pop(oldest_job_id, None)
+        job_counts = _AI_ASSIST_GROUP_COUNTS.setdefault(int(job_id), {})
+        used = job_counts.get(group_key, 0)
+        if used >= MAX_AI_ASSIST_CANDIDATES:
+            return False
+        job_counts[group_key] = used + 1
+        return True
+
 ZALO_INCOMPLETE_SYNC_BANNERS = (
     "Zalo Web của bạn hiện chưa có đầy đủ tin nhắn gần đây",
     "Đồng bộ tin nhắn gần đây",
@@ -647,6 +672,8 @@ async def scan_open_zalo_chat(
     capture_max_messages: int | None = None,
     capture_window_start: datetime | None = None,
     capture_window_end: datetime | None = None,
+    ai_report_classifier: Any = None,
+    ai_assist_enabled: bool | None = None,
 ) -> dict[str, Any]:
     scanned_at = now_utc()
     if capture_max_scrolls is not None:
@@ -911,6 +938,7 @@ async def scan_open_zalo_chat(
         "evaluated_messages": 0,
         "candidate_reports": 0,
         "undated_report_candidates": 0,
+        "ai_assist_evaluated": 0,
         "matched_ui_sent_at": None,
         "candidates": [],
     }
@@ -918,6 +946,8 @@ async def scan_open_zalo_chat(
     submitted_for_bcnb = False
     report_detail = None
     matched_message = None
+    ai_suggested_message = None
+    ai_candidate_pool: list[tuple[Any, str, dict[str, Any]]] = []
     verified_report_state = SUBMITTED_VERIFIED
     warnings: list[str] = []
     target_info_notes: list[str] = []
@@ -931,6 +961,8 @@ async def scan_open_zalo_chat(
         classifier_result["evaluated_messages"] += 1
         classification = classify_report_content(raw_content, group_name, today)
         if not classification["is_report"]:
+            if is_eligible_for_ai_assist(raw_content, classification):
+                ai_candidate_pool.append((message, raw_content, classification))
             continue
         classifier_result["candidate_reports"] += 1
         ui_sent_at = await _message_date_from_zalo_ui(message, today)
@@ -1174,6 +1206,137 @@ async def scan_open_zalo_chat(
         )
         break
 
+    if (
+        not report_found
+        and ai_report_classifier is not None
+        and ai_candidate_pool
+        and (target is not None or target_date is not None)
+    ):
+        if ai_assist_enabled is None:
+            from googleform_autosubmit.config import Config
+
+            use_ai_assist = bool(getattr(Config, "ZALO_AI_ASSIST_CLASSIFIER", False))
+        else:
+            use_ai_assist = bool(ai_assist_enabled)
+        if use_ai_assist:
+            for ai_msg, ai_raw, ai_cls in ai_candidate_pool:
+                if classifier_result["ai_assist_evaluated"] >= MAX_AI_ASSIST_CANDIDATES:
+                    break
+                await ensure_not_cancelled()
+                ai_sent_at = await _message_date_from_zalo_ui(ai_msg, today)
+                if ai_sent_at is None or ai_sent_at.date() > today.date():
+                    continue
+                ai_reported_lesson = extract_report_lesson_number(ai_raw)
+                ai_content_lesson = extract_report_content_lesson_number(ai_raw)
+                ai_inferred_date = infer_report_lesson_date(
+                    ai_cls["content_dates"],
+                    ai_raw,
+                    message_date=ai_sent_at,
+                )
+                ai_delay: int | None = None
+                ai_date_ref = "no_class_date"
+                if target is not None:
+                    ai_delay = (ai_sent_at.date() - target.class_date.date()).days
+                    ai_date_ref = "bcnb_target_date"
+                    if ai_delay < 0 or ai_delay > BCNB_TICK_MAX_DELAY_DAYS:
+                        continue
+                    if ai_inferred_date is not None or ai_reported_lesson is not None:
+                        ai_target_match = resolve_report_target(
+                            target,
+                            ui_sent_at=ai_sent_at,
+                            claimed_lesson_date=ai_inferred_date,
+                            claimed_lesson=ai_reported_lesson,
+                            content_lesson=ai_content_lesson,
+                        )
+                        if not ai_target_match.matches:
+                            continue
+                elif target_date is not None:
+                    ai_delay = (ai_sent_at.date() - target_date.date()).days
+                    ai_date_ref = "legacy_class_date"
+                    if ai_delay < 0 or ai_delay > BCNB_TICK_MAX_DELAY_DAYS:
+                        continue
+
+                if not await _try_claim_ai_assist_group_slot(job_id, group_name):
+                    break
+                classifier_result["ai_assist_evaluated"] += 1
+                try:
+                    ai_verdict = await ai_report_classifier.evaluate_ambiguous_message(
+                        ai_raw,
+                        group_name=group_name,
+                        lesson=target.lesson if target is not None else "",
+                        class_date_iso=(
+                            target.class_date_iso
+                            if target is not None
+                            else (target_date.date().isoformat() if target_date is not None else "")
+                        ),
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    ai_verdict = {
+                        "is_likely_report": False,
+                        "confidence": 0.0,
+                        "reason": "AI_CLASSIFIER_ERROR",
+                    }
+                is_likely = bool(
+                    isinstance(ai_verdict, Mapping)
+                    and ai_verdict.get("is_likely_report") is True
+                )
+                ai_confidence = 0.0
+                if isinstance(ai_verdict, Mapping):
+                    try:
+                        ai_confidence = max(
+                            0.0,
+                            min(1.0, float(ai_verdict.get("confidence", 0.0) or 0.0)),
+                        )
+                    except (TypeError, ValueError):
+                        ai_confidence = 0.0
+                ai_reason = (
+                    str(ai_verdict.get("reason") or "").strip()[:160]
+                    if isinstance(ai_verdict, Mapping)
+                    else ""
+                )
+                ai_candidate: dict[str, Any] = {
+                    "score": ai_cls["score"],
+                    "matched_signals": ai_cls["matched_signals"],
+                    "content_dates": [
+                        content_date.date().isoformat()
+                        for content_date in ai_cls["content_dates"]
+                    ],
+                    "ui_sent_at": ai_sent_at.date().isoformat(),
+                    "message_fingerprint": hashlib.sha256(
+                        ai_raw.strip().encode("utf-8")
+                    ).hexdigest(),
+                    "delay_days": ai_delay,
+                    "date_reference": ai_date_ref,
+                    "decision": (
+                        AI_SUGGESTED_REPORT_DECISION
+                        if is_likely
+                        else "AI_ASSIST_REJECTED"
+                    ),
+                    "ai_assist": {
+                        "is_likely_report": is_likely,
+                        "confidence": ai_confidence,
+                        "reason": ai_reason
+                        or ("AI_SUGGESTED_REPORT" if is_likely else "AI_REJECTED"),
+                    },
+                }
+                classifier_result["candidates"].append(ai_candidate)
+                if is_likely:
+                    # Safety boundary: AI assist NEVER sets report_found=True or
+                    # submitted_for_bcnb=True.  It only flags the candidate for
+                    # human inspection and captures the message screenshot.
+                    report_found = False
+                    submitted_for_bcnb = False
+                    ai_suggested_message = ai_msg
+                    classifier_result["decision"] = AI_SUGGESTED_REPORT_DECISION
+                    classifier_result["matched_ui_sent_at"] = ai_sent_at.date().isoformat()
+                    report_detail = (
+                        f"AI gợi ý tin nhắn nộp {ai_sent_at.strftime('%d/%m')} "
+                        "có thể là báo cáo học tập; cần kiểm tra thủ công"
+                    )
+                    break
+
     images: dict[str, dict[str, Any] | None] = {
         "report": None,
         "latest": None,
@@ -1195,6 +1358,19 @@ async def scan_open_zalo_chat(
             attempt=attempt,
         )
     else:
+        if ai_suggested_message is not None:
+            ai_date_header = await _message_date_header_from_zalo_ui(ai_suggested_message)
+            images["report"] = await _capture_zalo_evidence(
+                page,
+                ai_suggested_message,
+                job_id=job_id,
+                screenshots_dir=screenshots_dir,
+                label="report",
+                date_header=ai_date_header,
+                diagnostics=capture_diagnostics,
+                worker_id=worker_id,
+                attempt=attempt,
+            )
         latest_message = messages[-1] if messages else None
         oldest_message = messages[0] if messages else None
         latest_date_header = await _message_date_header_from_zalo_ui(latest_message)

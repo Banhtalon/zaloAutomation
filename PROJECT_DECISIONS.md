@@ -971,3 +971,86 @@
   -Isolated` ngày 2026-09-26 đạt exit `0`, 562 test, coverage 76,9%, toàn bộ
   invariant/frontend/app smoke/compile đạt.
 - Supersedes: Không; bổ sung DEC-030 và DEC-032.
+
+## DEC-034 — Tinh gọn trang chính Zalo Auto và tách tab Thông số kỹ thuật
+
+- Date: 2026-10-20
+- Status: Accepted for local implementation; chưa phải production acceptance.
+- Context: Trang chính `Zalo Auto` chứa đồng thời nhiều khối thông tin kỹ thuật
+  (kế hoạch chi tiết, danh sách mã kiểm tra preflight, 3 ô stepper lặp lại,
+  14 chỉ số tiến độ worker và dòng metadata cửa sổ tin nhắn trong từng dòng kết
+  quả), làm bảng kết quả bị đẩy sâu và khó theo dõi nhanh.
+- Decision: Giữ trang chính `Zalo Auto` ở dạng tinh gọn gồm 4 thẻ thống kê thu
+  gọn, 1 thanh điều khiển kèm tóm tắt trạng thái an toàn trước nút `Bắt đầu quét`
+  (vẫn giữ nguyên chốt khóa nút theo DEC-032) và bảng kết quả chính chỉ hiển thị
+  trạng thái báo cáo cùng các nút xem ảnh minh chứng. Tạo tab riêng `Thông số kỹ
+  thuật` (`tab-specs` / `templates/partials/specs.html`) trên Sidebar để tập
+  trung toàn bộ thông số chẩn đoán: kế hoạch 2 tuần đầy đủ, quy trình 3 bước,
+  danh sách kiểm tra preflight, telemetry của phiên job (`#job-meta`, reason
+  code, 14 chỉ số target progress) và bảng thông số kiểm chứng tin nhắn/cửa sổ
+  thời gian theo từng nhóm.
+- Consequences: Người vận hành quan sát bảng báo cáo trên trang chính rõ ràng
+  hơn mà không mất bất kỳ thông tin chẩn đoán kỹ thuật hay rào chắn an toàn nào.
+  Không thay đổi API backend, cơ sở dữ liệu, `.env` hay luồng trình duyệt.
+- Evidence: Kiểm tra `node tests/check_template_js.js`, `tests/check_phase3_quality.py`,
+  `tests/check_app_smoke.py` và cổng `CHECK_QUALITY.ps1 -Isolated`.
+- Supersedes: Không; bổ sung DEC-032.
+
+## DEC-035 — Quét trực tiếp trang LMS để lọc lớp quá hạn nhận xét và đối chiếu BCNB
+
+- Date: 2026-10-20
+- Status: Accepted for local implementation; chưa phải production acceptance.
+- Context: Trước đây tính năng Tick LMS yêu cầu người vận hành chụp màn hình
+  danh sách lớp chưa nhận xét và tải ảnh lên để OCR. Owner yêu cầu nâng cấp để
+  worker tự động truy cập trực tiếp trang `admin/class-sessions` trên MindX LMS,
+  tự động đăng nhập LMS và BCNB nếu phiên bị thoát dựa trên cấu hình `.env`, và
+  đối chiếu với trang `check_nhanxet.php` trên BCNB.
+- Decision:
+  1. Bổ sung `LMS_USERNAME`, `LMS_PASSWORD` và `LMS_URL` vào `.env`, `.env.example`
+     và `googleform_autosubmit/config.py` bên cạnh `BCNB_USERNAME`, `BCNB_PASSWORD`,
+     `BCNB_URL`.
+  2. Trên trang LMS (`Config.LMS_URL`), vì bộ lọc URL gồm cả `MISS_ATTEND` và
+     `DUE_COMMENT`, chỉ những dòng có giá trị khác rỗng tại cột `"Buổi học gần
+     nhất quá hạn nhận xét"` mới được tính là lớp chưa nhận xét (`missing_classes`).
+     Worker tự động duyệt qua phân trang để thu thập đầy đủ danh sách.
+  3. Khi đối chiếu với bảng BCNB của tuần kiểm tra (`select_last_week_checked`),
+     lấy danh sách lớp trên BCNB làm gốc, loại trừ các lớp nằm trong
+     `missing_classes` của LMS và lập kế hoạch tick các lớp chưa tích còn lại.
+     Các lớp trên LMS thuộc khóa/tuần khác không nằm trong bảng BCNB hiện tại
+     được ghi nhận ở `unmatched_classes` nhưng không chặn xác nhận kế hoạch
+     (`allow_unmatched_missing=True`).
+  4. Giữ nguyên bước Xem trước kế hoạch (`lms_preview`) và xác nhận một lần qua
+     `plan_digest` trước khi thực thi (`execute_verified_checkbox_action`), đồng
+     thời giữ tương thích ngược với luồng phân tích qua `upload_id`.
+- Consequences: Người vận hành chỉ cần bấm `Tick LMS` -> `Quét LMS & Lập kế hoạch`
+  mà không phải chụp/tải ảnh thủ công, trong khi vẫn giữ đầy đủ chốt duyệt kế
+  hoạch hai bước và kiểm chứng server readback trên BCNB.
+- Evidence: Unit test mới trong `tests/test_lms_plan.py`, `tests/test_lms_service.py`,
+  `tests/test_api_routes_unit.py`, `tests/test_job_dispatcher_unit.py`;
+  `node tests/check_template_js.js` pass; `.\CHECK_QUALITY.ps1 -Isolated` exit
+  `0`, `QUALITY GATE PASSED`, `567` test, coverage `77.1%`.
+- Supersedes: Không; mở rộng luồng LMS sang quét trực tiếp web LMS.
+
+## DEC-036 — Flow AI mới: Lead thực thi + Test + Sol 6.1 xhigh Review độc lập + Báo cáo Chuẩn Hàng Không
+
+- Date: 2026-10-22
+- Status: Accepted by Owner (Active operational workflow).
+- Context: Owner yêu cầu cập nhật quy trình điều phối AI phù hợp với thế hệ model
+  hiện tại và tối ưu hóa token tối đa khi triển khai lộ trình nâng cấp trong
+  `UPGRADE_PROGRESS.md`.
+- Decision:
+  1. Lead vừa điều phối vừa trực tiếp thực thi từng phần công việc trong phạm vi
+     `allowlist`.
+  2. Hoàn tất code từng phần phải chạy kiểm thử đầy đủ (targeted unit tests,
+     `node tests/check_template_js.js`, `.\CHECK_QUALITY.ps1 -Isolated`).
+  3. Gọi reviewer độc lập `gpt-6.1-sol` ở mức `xhigh` (`codex exec -m gpt-6.1-sol -c model_reasoning_effort="xhigh" -s read-only -`)
+     để kiểm tra diff, contract và kết quả test trước khi báo cáo hoàn thành phần đó.
+  4. Mọi báo cáo gửi Owner trình bày theo phong cách "Chuẩn Hàng Không" (dạng
+     điện tín/checklist kỹ thuật súc tích, tối ưu token tối đa).
+- Consequences: Giữ nguyên toàn bộ rào chắn an toàn Zalo/BCNB/LMS/SQLite của dự án,
+  có thêm bước kiểm định độc lập từ `gpt-6.1-sol (xhigh)` đã xác minh hoạt động
+  trực tiếp trên máy (`v0.163.0`, `sandbox: read-only`) và giảm thiểu chi phí
+  token giao tiếp.
+- Evidence: Kiểm tra live CLI `codex exec -m gpt-6.1-sol -c model_reasoning_effort="xhigh" -s read-only -`
+  ngày 2026-10-22 đạt exit `0`.
+- Supersedes: Cập nhật phương thức điều phối thực thi hàng ngày trên repo local.

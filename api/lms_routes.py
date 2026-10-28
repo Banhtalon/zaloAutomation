@@ -6,7 +6,12 @@ from api.errors import public_error
 from core.container import AppContainer
 from repositories.lms_repository import ConfirmationError
 from repositories.upload_repository import UploadClaimError
-from services.lms_plan import compute_plan_digest
+from services.lms_plan import (
+    LmsSafetyError,
+    compute_plan_digest,
+    compute_selection_digest,
+    validate_selected_classes_to_tick,
+)
 from services.upload_store import UploadValidationError
 
 
@@ -14,7 +19,7 @@ router = APIRouter()
 
 
 class LMSAnalyzeRequest(BaseModel):
-    upload_id: str
+    upload_id: str | None = None
 
 
 class LMSLegacyUploadRequest(BaseModel):
@@ -24,11 +29,29 @@ class LMSLegacyUploadRequest(BaseModel):
 class LMSConfirmRequest(BaseModel):
     analysis_job_id: int
     confirmation_token: str
+    selected_classes_to_tick: list[str] | None = None
 
 
-async def _start_analysis(upload_id: str, container: AppContainer):
+async def _start_analysis(upload_id: str | None, container: AppContainer):
     dry_run = container.settings.bcnb_dry_run
     execution_mode = "dry-run" if dry_run else "production"
+    if not upload_id:
+        job_id = await container.job_repo.create_job(
+            "LMS_ANALYSIS",
+            {
+                "version": 4,
+                "source": "lms_web",
+                "dry_run": dry_run,
+                "execution_mode": execution_mode,
+            },
+            retryable=True,
+            recoverable=True,
+            mutates_external=False,
+            message="Đang chuẩn bị quét trang LMS và lập kế hoạch...",
+        )
+        await enqueue_job(container, job_id)
+        return {"status": "success", "job_id": job_id, "dry_run": dry_run}
+
     job_id = await container.job_repo.create_job(
         "LMS_ANALYSIS",
         {
@@ -86,10 +109,10 @@ async def _start_analysis(upload_id: str, container: AppContainer):
 
 @router.post("/api/lms/analyze", dependencies=[Depends(require_operator)])
 async def api_lms_analyze(
-    req: LMSAnalyzeRequest,
+    req: LMSAnalyzeRequest | None = None,
     container: AppContainer = Depends(get_container),
 ):
-    return await _start_analysis(req.upload_id, container)
+    return await _start_analysis(req.upload_id if req else None, container)
 
 
 @router.post("/api/lms/upload-and-run", deprecated=True, dependencies=[Depends(require_operator)])
@@ -113,25 +136,44 @@ async def api_lms_legacy_analyze(
 
 
 @router.post("/api/lms/confirm", dependencies=[Depends(require_admin)])
+@router.post("/run-lms", dependencies=[Depends(require_admin)], include_in_schema=False)
 async def api_lms_confirm(
     req: LMSConfirmRequest,
     container: AppContainer = Depends(get_container),
 ):
     try:
-        confirmation = await container.lms_repo.consume_confirmation(
-            req.analysis_job_id,
-            req.confirmation_token,
-            # The mode is read from the current immutable app settings at the
-            # last possible moment.  A preview made in production must never
-            # be consumable after the operator switches to dry-run (or vice
-            # versa).
-            dry_run=container.settings.bcnb_dry_run,
-            max_age_minutes=container.settings.lms_confirmation_ttl_minutes,
-        )
+        if req.selected_classes_to_tick is None:
+            confirmation = await container.lms_repo.consume_confirmation(
+                req.analysis_job_id,
+                req.confirmation_token,
+                # The mode is read from the current immutable app settings at the
+                # last possible moment.  A preview made in production must never
+                # be consumable after the operator switches to dry-run (or vice
+                # versa).
+                dry_run=container.settings.bcnb_dry_run,
+                max_age_minutes=container.settings.lms_confirmation_ttl_minutes,
+            )
+        else:
+            confirmation = await container.lms_repo.consume_confirmation(
+                req.analysis_job_id,
+                req.confirmation_token,
+                dry_run=container.settings.bcnb_dry_run,
+                max_age_minutes=container.settings.lms_confirmation_ttl_minutes,
+                selected_classes_to_tick=req.selected_classes_to_tick,
+            )
     except ConfirmationError as exc:
+        code = getattr(exc, "code", "LMS_CONFIRMATION_INVALID")
+        if code in {
+            "LMS_SELECTED_CLASSES_EMPTY",
+            "LMS_SELECTED_CLASSES_DUPLICATE",
+            "LMS_SELECTED_CLASSES_INVALID",
+        }:
+            raise public_error(422, code, str(exc)) from exc
+        if code == "LMS_SELECTED_CLASS_NOT_IN_PLAN":
+            raise public_error(409, code, str(exc)) from exc
         raise public_error(
             409,
-            getattr(exc, "code", "LMS_CONFIRMATION_INVALID"),
+            code,
             "Xác nhận LMS không hợp lệ hoặc đã hết hạn.",
         ) from exc
 
@@ -150,9 +192,27 @@ async def api_lms_confirm(
             "Kế hoạch LMS không còn hợp lệ.",
         )
 
+    if req.selected_classes_to_tick is not None and "selected_classes_to_tick" not in plan:
+        try:
+            selected_subset = validate_selected_classes_to_tick(
+                req.selected_classes_to_tick,
+                plan.get("classes_to_tick", []),
+            )
+            plan["selected_classes_to_tick"] = selected_subset
+            plan["selection_digest"] = compute_selection_digest(
+                expected_digest, selected_subset
+            )
+        except LmsSafetyError as exc:
+            code = getattr(exc, "code", "LMS_SELECTED_CLASSES_INVALID")
+            status_code = 409 if code == "LMS_SELECTED_CLASS_NOT_IN_PLAN" else 422
+            raise public_error(status_code, code, str(exc)) from exc
+
     await enqueue_job(container, confirmation["job_id"])
-    return {
+    response = {
         "status": "success",
         "job_id": confirmation["job_id"],
         "dry_run": confirmation["dry_run"],
     }
+    if "selected_classes_to_tick" in plan:
+        response["selected_classes_to_tick"] = plan["selected_classes_to_tick"]
+    return response

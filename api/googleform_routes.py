@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import List, Literal
+from typing import Any, List, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
@@ -30,6 +30,10 @@ from services.googleform_idempotency import (
     payload_hash,
     target_hash,
 )
+from services.lms_plan import (
+    LmsSafetyError,
+    normalize_lms_student_class_codes,
+)
 from services.upload_store import UploadValidationError
 
 
@@ -42,6 +46,11 @@ class Base64Image(BaseModel):
 
 class OcrRequest(BaseModel):
     upload_ids: List[str] = Field(min_length=1, max_length=20)
+
+
+class FetchLmsStudentsRequest(BaseModel):
+    class_codes: Any = None
+    class_code: Any = None
 
 
 class RestoreGroupRequest(BaseModel):
@@ -185,6 +194,51 @@ async def api_run_googleform_ocr(
         ) from exc
     await enqueue_job(container, job_id)
     return {"message": "Đang chạy AI OCR trong nền", "job_id": job_id}
+
+
+@router.post(
+    "/api/googleform/fetch-lms-students",
+    dependencies=[Depends(require_operator)],
+)
+async def api_fetch_googleform_lms_students(
+    req: FetchLmsStudentsRequest,
+    container: AppContainer = Depends(get_container),
+):
+    try:
+        normalized_codes = normalize_lms_student_class_codes(
+            req.class_codes,
+            req.class_code,
+        )
+    except LmsSafetyError as exc:
+        raise public_error(
+            422,
+            getattr(exc, "code", None) or "LMS_CLASS_CODES_INVALID",
+            str(exc),
+        ) from exc
+
+    job_id = await container.job_repo.create_job(
+        "GOOGLEFORM_LMS_STUDENTS",
+        {
+            "version": 1,
+            "class_codes": normalized_codes,
+            "execution_mode": "dry-run",
+        },
+        retryable=True,
+        recoverable=True,
+        mutates_external=False,
+        message=(
+            f"Đang chuẩn bị lấy danh sách học viên từ LMS ({len(normalized_codes)} lớp)..."
+        ),
+    )
+    await enqueue_job(container, job_id)
+    return {
+        "status": "success",
+        "message": (
+            f"Đang lấy danh sách học viên từ LMS cho {len(normalized_codes)} lớp..."
+        ),
+        "job_id": job_id,
+        "class_codes": normalized_codes,
+    }
 
 
 @router.get("/api/googleform/mappings", dependencies=[Depends(require_viewer)])

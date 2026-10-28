@@ -1,7 +1,12 @@
-import unicodedata
-import re
+from collections.abc import Mapping
 from datetime import datetime, timedelta
+import re
 from typing import Any
+import unicodedata
+
+
+AI_ASSIST_MIN_MESSAGE_CHARS = 80
+MAX_AI_ASSIST_CANDIDATES = 3
 
 
 def _date_without_year(day: int, month: int, today: datetime) -> datetime:
@@ -105,6 +110,9 @@ def classify_report_content(
             score += 2.0
             matched_signals.append(f"strong_header:{header}")
 
+    substance_headers = ("nội dung", "nhận xét", "bài tập về nhà", "btvn", "nhiệm vụ về nhà", "nhiệm vụ khi về nhà")
+    has_substance_header = any(header in text for header in substance_headers)
+
     weak_headers = ["tình hình lớp", "sĩ số", "vắng", "buổi số", "buổi học"]
     for header in weak_headers:
         if header in text:
@@ -131,12 +139,41 @@ def classify_report_content(
         score -= 2.0
         matched_signals.append("penalty:attendance_only")
 
+    admin_notice_markers = (
+        "quản lí lớp học",
+        "quản lý lớp học",
+        "thông báo khai giảng",
+    )
+    is_admin_notice = any(marker in text for marker in admin_notice_markers)
+    if is_admin_notice:
+        score -= 6.0
+        matched_signals.append("penalty:class_manager_or_opening_notice")
+
+    has_report_substance = has_substance_header or bool(report_keyword)
+
     return {
-        "is_report": score >= 4.0,
+        "is_report": score >= 4.0 and has_report_substance and not is_admin_notice,
         "score": score,
         "content_dates": _extract_content_dates(raw_content, today),
         "matched_signals": matched_signals,
     }
+
+
+def is_eligible_for_ai_assist(
+    raw_content: str,
+    classification: Mapping[str, Any],
+) -> bool:
+    """Return True if a message that failed rule-based classification can be checked by AI."""
+    if len(str(raw_content or "").strip()) < AI_ASSIST_MIN_MESSAGE_CHARS:
+        return False
+    if bool(classification.get("is_report")):
+        return False
+    signals = {str(item) for item in (classification.get("matched_signals") or ())}
+    if "penalty:class_manager_or_opening_notice" in signals:
+        return False
+    if "penalty:attendance_only" in signals:
+        return False
+    return True
 
 
 def check_is_report_and_extract_date(

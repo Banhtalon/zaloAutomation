@@ -4,6 +4,9 @@
                 document.getElementById('lmsModal').firstElementChild.classList.remove('scale-95');
                 document.getElementById('lmsModal').firstElementChild.classList.add('scale-100');
             }, 10);
+            if (typeof lmsConfirmInFlight !== 'undefined' && lmsConfirmInFlight) {
+                return;
+            }
             resetLmsModal();
             // Lắng nghe sự kiện paste trên toàn document
             document.onpaste = handleLmsPaste;
@@ -28,7 +31,11 @@
             }
         }
 
-        function closeLmsModal() {
+        function closeLmsModal(options = {}) {
+            const force = Boolean(options && options.force);
+            if (!force && typeof lmsConfirmInFlight !== 'undefined' && lmsConfirmInFlight) {
+                return;
+            }
             document.getElementById('lmsModal').firstElementChild.classList.remove('scale-100');
             document.getElementById('lmsModal').firstElementChild.classList.add('scale-95');
             setTimeout(() => {
@@ -38,11 +45,16 @@
         }
 
         function resetLmsModal() {
+            if (typeof lmsConfirmInFlight !== 'undefined' && lmsConfirmInFlight) {
+                return;
+            }
             lmsBase64Image = null;
             lmsUploadId = null;
             lmsAnalysisJobId = null;
             lmsConfirmationToken = null;
             lmsPreviewPlan = null;
+            lmsSelectedClassesToTick = [];
+            lmsConfirmInFlight = false;
             document.getElementById('lmsFileInput').value = '';
             document.getElementById('lmsDropzoneText').classList.remove('hidden');
             document.getElementById('lmsImagePreview').classList.add('hidden');
@@ -50,17 +62,19 @@
             document.getElementById('lmsUploadStep').classList.remove('hidden');
             document.getElementById('lmsReviewStep').classList.add('hidden');
             document.getElementById('btnStartLms').classList.remove('hidden');
-            document.getElementById('btnStartLms').disabled = true;
-            document.getElementById('btnStartLms').textContent = 'Phân tích ảnh';
+            document.getElementById('btnStartLms').disabled = false;
+            document.getElementById('btnStartLms').textContent = 'Quét LMS & Lập kế hoạch';
             document.getElementById('btnBackLms').classList.add('hidden');
+            document.getElementById('btnBackLms').disabled = false;
             document.getElementById('btnConfirmLms').classList.add('hidden');
             document.getElementById('btnConfirmLms').disabled = true;
+            document.getElementById('btnConfirmLms').textContent = 'Xác nhận kế hoạch';
         }
 
         function setLmsAnalysisBusy(isBusy) {
             const button = document.getElementById('btnStartLms');
-            button.disabled = isBusy || !lmsBase64Image;
-            button.textContent = isBusy ? 'Đang phân tích...' : 'Phân tích ảnh';
+            button.disabled = isBusy;
+            button.textContent = isBusy ? 'Đang quét LMS & BCNB...' : 'Quét LMS & Lập kế hoạch';
         }
 
 
@@ -102,21 +116,24 @@
         }
 
         async function startLmsAnalysis() {
-            if (!lmsBase64Image) return;
             if (!canStartAnotherJob()) return;
             setLmsAnalysisBusy(true);
-            document.getElementById('status-text').innerText = "Đang phân tích và lập kế hoạch LMS...";
+            document.getElementById('status-text').innerText = "Đang quét trang LMS và lập kế hoạch BCNB...";
             document.getElementById('status-dot').className = "relative inline-flex rounded-full h-2.5 w-2.5 bg-purple-500 shadow-[0_0_8px_#a855f7]";
 
             try {
-                if (!lmsUploadId) {
-                    const upload = await createRuntimeUpload(lmsBase64Image, 'lms_analysis');
-                    lmsUploadId = upload.upload_id;
+                let requestPayload = {};
+                if (lmsBase64Image) {
+                    if (!lmsUploadId) {
+                        const upload = await createRuntimeUpload(lmsBase64Image, 'lms_analysis');
+                        lmsUploadId = upload.upload_id;
+                    }
+                    requestPayload = { upload_id: lmsUploadId };
                 }
                 const res = await fetch('/api/lms/analyze', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ upload_id: lmsUploadId })
+                    body: JSON.stringify(requestPayload)
                 });
                 const data = await res.json();
                 if (!res.ok || data.status !== 'success' || !data.job_id) {
@@ -126,38 +143,104 @@
             } catch (err) {
                 console.error(err);
                 setLmsAnalysisBusy(false);
-                alert("Không thể phân tích ảnh: " + err.message);
+                alert("Không thể quét LMS: " + err.message);
             }
         }
 
         async function confirmLmsTick() {
+            if (typeof lmsConfirmInFlight !== 'undefined' && lmsConfirmInFlight) return;
             if (!lmsAnalysisJobId || !lmsConfirmationToken || !lmsPreviewPlan) return;
             if (!canStartAnotherJob()) return;
-            const count = lmsPreviewPlan.classes_to_tick.length;
+            const selected = typeof getSelectedLmsTickClasses === 'function'
+                ? getSelectedLmsTickClasses()
+                : (Array.isArray(lmsPreviewPlan.classes_to_tick) ? lmsPreviewPlan.classes_to_tick : []);
+            if (!Array.isArray(selected) || selected.length === 0) {
+                alert('Hãy chọn ít nhất 1 lớp để thực hiện tick BCNB.');
+                return;
+            }
+            const count = selected.length;
             const action = lmsPreviewPlan.dry_run ? 'mô phỏng' : 'tick thật';
             if (!confirm(`Xác nhận ${action} ${count} lớp cho tuần ${lmsPreviewPlan.week}/${lmsPreviewPlan.year}?`)) return;
 
-            const button = document.getElementById('btnConfirmLms');
-            button.disabled = true;
-            button.textContent = 'Đang xác nhận...';
+            if (typeof setLmsConfirmBusy === 'function') {
+                setLmsConfirmBusy(true);
+            } else {
+                lmsConfirmInFlight = true;
+                const button = document.getElementById('btnConfirmLms');
+                button.disabled = true;
+                button.textContent = 'Đang xác nhận...';
+            }
             try {
                 const res = await fetch('/api/lms/confirm', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         analysis_job_id: lmsAnalysisJobId,
-                        confirmation_token: lmsConfirmationToken
+                        confirmation_token: lmsConfirmationToken,
+                        selected_classes_to_tick: selected,
                     })
                 });
                 const data = await res.json();
                 if (!res.ok || data.status !== 'success' || !data.job_id) {
-                    throw new Error(data.detail || data.message || 'Không xác nhận được kế hoạch.');
+                    const detail = data && data.detail;
+                    const errMessage = detail && typeof detail === 'object'
+                        ? (detail.message || detail.code)
+                        : (detail || (data && data.message) || 'Không xác nhận được kế hoạch.');
+                    throw new Error(errMessage);
+                }
+                if (typeof setLmsConfirmBusy === 'function') {
+                    setLmsConfirmBusy(false);
+                } else {
+                    lmsConfirmInFlight = false;
                 }
                 trackJob(data.job_id);
                 closeLmsModal();
             } catch (err) {
-                button.disabled = false;
-                button.textContent = 'Xác nhận kế hoạch';
+                if (typeof setLmsConfirmBusy === 'function') {
+                    setLmsConfirmBusy(false);
+                } else {
+                    lmsConfirmInFlight = false;
+                    const button = document.getElementById('btnConfirmLms');
+                    button.disabled = false;
+                    button.textContent = 'Xác nhận kế hoạch';
+                }
                 alert("Xác nhận thất bại: " + err.message + " Hãy phân tích lại ảnh.");
+            }
+        }
+
+        function buildLmsOverdueReminderText(plan) {
+            const missing = plan && Array.isArray(plan.missing_classes)
+                ? plan.missing_classes.map(code => String(code || '').trim()).filter(Boolean)
+                : [];
+            if (missing.length === 0) return '';
+            const overdueDetails = plan && plan.overdue_details && typeof plan.overdue_details === 'object'
+                ? plan.overdue_details
+                : {};
+            const periodLabel = plan && plan.week && plan.year
+                ? `Tuần ${plan.week}/${plan.year}`
+                : 'Tuần hiện tại';
+            return [
+                `📢 Danh sách lớp quá hạn nhận xét LMS (${periodLabel} - ${missing.length} lớp):`,
+                ...missing.map(code => {
+                    const detail = String(overdueDetails[code] || '').trim();
+                    return detail ? `- ${code} (${detail})` : `- ${code}`;
+                }),
+            ].join('\n');
+        }
+
+        async function copyLmsMissingClasses() {
+            const text = buildLmsOverdueReminderText(lmsPreviewPlan);
+            if (!text) {
+                alert('Không có lớp nào quá hạn nhận xét LMS để copy.');
+                return;
+            }
+            try {
+                await navigator.clipboard.writeText(text);
+                const count = lmsPreviewPlan && Array.isArray(lmsPreviewPlan.missing_classes)
+                    ? lmsPreviewPlan.missing_classes.map(c => String(c || '').trim()).filter(Boolean).length
+                    : 0;
+                alert(`Đã copy danh sách ${count} lớp quá hạn LMS!`);
+            } catch (err) {
+                alert('Không thể copy vào clipboard: ' + (err && err.message ? err.message : String(err)));
             }
         }

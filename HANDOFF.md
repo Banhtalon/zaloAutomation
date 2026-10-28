@@ -48,3 +48,11 @@ fixture riêng khi có thay đổi nhìn thấy được, không suy ra acceptan
 Owner xem [bắt đầu nhanh](OWNER_QUICKSTART.md). Lead vận hành công cụ và trình bày
 kết quả tiếng Việt; Owner quyết định sản phẩm, chi phí, tài khoản, dữ liệu thật,
 nghiệm thu và phát hành.
+
+
+## Cập nhật Flow 2026-10-22 (DEC-036 — Chuẩn Hàng Không)
+
+1. **Lead** trực tiếp code từng hạng mục trong `UPGRADE_PROGRESS.md`.
+2. **Test**: Chạy unit test mục tiêu + `node tests/check_template_js.js` + `.\CHECK_QUALITY.ps1 -Isolated`.
+3. **Review độc lập**: `"<prompt>" | codex exec -m gpt-6.1-sol -c model_reasoning_effort="xhigh" -s read-only -`.
+4. **Báo cáo**: Phong cách điện tín / chuẩn hàng không (ngắn gọn, tối ưu token tối đa).

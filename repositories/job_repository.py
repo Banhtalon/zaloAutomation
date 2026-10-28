@@ -392,6 +392,20 @@ class JobRepository:
             )
             await db.commit()
 
+    async def update_terminal_results(self, job_id: int, results: str) -> bool:
+        """Update the persisted results JSON of an already-terminal job."""
+        async with get_db_connection() as db:
+            cursor = await db.execute(
+                """
+                UPDATE scan_jobs
+                SET results = ?
+                WHERE id = ? AND status IN ('SUCCESS', 'PARTIAL_SUCCESS', 'FAILED', 'CANCELLED')
+                """,
+                (results, job_id),
+            )
+            await db.commit()
+            return cursor.rowcount == 1
+
     async def mark_running(self, job_id: int) -> bool:
         now = utc_now()
         async with get_db_connection() as db:

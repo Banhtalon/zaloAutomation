@@ -510,7 +510,44 @@ class FormSubmitterTests(unittest.IsolatedAsyncioTestCase):
             [("option", {"name": "Vũng Tàu - 205A Lê Hồng Phong", "exact": True})],
         )
 
+    async def test_submit_form_and_screenshot_error_logs_never_leak_student_name(self):
+        from unittest.mock import Mock
+        import googleform_autosubmit.form_submitter as fs_mod
+
+        secret_name = "StudentSecretName"
+        button = Mock()
+        button.first = button
+        button.filter.return_value = button
+        button.count = AsyncMock(return_value=1)
+        button.is_visible = AsyncMock(return_value=True)
+        button.scroll_into_view_if_needed = AsyncMock()
+        button.click = AsyncMock(
+            side_effect=RuntimeError(
+                f"Locator.click: Call log: <div>{secret_name}</div> intercepts pointer events"
+            )
+        )
+        page = Mock()
+        page.goto = AsyncMock()
+        page.locator.return_value = button
+        page.screenshot = AsyncMock(return_value=b"not-a-valid-png")
+        context = Mock()
+        context.new_page = AsyncMock(return_value=page)
+        context.close = AsyncMock()
+        browser = Mock()
+        browser.new_context = AsyncMock(return_value=context)
+
+        submitter = FormSubmitter({}, execution_mode="production")
+        with (
+            patch.object(submitter, "fill_field", new_callable=AsyncMock),
+            patch.object(submitter, "check_captcha", new_callable=AsyncMock),
+            patch.object(fs_mod.logger, "error") as mock_err,
+            patch.object(fs_mod.logger, "warning") as mock_warn,
+        ):
+            with self.assertRaises(RuntimeError):
+                await submitter.submit_form(secret_name, "VT-CODE", browser=browser)
+            for call in mock_err.call_args_list + mock_warn.call_args_list:
+                self.assertNotIn(secret_name, str(call))
+
 
 if __name__ == "__main__":
     unittest.main()
-

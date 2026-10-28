@@ -2986,6 +2986,299 @@ class LandingReadinessTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cm.exception.code, parallel_service.TARGET_SEARCH_CLEAR_ERROR)
         self.assertEqual(len(calls), 1)
 
+    async def test_prepare_frozen_scan_execution_enforces_selected_target_keys_subset(self):
+        t1 = {
+            "week": 32,
+            "year": 2026,
+            "class_code": "VT-JSB",
+            "lesson": "12",
+            "class_date": "07/08/2026",
+            "class_date_iso": "2026-08-07",
+            "group_name": "MindX - VT-JSB",
+            "person": "Teacher 1",
+        }
+        t2 = {
+            "week": 32,
+            "year": 2026,
+            "class_code": "VT-C4K-GI35",
+            "lesson": "2",
+            "class_date": "08/08/2026",
+            "class_date_iso": "2026-08-08",
+            "group_name": "MindX - VT-C4K-GI35",
+            "person": "Teacher 2",
+        }
+        job_repo = SimpleNamespace(
+            ensure_not_cancelled=AsyncMock(),
+            update_job=AsyncMock(),
+        )
+        scan_plan = {
+            "snapshot_id": 10,
+            "observed_at": "2026-08-14T01:00:00+00:00",
+            "expires_at": "2099-08-14T01:30:00+00:00",
+            "latest_week": {"week": 33, "year": 2026},
+            "required_week": {"week": 32, "year": 2026},
+            "selected_weeks": [{"week": 32, "year": 2026}, {"week": 33, "year": 2026}],
+            "targets": [t1, t2],
+            "deferred_targets": [],
+            "selective_rescan": True,
+            "selected_target_keys": [canonical_target_key(t2)],
+        }
+        prepared = await parallel_service.prepare_frozen_scan_execution(
+            job_id=77,
+            scan_plan=scan_plan,
+            scan_started_at=datetime(2026, 8, 14, 12, 0, tzinfo=BUSINESS_TIMEZONE),
+            runtime=None,
+            job_repo=job_repo,
+        )
+        self.assertIsNotNone(prepared)
+        filtered_plan, groups, reconciliation_only = prepared
+        self.assertFalse(reconciliation_only)
+        self.assertEqual(len(filtered_plan["targets"]), 1)
+        self.assertEqual(filtered_plan["targets"][0]["class_code"], "VT-C4K-GI35")
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(groups[0]["TenNhom"], "MindX - VT-C4K-GI35")
+
+    async def test_run_zalo_manual_approve_verifies_evidence_records_audit_and_updates_source_job(self):
+        import json
+        import services.zalo_bcnb_service as bcnb_service
+
+        source_job = {
+            "id": 900,
+            "job_type": "ZALO_SCAN",
+            "status": "PARTIAL_SUCCESS",
+            "results": {
+                "snapshot_id": 88,
+                "items": [
+                    {
+                        "group": "MindX - VT-C4K-GI35 T7",
+                        "person": "Teacher 2",
+                        "status": "❌ Chưa tìm thấy trong khoảng đã kiểm chứng",
+                        "evidence": {
+                            "images": {
+                                "latest": {
+                                    "path": "/api/evidence/900/gi35.png",
+                                    "evidence_status": "AVAILABLE",
+                                }
+                            }
+                        },
+                        "scan_target": {
+                            "week": 32,
+                            "year": 2026,
+                            "class_code": "VT-C4K-GI35",
+                            "lesson": "2",
+                            "class_date": "08/08/2026",
+                            "class_date_iso": "2026-08-08",
+                            "group_name": "MindX - VT-C4K-GI35 T7",
+                        },
+                    }
+                ],
+            },
+        }
+        updated_source_results = []
+        manual_job_updates = []
+        audit_actions = []
+
+        async def get_job(jid):
+            if jid == 900:
+                return dict(source_job)
+            return {"id": jid, "job_type": "ZALO_MANUAL_APPROVE", "status": "RUNNING"}
+
+        async def update_terminal_results(jid, res_str):
+            updated_source_results.append((jid, json.loads(res_str)))
+            source_job["results"] = json.loads(res_str)
+            return True
+
+        async def update_job(jid, **values):
+            manual_job_updates.append((jid, values))
+
+        job_repo = SimpleNamespace(
+            get_job=get_job,
+            update_terminal_results=update_terminal_results,
+            update_job=update_job,
+            ensure_not_cancelled=AsyncMock(),
+        )
+
+        async def record_intent(**kwargs):
+            audit_actions.append(kwargs)
+            return ({"id": 501, "outcome": "INTENT_RECORDED"}, True)
+
+        audit_repo = SimpleNamespace(
+            record_intent=record_intent,
+            complete_action=AsyncMock(),
+        )
+        evidence_repo = SimpleNamespace(
+            get_by_public_path=AsyncMock(return_value={"id": 10, "job_id": 900}),
+            verify=AsyncMock(
+                return_value={
+                    "status": "AVAILABLE",
+                    "reason": "verified",
+                    "sha256": "b" * 64,
+                    "size_bytes": 2048,
+                }
+            ),
+        )
+        fake_page = SimpleNamespace(goto=AsyncMock(), wait_for_load_state=AsyncMock())
+        fake_session = SimpleNamespace(
+            new_page=AsyncMock(return_value=fake_page),
+            close_page=AsyncMock(),
+        )
+
+        @asynccontextmanager
+        async def persistent_session():
+            yield fake_session
+
+        @asynccontextmanager
+        async def fake_exclusive_browser_job(*_args, **_kwargs):
+            yield
+
+        runtime = SimpleNamespace(
+            external=SimpleNamespace(
+                browser=SimpleNamespace(persistent_session=persistent_session)
+            ),
+            browser_lock=None,
+            profile_lock=None,
+        )
+        fake_checkbox = SimpleNamespace(
+            count=AsyncMock(return_value=1),
+            is_checked=AsyncMock(return_value=False),
+            check=AsyncMock(),
+        )
+        fake_cell = SimpleNamespace(
+            locator=lambda _sel: SimpleNamespace(first=fake_checkbox)
+        )
+        fake_schedule_rows = [
+            {
+                "gv": "Teacher 2",
+                "ma_lop": "VT-C4K-GI35",
+                "buoi_so": "2",
+                "ngay_hoc": "08/08/2026",
+                "ngay_hoc_iso": "2026-08-08",
+                "da_bao_cao": False,
+                "zalo_deadline": "09/08/2026",
+                "cells": [fake_cell],
+            }
+        ]
+
+        with (
+            patch.object(
+                bcnb_service,
+                "exclusive_browser_job",
+                fake_exclusive_browser_job,
+            ),
+            patch(
+                "services.zalo_discovery_service._login_bcnb_if_needed",
+                AsyncMock(),
+            ),
+            patch.object(
+                bcnb_service,
+                "_read_bcnb_schedule_rows",
+                AsyncMock(return_value=fake_schedule_rows),
+            ),
+            patch.object(
+                bcnb_service,
+                "resolve_report_columns",
+                AsyncMock(return_value=(0, 0, 0)),
+            ),
+            patch(
+                "services.bcnb_actions.EvidenceRepository",
+                return_value=evidence_repo,
+            ),
+            patch(
+                "services.bcnb_actions.dismiss_current_week_notice",
+                AsyncMock(),
+            ),
+            patch(
+                "services.bcnb_actions.verify_checkbox_persisted",
+                AsyncMock(return_value=True),
+            ),
+            patch.object(bcnb_service, "log_message"),
+            patch.object(bcnb_service.asyncio, "sleep", AsyncMock()),
+        ):
+            payload = {
+                "source_job_id": 900,
+                "target": {
+                    "group_name": "MindX - VT-C4K-GI35 T7",
+                    "class_code": "VT-C4K-GI35",
+                    "week": 32,
+                    "year": 2026,
+                    "lesson": "2",
+                    "class_date_iso": "2026-08-08",
+                },
+                "evidence_path": "/api/evidence/900/gi35.png",
+                "evidence_sha256": "b" * 64,
+                "approved_by": "operator-test",
+            }
+            # 1. Dry-run must use :dry-run: action_key and NOT mark source row submitted
+            await bcnb_service.run_zalo_manual_approve(
+                job_id=960,
+                execution_mode="dry-run",
+                payload=payload,
+                runtime=runtime,
+                job_repo=job_repo,
+                audit_repo=audit_repo,
+                evidence_repo=evidence_repo,
+            )
+            self.assertEqual(len(audit_actions), 1)
+            self.assertIn(":dry-run:", audit_actions[0]["action_key"])
+            dry_updated = updated_source_results[-1][1]["items"][0]
+            self.assertFalse(bool(dry_updated.get("submitted_for_bcnb")))
+            self.assertIn("❌", dry_updated["status"])
+            fake_checkbox.check.assert_not_awaited()
+
+            # 2. Subsequent production run uses :production: action_key, checks checkbox, and marks submitted
+            fake_checkbox.is_checked = AsyncMock(side_effect=[False, True])
+            await bcnb_service.run_zalo_manual_approve(
+                job_id=961,
+                execution_mode="production",
+                payload=payload,
+                runtime=runtime,
+                job_repo=job_repo,
+                audit_repo=audit_repo,
+                evidence_repo=evidence_repo,
+            )
+
+        self.assertEqual(len(audit_actions), 2)
+        self.assertIn(":production:", audit_actions[1]["action_key"])
+        self.assertEqual(audit_actions[1]["action_type"], "BCNB_MANUAL_APPROVE_TICK")
+        self.assertEqual(audit_actions[1]["evidence_sha256"], "B" * 64)
+        self.assertEqual(
+            audit_actions[1]["reason"]["approved_by"],
+            "operator-test",
+        )
+        fake_checkbox.check.assert_awaited_once()
+        updated_item = updated_source_results[-1][1]["items"][0]
+        self.assertEqual(updated_item["status"], "✅ Đã duyệt tay & Tích BCNB")
+        self.assertTrue(updated_item["submitted_for_bcnb"])
+        self.assertTrue(updated_item["manual_approved"])
+        self.assertEqual(manual_job_updates[-1][1]["status"], "SUCCESS")
+
+        # 3. Missing class_code on source item must be rejected
+        no_code_items = [
+            {
+                "group": "MindX - GI35",
+                "status": "❌ Chưa báo cáo",
+                "scan_target": {
+                    "week": 32,
+                    "year": 2026,
+                    "lesson": "2",
+                    "class_date_iso": "2026-08-08",
+                    "group_name": "MindX - GI35",
+                },
+            }
+        ]
+        self.assertEqual(
+            bcnb_service.find_manual_approve_target_matches(
+                no_code_items,
+                group_name="MindX - GI35",
+                week=32,
+                year=2026,
+                lesson="2",
+                class_date_iso="2026-08-08",
+                class_code="HN-C4K-GI35",
+            ),
+            [],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

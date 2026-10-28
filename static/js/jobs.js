@@ -85,6 +85,7 @@
 
         function renderZaloTargetProgress(payload) {
             const container = document.getElementById('zalo-target-progress');
+            const emptyHint = document.getElementById('specs-target-progress-empty');
             const review = document.getElementById('zalo-review-queue');
             const reviewItems = document.getElementById('zalo-review-queue-items');
             if (!container) return;
@@ -92,6 +93,7 @@
             if (!summary || !summary.total) {
                 container.classList.add('hidden');
                 container.textContent = '';
+                if (emptyHint) emptyHint.classList.remove('hidden');
                 if (review) review.classList.add('hidden');
                 if (reviewItems) reviewItems.replaceChildren();
                 return;
@@ -124,6 +126,7 @@
             ];
             container.textContent = reportLines.join(' · ');
             container.classList.remove('hidden');
+            if (emptyHint) emptyHint.classList.add('hidden');
 
             if (!review || !reviewItems) return;
             const queue = Array.isArray(payload.review_queue) ? payload.review_queue : [];
@@ -172,6 +175,8 @@
 
         function renderJobControls(job) {
             const meta = document.getElementById('job-meta');
+            const specsJobType = document.getElementById('specs-job-type');
+            const specsJobReason = document.getElementById('specs-job-reason');
             const cancelButton = document.getElementById('job-cancel-button');
             const retryButton = document.getElementById('job-retry-button');
             currentJobExecutionMode = job.execution_mode === 'production'
@@ -181,6 +186,13 @@
             currentJobType = job.job_type || null;
             if (typeof renderRuntimeMode === 'function') {
                 renderRuntimeMode(currentJobExecutionMode, currentJobType);
+            }
+            if (specsJobType) specsJobType.textContent = currentJobType || 'Chưa có';
+            if (specsJobReason) {
+                const reasonText = job.job_type === 'ZALO_SCAN'
+                    ? `${String(job.reason_code || 'UNKNOWN_FAIL_CLOSED')} · đã thử ${Number(job.attempted_target_count || 0)} target`
+                    : (job.reason_code || job.status || '—');
+                specsJobReason.textContent = reasonText;
             }
             const heartbeat = Number.isInteger(job.heartbeat_age_seconds)
                 ? ` · heartbeat ${job.heartbeat_age_seconds}s`
@@ -302,10 +314,205 @@
             }
         }
 
+        function resolveLmsMissingBcnbStatus(plan, code) {
+            const checkedList = plan && Array.isArray(plan.missing_but_checked_classes)
+                ? plan.missing_but_checked_classes
+                : [];
+            if (checkedList.includes(code)) {
+                return { label: 'BCNB: Đã tích ⚠️', tone: 'text-amber-300 border-amber-400/30 bg-amber-500/10' };
+            }
+            const unmatchedList = plan && Array.isArray(plan.unmatched_classes)
+                ? plan.unmatched_classes
+                : [];
+            if (unmatchedList.includes(code)) {
+                return { label: 'Ngoài BCNB tuần này', tone: 'text-gray-400 border-gray-600/40 bg-gray-800/60' };
+            }
+            return { label: 'BCNB: Chưa tích', tone: 'text-rose-200 border-rose-400/30 bg-rose-500/10' };
+        }
+
+        function renderLmsMissingClasses(plan) {
+            const container = document.getElementById('lmsMissingClasses');
+            if (!container) return;
+            container.replaceChildren();
+            const codes = plan && Array.isArray(plan.missing_classes) ? plan.missing_classes : [];
+            const overdueDetails = plan && plan.overdue_details && typeof plan.overdue_details === 'object'
+                ? plan.overdue_details
+                : {};
+            if (codes.length === 0) {
+                const line = document.createElement('div');
+                line.className = 'text-gray-500';
+                line.textContent = 'Không có';
+                container.appendChild(line);
+                return;
+            }
+            codes.forEach(rawCode => {
+                const code = String(rawCode || '').trim();
+                if (!code) return;
+                const detail = String(overdueDetails[code] || '').trim();
+                const bcnbStatus = resolveLmsMissingBcnbStatus(plan, code);
+                const row = document.createElement('div');
+                row.className = 'flex flex-wrap items-center justify-between gap-1.5 rounded-lg border border-rose-500/15 bg-black/20 px-2 py-1.5';
+
+                const codeSpan = document.createElement('span');
+                codeSpan.className = 'font-bold text-rose-200';
+                codeSpan.textContent = detail ? `${code} (${detail})` : code;
+                row.appendChild(codeSpan);
+
+                const statusSpan = document.createElement('span');
+                statusSpan.className = `px-1.5 py-0.5 text-[10px] rounded border ${bcnbStatus.tone}`;
+                statusSpan.textContent = bcnbStatus.label;
+                row.appendChild(statusSpan);
+
+                row.textContent = `${codeSpan.textContent} · ${statusSpan.textContent}`;
+                row.replaceChildren(codeSpan, statusSpan);
+                container.appendChild(row);
+            });
+        }
+
+        function getSelectedLmsTickClasses() {
+            const allowed = lmsPreviewPlan && Array.isArray(lmsPreviewPlan.classes_to_tick)
+                ? lmsPreviewPlan.classes_to_tick.map(c => String(c || '').trim()).filter(Boolean)
+                : [];
+            const selectedSet = new Set(
+                Array.isArray(lmsSelectedClassesToTick)
+                    ? lmsSelectedClassesToTick.map(c => String(c || '').trim()).filter(Boolean)
+                    : []
+            );
+            return allowed.filter(code => selectedSet.has(code));
+        }
+
+        function syncLmsConfirmButtonState() {
+            const allowed = lmsPreviewPlan && Array.isArray(lmsPreviewPlan.classes_to_tick)
+                ? lmsPreviewPlan.classes_to_tick.map(c => String(c || '').trim()).filter(Boolean)
+                : [];
+            const selected = getSelectedLmsTickClasses();
+            const isBusy = Boolean(typeof lmsConfirmInFlight !== 'undefined' && lmsConfirmInFlight);
+            const countEl = document.getElementById('lmsSelectedTickCount');
+            if (countEl) {
+                countEl.textContent = `${selected.length}/${allowed.length}`;
+            }
+            const toggleBtn = document.getElementById('btnToggleAllLmsTick');
+            if (toggleBtn) {
+                toggleBtn.disabled = isBusy || allowed.length === 0;
+                const allSelected = allowed.length > 0 && selected.length === allowed.length;
+                toggleBtn.textContent = allSelected ? 'Bỏ chọn hết' : 'Chọn tất cả';
+            }
+            const backBtn = document.getElementById('btnBackLms');
+            if (backBtn) {
+                backBtn.disabled = isBusy;
+            }
+            const confirmBtn = document.getElementById('btnConfirmLms');
+            if (confirmBtn) {
+                confirmBtn.disabled = isBusy || !(
+                    lmsPreviewPlan
+                    && lmsPreviewPlan.can_confirm
+                    && lmsConfirmationToken
+                    && selected.length > 0
+                );
+                confirmBtn.textContent = isBusy ? 'Đang xác nhận...' : 'Xác nhận kế hoạch';
+            }
+        }
+
+        function setLmsConfirmBusy(isBusy) {
+            lmsConfirmInFlight = Boolean(isBusy);
+            renderLmsTickClasses(lmsPreviewPlan);
+        }
+
+        function toggleLmsTickClass(classCode, checked) {
+            if (typeof lmsConfirmInFlight !== 'undefined' && lmsConfirmInFlight) return;
+            const normalized = String(classCode || '').trim();
+            if (!normalized) return;
+            const allowed = lmsPreviewPlan && Array.isArray(lmsPreviewPlan.classes_to_tick)
+                ? lmsPreviewPlan.classes_to_tick.map(c => String(c || '').trim()).filter(Boolean)
+                : [];
+            if (!allowed.includes(normalized)) return;
+            const current = new Set(getSelectedLmsTickClasses());
+            const shouldCheck = checked === undefined ? !current.has(normalized) : Boolean(checked);
+            if (shouldCheck) current.add(normalized);
+            else current.delete(normalized);
+            lmsSelectedClassesToTick = allowed.filter(code => current.has(code));
+            syncLmsConfirmButtonState();
+        }
+
+        function renderLmsTickClasses(plan) {
+            const container = document.getElementById('lmsTickClasses');
+            if (!container) return;
+            container.replaceChildren();
+            const codes = plan && Array.isArray(plan.classes_to_tick)
+                ? plan.classes_to_tick.map(c => String(c || '').trim()).filter(Boolean)
+                : [];
+            if (codes.length === 0) {
+                const line = document.createElement('div');
+                line.className = 'text-gray-500';
+                line.textContent = 'Không có';
+                container.appendChild(line);
+                syncLmsConfirmButtonState();
+                return;
+            }
+            const isBusy = Boolean(typeof lmsConfirmInFlight !== 'undefined' && lmsConfirmInFlight);
+            const selectedSet = new Set(getSelectedLmsTickClasses());
+            codes.forEach(code => {
+                const label = document.createElement('label');
+                label.className = 'flex items-center justify-between gap-2 rounded-lg border border-emerald-500/20 bg-black/20 px-2.5 py-1.5 cursor-pointer hover:bg-emerald-500/10 transition-colors';
+
+                const leftWrap = document.createElement('div');
+                leftWrap.className = 'flex items-center gap-2';
+
+                const checkbox = document.createElement('input');
+                checkbox.type = 'checkbox';
+                checkbox.value = code;
+                checkbox.checked = selectedSet.has(code);
+                checkbox.disabled = isBusy;
+                checkbox.className = 'rounded border-emerald-400/50 text-emerald-500 focus:ring-emerald-500';
+                checkbox.addEventListener('change', () => {
+                    if (typeof lmsConfirmInFlight !== 'undefined' && lmsConfirmInFlight) {
+                        checkbox.checked = selectedSet.has(code);
+                        return;
+                    }
+                    toggleLmsTickClass(code, checkbox.checked);
+                });
+
+                const codeSpan = document.createElement('span');
+                codeSpan.className = 'font-bold text-emerald-200';
+                codeSpan.textContent = code;
+
+                leftWrap.appendChild(checkbox);
+                leftWrap.appendChild(codeSpan);
+
+                const statusSpan = document.createElement('span');
+                statusSpan.className = 'px-1.5 py-0.5 text-[10px] rounded border border-emerald-400/30 bg-emerald-500/10 text-emerald-200';
+                statusSpan.textContent = 'BCNB: Chưa tích';
+
+                label.textContent = `${code} · ${statusSpan.textContent}`;
+                label.replaceChildren(leftWrap, statusSpan);
+                container.appendChild(label);
+            });
+            syncLmsConfirmButtonState();
+        }
+
+        function toggleAllLmsTickSelection() {
+            if (typeof lmsConfirmInFlight !== 'undefined' && lmsConfirmInFlight) return;
+            const allowed = lmsPreviewPlan && Array.isArray(lmsPreviewPlan.classes_to_tick)
+                ? lmsPreviewPlan.classes_to_tick.map(c => String(c || '').trim()).filter(Boolean)
+                : [];
+            if (allowed.length === 0) return;
+            const selected = getSelectedLmsTickClasses();
+            if (selected.length === allowed.length) {
+                lmsSelectedClassesToTick = [];
+            } else {
+                lmsSelectedClassesToTick = [...allowed];
+            }
+            renderLmsTickClasses(lmsPreviewPlan);
+        }
+
         function showLmsReview(job, plan) {
+            lmsConfirmInFlight = false;
             lmsAnalysisJobId = job.id;
             lmsConfirmationToken = plan.confirmation_token || null;
             lmsPreviewPlan = plan;
+            lmsSelectedClassesToTick = Array.isArray(plan.classes_to_tick)
+                ? plan.classes_to_tick.map(c => String(c || '').trim()).filter(Boolean)
+                : [];
             const modal = document.getElementById('lmsModal');
             modal.classList.remove('hidden');
             modal.firstElementChild.classList.remove('scale-95');
@@ -317,17 +524,14 @@
             document.getElementById('btnConfirmLms').classList.remove('hidden');
             document.getElementById('lmsReviewWeek').textContent = `${plan.week}/${plan.year}`;
             document.getElementById('lmsDryRunNotice').classList.toggle('hidden', !plan.dry_run);
-            renderCodeList('lmsMissingClasses', plan.missing_classes);
-            renderCodeList('lmsTickClasses', plan.classes_to_tick);
+            renderLmsMissingClasses(plan);
+            renderLmsTickClasses(plan);
 
             const warning = document.getElementById('lmsReviewWarning');
             const issues = Array.isArray(plan.blocking_issues) ? plan.blocking_issues : [];
             warning.textContent = issues.join(' • ');
             warning.classList.toggle('hidden', issues.length === 0);
-            document.getElementById('btnConfirmLms').disabled = !(
-                plan.can_confirm && lmsConfirmationToken &&
-                Array.isArray(plan.classes_to_tick) && plan.classes_to_tick.length > 0
-            );
+            syncLmsConfirmButtonState();
         }
 
         function formatGoogleFormTerminalMessage(job, payload) {
@@ -355,9 +559,22 @@
                 handledTerminalJobIds.delete(handledTerminalJobIds.values().next().value);
             }
 
-            if (job.job_type === 'GOOGLEFORM_OCR') {
-                setOcrBusy(false);
-                if (job.status === 'SUCCESS' && payload && Array.isArray(payload.students)) {
+            if (job.job_type === 'GOOGLEFORM_OCR' || job.job_type === 'GOOGLEFORM_LMS_STUDENTS') {
+                if (job.job_type === 'GOOGLEFORM_OCR') {
+                    setOcrBusy(false);
+                } else if (typeof setLmsStudentsFetchBusy === 'function') {
+                    setLmsStudentsFetchBusy(false);
+                }
+                const defaultPrefix = job.job_type === 'GOOGLEFORM_LMS_STUDENTS'
+                    ? 'Lấy danh sách học viên từ LMS'
+                    : 'OCR';
+                if (
+                    job.status === 'SUCCESS'
+                    && payload
+                    && Array.isArray(payload.students)
+                    && payload.students.length > 0
+                    && payload.students.length <= 200
+                ) {
                     ocrStudents = payload.students.map(item => ({
                         name: String(item.name || ''),
                         class_code: String(item.class_code || '')
@@ -371,8 +588,21 @@
                     }
                     renderOCRTable();
                 } else {
+                    ocrStudents = [];
+                    const submitBtn = document.getElementById('btnSubmitGoogleForm');
+                    if (submitBtn) submitBtn.disabled = true;
+                    const limitExceeded = Boolean(
+                        job.status === 'SUCCESS'
+                        && payload
+                        && Array.isArray(payload.students)
+                        && payload.students.length > 200
+                    );
                     setOcrMessage(
-                        job.status === 'CANCELLED' ? 'OCR đã được hủy.' : (job.message || 'OCR thất bại.'),
+                        limitExceeded
+                            ? 'Số lượng học viên vượt quá giới hạn an toàn (tối đa 200 học viên).'
+                            : (job.status === 'CANCELLED'
+                                ? `${defaultPrefix} đã được hủy.`
+                                : (job.message || `${defaultPrefix} thất bại.`)),
                         job.status !== 'CANCELLED'
                     );
                 }
@@ -393,6 +623,14 @@
                 }
             } else if (job.job_type === 'LMS_AUTOMATION') {
                 alert(job.message || job.status);
+            } else if (job.job_type === 'ZALO_MANUAL_APPROVE') {
+                if (job.status !== 'SUCCESS') {
+                    alert(
+                        job.status === 'CANCELLED'
+                            ? 'Duyệt tay BCNB đã được hủy.'
+                            : (job.message || 'Duyệt tay BCNB thất bại và đã dừng an toàn.')
+                    );
+                }
             } else if (job.job_type === 'GOOGLEFORM_SUBMIT') {
                 if (typeof clearGoogleFormIdempotencyState === 'function') {
                     clearGoogleFormIdempotencyState();
@@ -449,10 +687,7 @@
                         : '';
                     const pulseDot = document.getElementById('pulse-dot');
                     const statusDot = document.getElementById('status-dot');
-                    const zaloProgressMessage = job.job_type === 'ZALO_SCAN'
-                        ? ` · ${String(job.reason_code || 'UNKNOWN_FAIL_CLOSED')} · đã thử ${Number(job.attempted_target_count || 0)} target`
-                        : '';
-                    statusText.innerText = `${job.message || job.status}${queueMessage}${zaloProgressMessage}`;
+                    statusText.innerText = `${job.message || job.status}${queueMessage}`;
                     if (isTerminal) {
                         pulseDot.classList.add('hidden');
                         const isError = job.status === 'FAILED' || job.status === 'CANCELLED';
@@ -464,7 +699,33 @@
                     }
 
                     if (job.job_type === 'ZALO_SCAN') {
-                        renderZaloResults(zaloResultItems(payload));
+                        const incomingItems = zaloResultItems(payload).map(item => (
+                            item && typeof item === 'object'
+                                && (!Number.isInteger(item.source_job_id) || item.source_job_id <= 0)
+                                ? { ...item, source_job_id: job.id }
+                                : item
+                        ));
+                        const payloadIsSelective = Boolean(payload && payload.selective_rescan);
+                        if (incomingItems.length > 0 && !payloadIsSelective) {
+                            clearSelectiveScanBaseline();
+                        }
+                        const isSelective = payloadIsSelective || hasActiveSelectiveScanBaseline();
+                        const mergedItems = mergeSelectiveZaloResults(incomingItems, isSelective, payload);
+                        const verifiedSnapshotId = (payload && payload.snapshot_id != null)
+                            ? payload.snapshot_id
+                            : (isSelective && hasActiveSelectiveScanBaseline() ? selectiveBaselineSnapshotId : null);
+                        renderZaloResults(mergedItems, false, {
+                            snapshotId: verifiedSnapshotId,
+                            payload,
+                            sourceJobId: job.id,
+                        });
+                    } else if (
+                        job.job_type === 'ZALO_MANUAL_APPROVE'
+                        && job.status === 'SUCCESS'
+                        && payload
+                        && payload.kind === 'zalo_manual_approve'
+                    ) {
+                        applyManualApprovePayload(payload);
                     }
                     if (job.job_type === 'ZALO_SCAN') {
                         await refreshZaloTargetProgress(job);
@@ -494,8 +755,29 @@
             return { week, year };
         }
 
+        function isHistoricalWeekViewActive() {
+            return Boolean(
+                typeof weeklyHistoryView === 'object'
+                && weeklyHistoryView
+                && Number.isInteger(Number(weeklyHistoryView.week))
+                && Number.isInteger(Number(weeklyHistoryView.year))
+                && Number(weeklyHistoryView.week) >= 1
+                && Number(weeklyHistoryView.week) <= 53
+            );
+        }
+
+        function effectiveDashboardPeriod() {
+            if (isHistoricalWeekViewActive()) {
+                return {
+                    week: Number(weeklyHistoryView.week),
+                    year: Number(weeklyHistoryView.year),
+                };
+            }
+            return requiredDashboardPeriod();
+        }
+
         function dashboardResultsForRequiredWeek(resultsArray) {
-            const period = requiredDashboardPeriod();
+            const period = effectiveDashboardPeriod();
             if (!period) return [];
             return resultsArray.filter(result => {
                 const target = result && result.scan_target;
@@ -505,10 +787,109 @@
             });
         }
 
-        function renderZaloResults(resultsArray, force = false) {
+        function renderSpecsEvidenceTable(resultsArray) {
+            const tbody = document.getElementById('specs-evidence-table-body');
+            if (!tbody) return;
+            tbody.replaceChildren();
+            if (!Array.isArray(resultsArray) || resultsArray.length === 0) {
+                const tr = document.createElement('tr');
+                const td = document.createElement('td');
+                td.colSpan = 6;
+                td.className = 'px-6 py-10 text-center text-slate-400 border-none';
+                td.textContent = 'Chưa có thông số kiểm chứng tin nhắn. Dữ liệu sẽ hiển thị khi có kết quả quét Zalo.';
+                tr.appendChild(td);
+                tbody.appendChild(tr);
+                return;
+            }
+            resultsArray.forEach(r => {
+                const tr = document.createElement('tr');
+                tr.className = 'result-row transition-colors';
+                const evidence = r.evidence && typeof r.evidence === 'object' ? r.evidence : null;
+                const target = r.scan_target && typeof r.scan_target === 'object' ? r.scan_target : null;
+
+                const groupTd = document.createElement('td');
+                groupTd.className = 'px-5 py-3 font-semibold text-slate-700';
+                groupTd.textContent = String(r.group || '');
+                if (evidence && evidence.actual_group_name && evidence.actual_group_name !== r.group) {
+                    const actualDiv = document.createElement('div');
+                    actualDiv.className = 'text-[11px] font-normal text-slate-500 mt-0.5';
+                    actualDiv.textContent = `Thực tế: ${evidence.actual_group_name}`;
+                    groupTd.appendChild(actualDiv);
+                }
+
+                const targetTd = document.createElement('td');
+                targetTd.className = 'px-5 py-3 text-slate-600 font-mono';
+                if (target && target.week != null && target.year != null) {
+                    const classDate = target.class_date || target.class_date_iso || '?';
+                    const lesson = target.lesson != null ? target.lesson : '?';
+                    targetTd.textContent = `W${target.week}/${target.year} · Buổi ${lesson} · ${classDate}`;
+                } else {
+                    targetTd.textContent = '—';
+                }
+
+                const countTd = document.createElement('td');
+                countTd.className = 'px-5 py-3 font-mono text-slate-600';
+                countTd.textContent = evidence ? `${evidence.messages_checked || 0} tin` : '—';
+
+                const rangeTd = document.createElement('td');
+                rangeTd.className = 'px-5 py-3 font-mono text-slate-600';
+                rangeTd.textContent = evidence
+                    ? `${evidence.oldest_message_date || '?'} → ${evidence.newest_message_date || '?'}`
+                    : '—';
+
+                const windowTd = document.createElement('td');
+                windowTd.className = 'px-5 py-3 font-mono text-slate-600';
+                windowTd.textContent = evidence
+                    ? `${evidence.required_window_start || '?'} → ${evidence.required_window_end || '?'}`
+                    : '—';
+
+                const stateTd = document.createElement('td');
+                stateTd.className = 'px-5 py-3 font-mono text-slate-600';
+                if (evidence) {
+                    const states = Array.isArray(evidence.evidence_statuses)
+                        ? evidence.evidence_statuses.join(', ')
+                        : 'UNKNOWN';
+                    stateTd.textContent = states;
+                    if (evidence.scanned_at) {
+                        const timeDiv = document.createElement('div');
+                        timeDiv.className = 'text-[10px] text-slate-400 mt-0.5';
+                        timeDiv.textContent = `Quét: ${evidence.scanned_at}`;
+                        stateTd.appendChild(timeDiv);
+                    }
+                } else {
+                    stateTd.textContent = '—';
+                }
+
+                tr.append(groupTd, targetTd, countTd, rangeTd, windowTd, stateTd);
+                tbody.appendChild(tr);
+            });
+        }
+
+        function renderZaloResults(resultsArray, force = false, options = {}) {
+            const isHistoricalOption = Boolean(options && options.isHistoricalView);
+            const preserveOrigin = Boolean(
+                (options && options.preserveOrigin) || resultsArray === latestZaloResults
+            );
+            if (!isHistoricalOption && !preserveOrigin) {
+                if (typeof weeklyHistoryRequestSeq === 'number') {
+                    weeklyHistoryRequestSeq += 1;
+                }
+                if (typeof weeklyHistoryView !== 'undefined' && weeklyHistoryView !== null) {
+                    weeklyHistoryView = null;
+                    if (typeof updateWeeklyHistoryStatusBadge === 'function') {
+                        updateWeeklyHistoryStatusBadge();
+                    }
+                    if (typeof applyZaloRunState === 'function') {
+                        applyZaloRunState();
+                    }
+                }
+            }
             if (!Array.isArray(resultsArray) || resultsArray.length === 0) {
                 lastResultsSignature = '[]';
                 latestZaloResults = [];
+                latestZaloResultsPeriodKey = '';
+                latestZaloResultsSnapshotId = null;
+                latestZaloResultsJobId = null;
                 ['count-total', 'count-success', 'count-exempt', 'count-failed']
                     .forEach(id => { document.getElementById(id).innerText = '0'; });
                 const tbody = document.getElementById('results-table');
@@ -517,16 +898,66 @@
                 const cell = document.createElement('td');
                 cell.colSpan = 5;
                 cell.className = 'px-6 py-10 text-center text-slate-500';
-                cell.textContent = 'Job quét hiện tại chưa có kết quả target.';
+                const histPeriod = isHistoricalWeekViewActive() ? effectiveDashboardPeriod() : null;
+                cell.textContent = histPeriod
+                    ? `Không có kết quả quét Zalo cho tuần lịch sử W${histPeriod.week}/${histPeriod.year}.`
+                    : 'Job quét hiện tại chưa có kết quả target.';
                 row.appendChild(cell);
                 tbody.appendChild(row);
+                renderSpecsEvidenceTable([]);
                 return;
             }
+            if (options && options.sourceJobId !== undefined) {
+                latestZaloResultsJobId = (Number.isInteger(options.sourceJobId) && options.sourceJobId > 0)
+                    ? options.sourceJobId
+                    : null;
+            }
+            const resolvedSnapshotId = (options && options.snapshotId !== undefined)
+                ? options.snapshotId
+                : (
+                    !isHistoricalOption && zaloScanPlan && zaloScanPlan.snapshot_id
+                        ? zaloScanPlan.snapshot_id
+                        : null
+                );
+            const resolvedPeriodKey = (options && options.periodKey !== undefined)
+                ? normalizePeriodKey(options.periodKey)
+                : normalizePeriodKey(
+                    resolveResultsPeriodKey(
+                        resultsArray,
+                        options && options.payload ? options.payload : null,
+                        resolvedSnapshotId,
+                    )
+                );
             const signature = JSON.stringify(resultsArray);
-            if (!force && signature === lastResultsSignature) return;
+            if (!force && signature === lastResultsSignature) {
+                if (!preserveOrigin) {
+                    latestZaloResultsSnapshotId = resolvedSnapshotId;
+                    latestZaloResultsPeriodKey = resolvedPeriodKey;
+                } else if (
+                    !latestZaloResultsPeriodKey
+                    && latestZaloResultsSnapshotId != null
+                    && zaloScanPlan
+                    && zaloScanPlan.snapshot_id === latestZaloResultsSnapshotId
+                ) {
+                    latestZaloResultsPeriodKey = currentRequiredPeriodKey();
+                }
+                return;
+            }
             lastResultsSignature = signature;
             latestZaloResults = resultsArray;
+            if (!preserveOrigin) {
+                latestZaloResultsSnapshotId = resolvedSnapshotId;
+                latestZaloResultsPeriodKey = resolvedPeriodKey;
+            } else if (
+                !latestZaloResultsPeriodKey
+                && latestZaloResultsSnapshotId != null
+                && zaloScanPlan
+                && zaloScanPlan.snapshot_id === latestZaloResultsSnapshotId
+            ) {
+                latestZaloResultsPeriodKey = currentRequiredPeriodKey();
+            }
             const dashboardResults = dashboardResultsForRequiredWeek(resultsArray);
+            renderSpecsEvidenceTable(dashboardResults);
             let total = dashboardResults.length, success = 0, exempt = 0, failed = 0;
             dashboardResults.forEach(r => {
                 const status = String(r.status || '');
@@ -554,7 +985,7 @@
                 const values = [r.group, r.person, r.timestamp || 'Hôm nay', r.status];
                 values.forEach((value, valueIndex) => {
                     const td = document.createElement('td');
-                    td.className = 'px-6 py-4';
+                    td.className = 'px-6 py-3.5';
                     if (valueIndex === 3) {
                         const status = String(value || '');
                         td.classList.add('status-cell');
@@ -572,6 +1003,12 @@
                             detail.textContent = String(r.status_detail);
                             td.appendChild(detail);
                         }
+                        if (r.lms_status && r.lms_status !== 'Chưa quét LMS') {
+                            const lmsDetail = document.createElement('div');
+                            lmsDetail.className = 'status-detail';
+                            lmsDetail.textContent = `LMS: ${r.lms_status}`;
+                            td.appendChild(lmsDetail);
+                        }
                     } else if (valueIndex === 0) {
                         td.textContent = String(value || '');
                         const target = r.scan_target && typeof r.scan_target === 'object'
@@ -582,7 +1019,7 @@
                             targetMeta.className = 'result-target-meta';
                             const classDate = target.class_date || target.class_date_iso || '?';
                             const lesson = target.lesson != null ? target.lesson : '?';
-                            targetMeta.textContent = `Target BCNB · W${target.week}/${target.year} · ${classDate} · Buổi ${lesson}`;
+                            targetMeta.textContent = `W${target.week}/${target.year} · Buổi ${lesson} · ${classDate}`;
                             td.appendChild(targetMeta);
                         }
                     } else {
@@ -591,7 +1028,7 @@
                     tr.appendChild(td);
                 });
                 const action = document.createElement('td');
-                action.className = 'px-6 py-4 text-center';
+                action.className = 'px-6 py-3.5 text-center';
                 const actions = document.createElement('div');
                 actions.className = 'evidence-actions';
                 const evidence = r.evidence && typeof r.evidence === 'object' ? r.evidence : null;
@@ -602,7 +1039,6 @@
                     ['oldest', 'Mốc ngày cũ nhất'],
                     ['oldest_message', 'Tin ở mốc cũ nhất'],
                 ];
-                imageOptions[2][1] = 'Mốc ngày cũ nhất (separator)';
                 let imageCount = 0;
                 imageOptions.forEach(([key, label]) => {
                     const item = evidenceImages[key];
@@ -642,20 +1078,29 @@
                     unavailable.disabled = true;
                     actions.appendChild(unavailable);
                 }
-                if (evidence) {
-                    const meta = document.createElement('div');
-                    meta.className = 'evidence-meta';
-                    const oldest = evidence.oldest_message_date || '?';
-                    const newest = evidence.newest_message_date || '?';
-                    const actualGroup = evidence.actual_group_name || 'Chưa xác minh';
-                    meta.title = `Nhóm Zalo: ${actualGroup}\nQuét lúc: ${evidence.scanned_at || '?'}`;
-                    const requiredStart = evidence.required_window_start || '?';
-                    const requiredEnd = evidence.required_window_end || '?';
-                    const states = Array.isArray(evidence.evidence_statuses)
-                        ? evidence.evidence_statuses.join(', ')
-                        : 'UNKNOWN';
-                    meta.textContent = `${evidence.messages_checked || 0} tin · ${oldest} → ${newest} · Cửa sổ ${requiredStart} → ${requiredEnd} · Evidence: ${states}`;
-                    actions.appendChild(meta);
+                const rowStatus = String(r.status || '');
+                const rowTargetKey = canonicalTargetKey(r.scan_target);
+                if (rowTargetKey && (rowStatus.includes('❌') || rowStatus.includes('⚠️'))) {
+                    const availableEvidencePath = getAvailableRowEvidencePath(r);
+                    const rowSourceJobId = resolveResultRowSourceJobId(r);
+                    if (availableEvidencePath && rowSourceJobId) {
+                        const approveBtn = document.createElement('button');
+                        approveBtn.type = 'button';
+                        approveBtn.className = 'table-link';
+                        approveBtn.textContent = '✅ Duyệt & Tích';
+                        approveBtn.title = `Duyệt tay và tích BCNB cho lớp ${r.group || ''}`;
+                        approveBtn.addEventListener('click', () => manualApproveZaloTarget(r, availableEvidencePath, rowSourceJobId));
+                        actions.appendChild(approveBtn);
+                    }
+                    if (!isHistoricalWeekViewActive()) {
+                        const rescanBtn = document.createElement('button');
+                        rescanBtn.type = 'button';
+                        rescanBtn.className = 'table-link';
+                        rescanBtn.textContent = 'Quét lại';
+                        rescanBtn.title = `Quét lại riêng lớp ${r.group || ''}`;
+                        rescanBtn.addEventListener('click', () => startScan([rowTargetKey]));
+                        actions.appendChild(rescanBtn);
+                    }
                 }
                 action.appendChild(actions);
                 tr.appendChild(action);
@@ -666,7 +1111,7 @@
                 const td = document.createElement('td');
                 td.colSpan = 5;
                 td.className = 'px-6 py-8 text-center text-gray-500';
-                const period = requiredDashboardPeriod();
+                const period = effectiveDashboardPeriod();
                 td.textContent = period
                     ? `Không có kết quả cho tuần cần báo cáo W${period.week}/${period.year}`
                     : 'Chưa có tuần cần báo cáo để hiển thị';
@@ -686,11 +1131,1063 @@
                 btn.classList.remove('bg-rose-500/20', 'text-rose-300', 'border-rose-500/40');
                 btn.innerHTML = '<i class="fa-solid fa-filter mr-2"></i> Cần xem lại';
             }
-            renderZaloResults(latestZaloResults, true);
+            renderZaloResults(latestZaloResults, true, {
+                preserveOrigin: true,
+                isHistoricalView: isHistoricalWeekViewActive(),
+            });
+        }
+
+        function buildZaloTeacherReminderText(resultsArray) {
+            const period = effectiveDashboardPeriod();
+            if (!period) {
+                return { text: '', itemCount: 0, teacherCount: 0, totalCount: 0, missingPeriod: true };
+            }
+            const sourceRows = dashboardResultsForRequiredWeek(Array.isArray(resultsArray) ? resultsArray : []);
+            const unreported = sourceRows.filter(r => {
+                const status = String((r && r.status) || '');
+                return status.includes('❌') || status.includes('⚠️');
+            });
+            if (unreported.length === 0) {
+                return { text: '', itemCount: 0, teacherCount: 0, totalCount: sourceRows.length, missingPeriod: false };
+            }
+            const byTeacher = new Map();
+            unreported.forEach(r => {
+                const teacher = String((r && r.person) || '').trim() || 'Chưa phân công';
+                const groupName = String((r && r.group) || '').trim() || 'Không rõ nhóm';
+                const target = r && r.scan_target && typeof r.scan_target === 'object' ? r.scan_target : null;
+                const lesson = target && target.lesson != null && String(target.lesson).trim() !== ''
+                    ? `Buổi ${String(target.lesson).trim()}`
+                    : '';
+                const classDate = target && (target.class_date || target.class_date_iso)
+                    ? String(target.class_date || target.class_date_iso).trim()
+                    : '';
+                const metaParts = [lesson, classDate].filter(Boolean);
+                const itemLabel = metaParts.length ? `${groupName} (${metaParts.join(' - ')})` : groupName;
+                if (!byTeacher.has(teacher)) byTeacher.set(teacher, []);
+                byTeacher.get(teacher).push(itemLabel);
+            });
+            const periodLabel = `Tuần ${period.week}/${period.year}`;
+            const lines = [
+                `📢 Nhắc báo cáo Zalo sau buổi học (${periodLabel} - ${unreported.length} lớp):`
+            ];
+            byTeacher.forEach((items, teacher) => {
+                lines.push(`- GV ${teacher}: ${items.join(', ')}`);
+            });
+            return {
+                text: lines.join('\n'),
+                itemCount: unreported.length,
+                teacherCount: byTeacher.size,
+                totalCount: sourceRows.length,
+                missingPeriod: false,
+            };
+        }
+
+        async function copyZaloTeacherReminders() {
+            const summary = buildZaloTeacherReminderText(latestZaloResults);
+            if (summary.missingPeriod) {
+                alert('Chưa có tuần cần báo cáo hợp lệ để tổng hợp.');
+                return;
+            }
+            if (summary.totalCount === 0) {
+                alert('Chưa có dữ liệu kết quả quét Zalo để tổng hợp.');
+                return;
+            }
+            if (summary.itemCount === 0 || !summary.text) {
+                alert('Tất cả các lớp trong tuần kiểm tra đã hoàn thành hoặc được miễn báo cáo!');
+                return;
+            }
+            try {
+                await navigator.clipboard.writeText(summary.text);
+                alert(`Đã copy danh sách nhắc giáo viên (${summary.itemCount} lớp / ${summary.teacherCount} giáo viên)!`);
+            } catch (err) {
+                alert('Không thể copy vào clipboard: ' + (err && err.message ? err.message : String(err)));
+            }
+        }
+
+        let latestZaloResultsPeriodKey = '';
+        let latestZaloResultsSnapshotId = null;
+        let latestZaloResultsJobId = null;
+        let selectiveBaselineResults = [];
+        let selectiveBaselinePeriodKey = '';
+        let selectiveBaselineSnapshotId = null;
+
+        function getAvailableRowEvidencePaths(r) {
+            if (!r || typeof r !== 'object') return [];
+            const evidence = r.evidence && typeof r.evidence === 'object' ? r.evidence : null;
+            const evidenceImages = evidence && evidence.images && typeof evidence.images === 'object'
+                ? evidence.images
+                : {};
+            const orderedKeys = ['report', 'latest', 'oldest', 'oldest_message'];
+            const paths = [];
+            orderedKeys.forEach(key => {
+                const item = evidenceImages[key];
+                if (!item || typeof item !== 'object') return;
+                const path = String(item.path || '').trim();
+                const lifecycle = String(item.evidence_status || item.status || '');
+                if (path && lifecycle === 'AVAILABLE' && !paths.includes(path)) {
+                    paths.push(path);
+                }
+            });
+            return paths;
+        }
+
+        function getAvailableRowEvidencePath(r) {
+            const paths = getAvailableRowEvidencePaths(r);
+            return paths.length > 0 ? paths[0] : '';
+        }
+
+        function resolveResultRowSourceJobId(r) {
+            if (r && typeof r === 'object' && Number.isInteger(r.source_job_id) && r.source_job_id > 0) {
+                return r.source_job_id;
+            }
+            const candidatePaths = [...getAvailableRowEvidencePaths(r)];
+            if (r && typeof r === 'object' && r.screenshot_path) {
+                candidatePaths.push(String(r.screenshot_path).trim());
+            }
+            for (const path of candidatePaths) {
+                const apiMatch = path.match(/^\/api\/evidence\/(\d+)\//);
+                if (apiMatch) {
+                    const parsed = Number(apiMatch[1]);
+                    if (Number.isInteger(parsed) && parsed > 0) return parsed;
+                }
+                const legacyMatch = path.match(/^\/static\/screenshots\/job-(\d+)\//);
+                if (legacyMatch) {
+                    const parsed = Number(legacyMatch[1]);
+                    if (Number.isInteger(parsed) && parsed > 0) return parsed;
+                }
+            }
+            if (Number.isInteger(latestZaloResultsJobId) && latestZaloResultsJobId > 0) {
+                return latestZaloResultsJobId;
+            }
+            if (currentJobType === 'ZALO_SCAN' && Number.isInteger(currentJobId) && currentJobId > 0) {
+                return currentJobId;
+            }
+            return null;
+        }
+
+        async function manualApproveZaloTarget(rowOrKey, evidencePath = '', explicitJobId = null) {
+            if (!canStartAnotherJob()) return;
+            const row = typeof rowOrKey === 'string'
+                ? (Array.isArray(latestZaloResults) ? latestZaloResults : []).find(
+                    item => canonicalTargetKey(item && item.scan_target) === rowOrKey
+                )
+                : rowOrKey;
+            if (!row || typeof row !== 'object') {
+                alert('Không tìm thấy dòng kết quả hợp lệ để duyệt.');
+                return;
+            }
+            const status = String(row.status || '');
+            if (!(status.includes('❌') || status.includes('⚠️'))) {
+                alert('Chỉ có thể duyệt tay các lớp đang ở trạng thái cần xem lại hoặc chưa báo cáo.');
+                return;
+            }
+            const target = row.scan_target && typeof row.scan_target === 'object' ? row.scan_target : null;
+            const targetKey = canonicalTargetKey(target);
+            if (!target || !targetKey) {
+                alert('Dòng kết quả thiếu thông tin định danh buổi học BCNB hợp lệ.');
+                return;
+            }
+            const availablePaths = getAvailableRowEvidencePaths(row);
+            const candidatePath = String(evidencePath || (availablePaths[0] || '')).trim();
+            if (!candidatePath || !availablePaths.includes(candidatePath)) {
+                alert('Lớp này chưa có ảnh bằng chứng AVAILABLE hợp lệ để duyệt tay.');
+                return;
+            }
+            const resolvedJobId = Number.isInteger(explicitJobId) && explicitJobId > 0
+                ? explicitJobId
+                : resolveResultRowSourceJobId(row);
+            if (!Number.isInteger(resolvedJobId) || resolvedJobId <= 0) {
+                alert('Không xác định được mã job gốc của bằng chứng; hãy chạy quét lại.');
+                return;
+            }
+            if (typeof window !== 'undefined' && typeof window.confirm === 'function') {
+                const confirmed = window.confirm(
+                    `Xác nhận duyệt tay báo cáo Zalo và tích BCNB cho lớp ${row.group || target.class_code} `
+                    + `(W${target.week}/${target.year} · Buổi ${target.lesson} · ${target.class_date || target.class_date_iso})?`
+                );
+                if (!confirmed) return;
+            }
+            const requestBody = {
+                job_id: resolvedJobId,
+                group_name: String(row.group || target.group_name || '').trim(),
+                class_code: String(target.class_code || '').trim().toUpperCase(),
+                week: Number(target.week),
+                year: Number(target.year),
+                lesson: String(target.lesson || '').trim(),
+                class_date_iso: String(target.class_date_iso || '').trim(),
+                evidence_path: candidatePath,
+            };
+            try {
+                const res = await fetch('/api/zalo-manual-approve', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(requestBody),
+                });
+                const data = await res.json();
+                if (!res.ok) {
+                    const detail = data.detail;
+                    const message = detail && typeof detail === 'object'
+                        ? (detail.message || detail.code)
+                        : (detail || data.message || 'Không thể duyệt tay BCNB.');
+                    alert('Lỗi: ' + message);
+                } else if (data.job_id) {
+                    trackJob(data.job_id);
+                }
+            } catch (err) {
+                alert('Lỗi kết nối đến server!');
+            }
+        }
+
+        function applyManualApprovePayload(payload) {
+            if (!payload || payload.kind !== 'zalo_manual_approve' || !payload.target_key) return;
+            const targetKey = String(payload.target_key);
+            const verifiedProduction = payload.dry_run === false && payload.outcome === 'VERIFIED';
+            const approvedStatus = String(payload.status || '✅ Đã duyệt tay & Tích BCNB');
+            const approvedDetail = payload.status_detail != null
+                ? String(payload.status_detail)
+                : (
+                    verifiedProduction
+                        ? `Duyệt tay bởi ${payload.approved_by || 'operator'}`
+                        : `[DRY-RUN] Đã mô phỏng duyệt tay bởi ${payload.approved_by || 'operator'} (chưa tích thật)`
+                );
+            const sourceJobId = Number.isInteger(payload.source_job_id) && payload.source_job_id > 0
+                ? payload.source_job_id
+                : null;
+            const mergeRow = existing => {
+                const key = canonicalTargetKey(existing && existing.scan_target);
+                if (key !== targetKey) return existing;
+                const base = payload.updated_item && typeof payload.updated_item === 'object'
+                    ? { ...existing, ...payload.updated_item }
+                    : { ...existing };
+                if (verifiedProduction) {
+                    base.status = approvedStatus;
+                    base.submitted_for_bcnb = true;
+                    base.manual_approved = true;
+                    base.evidence_state = 'MANUAL_APPROVED_VERIFIED';
+                } else {
+                    base.status = String(existing.status || payload.status || '⚠️ Không đủ bằng chứng – Cần kiểm tra thủ công');
+                    base.submitted_for_bcnb = false;
+                    base.manual_approved = false;
+                }
+                base.status_detail = approvedDetail;
+                base.bcnb_update_state = payload.outcome || (verifiedProduction ? 'VERIFIED' : 'DRY_RUN');
+                if (sourceJobId && (!Number.isInteger(base.source_job_id) || base.source_job_id <= 0)) {
+                    base.source_job_id = sourceJobId;
+                }
+                return base;
+            };
+            if (Array.isArray(latestZaloResults) && latestZaloResults.length > 0) {
+                const nextResults = latestZaloResults.map(mergeRow);
+                if (Array.isArray(selectiveBaselineResults) && selectiveBaselineResults.length > 0) {
+                    selectiveBaselineResults = selectiveBaselineResults.map(mergeRow);
+                }
+                renderZaloResults(nextResults, true, {
+                    preserveOrigin: true,
+                    isHistoricalView: isHistoricalWeekViewActive(),
+                });
+                return;
+            }
+            if (Array.isArray(payload.items) && payload.items.length > 0) {
+                const items = payload.items.map(item => (
+                    item && typeof item === 'object'
+                        && sourceJobId
+                        && (!Number.isInteger(item.source_job_id) || item.source_job_id <= 0)
+                        ? { ...item, source_job_id: sourceJobId }
+                        : item
+                ));
+                renderZaloResults(items, true, {
+                    snapshotId: payload.snapshot_id != null ? payload.snapshot_id : null,
+                    payload,
+                    sourceJobId: sourceJobId || undefined,
+                });
+            }
+        }
+
+        function canonicalTargetKey(target) {
+            if (!target || typeof target !== 'object') return '';
+            const week = Number(target.week);
+            const year = Number(target.year);
+            const classCode = String(target.class_code || '').trim().toUpperCase();
+            const lesson = String(target.lesson || '').trim();
+            const classDateIso = String(target.class_date_iso || '').trim();
+            if (!Number.isInteger(week) || !Number.isInteger(year) || week < 1 || week > 53 || year <= 2000 || year > 2100) {
+                return '';
+            }
+            if (!classCode || !lesson || !classDateIso) return '';
+            return `${String(year).padStart(4, '0')}-W${String(week).padStart(2, '0')}|${classCode}|${lesson}|${classDateIso}`;
+        }
+
+        function currentRequiredPeriodKey() {
+            const period = requiredDashboardPeriod();
+            return period ? `${period.year}-W${period.week}` : '';
+        }
+
+        function normalizePeriodKey(rawKey) {
+            const text = String(rawKey || '').trim();
+            if (!text) return '';
+            const isoMatch = text.match(/^(\d{4})-W(\d{1,2})$/i);
+            if (isoMatch) {
+                const year = Number(isoMatch[1]);
+                const week = Number(isoMatch[2]);
+                if (Number.isInteger(week) && Number.isInteger(year) && week >= 1 && week <= 53) {
+                    return `${year}-W${week}`;
+                }
+            }
+            const slashMatch = text.match(/^W?(\d{1,2})\/(\d{4})$/i);
+            if (slashMatch) {
+                const week = Number(slashMatch[1]);
+                const year = Number(slashMatch[2]);
+                if (Number.isInteger(week) && Number.isInteger(year) && week >= 1 && week <= 53) {
+                    return `${year}-W${week}`;
+                }
+            }
+            return text;
+        }
+
+        function resolveResultsPeriodKey(resultsArray, payload = null, snapshotId = null) {
+            if (payload && payload.required_week && typeof payload.required_week === 'object') {
+                const pWeek = Number(payload.required_week.week);
+                const pYear = Number(payload.required_week.year);
+                if (Number.isInteger(pWeek) && Number.isInteger(pYear) && pWeek >= 1 && pWeek <= 53) {
+                    return `${pYear}-W${pWeek}`;
+                }
+            }
+            const activePeriodKey = currentRequiredPeriodKey();
+            if (
+                activePeriodKey
+                && snapshotId != null
+                && zaloScanPlan
+                && zaloScanPlan.snapshot_id === snapshotId
+                && dashboardResultsForRequiredWeek(Array.isArray(resultsArray) ? resultsArray : []).length > 0
+            ) {
+                return activePeriodKey;
+            }
+            if (Array.isArray(resultsArray) && resultsArray.length > 0) {
+                const periods = new Set();
+                resultsArray.forEach(item => {
+                    const target = item && item.scan_target;
+                    const week = Number(target && target.week);
+                    const year = Number(target && target.year);
+                    if (Number.isInteger(week) && Number.isInteger(year) && week >= 1 && week <= 53) {
+                        periods.add(`${year}-W${week}`);
+                    }
+                });
+                if (periods.size === 1) {
+                    return [...periods][0];
+                }
+            }
+            return '';
+        }
+
+        function hasActiveSelectiveScanBaseline() {
+            const periodKey = normalizePeriodKey(currentRequiredPeriodKey());
+            const snapshotId = zaloScanPlan && zaloScanPlan.snapshot_id ? zaloScanPlan.snapshot_id : null;
+            return Boolean(
+                periodKey
+                && snapshotId
+                && selectiveBaselineResults.length > 0
+                && normalizePeriodKey(selectiveBaselinePeriodKey) === periodKey
+                && selectiveBaselineSnapshotId === snapshotId
+            );
+        }
+
+        function rememberSelectiveScanBaseline() {
+            if (isHistoricalWeekViewActive()) {
+                clearSelectiveScanBaseline();
+                return false;
+            }
+            const periodKey = normalizePeriodKey(currentRequiredPeriodKey());
+            const snapshotId = zaloScanPlan && zaloScanPlan.snapshot_id ? zaloScanPlan.snapshot_id : null;
+            if (
+                !latestZaloResultsPeriodKey
+                && periodKey
+                && snapshotId != null
+                && latestZaloResultsSnapshotId === snapshotId
+                && dashboardResultsForRequiredWeek(Array.isArray(latestZaloResults) ? latestZaloResults : []).length > 0
+            ) {
+                latestZaloResultsPeriodKey = periodKey;
+            }
+            const normalizedResultsPeriodKey = normalizePeriodKey(latestZaloResultsPeriodKey);
+            const hasMismatchedRowSnapshot = Array.isArray(latestZaloResults) && latestZaloResults.some(item => {
+                if (!item || typeof item !== 'object') return false;
+                if (Object.prototype.hasOwnProperty.call(item, 'snapshot_id')) {
+                    return item.snapshot_id !== snapshotId;
+                }
+                if (Object.prototype.hasOwnProperty.call(item, 'originSnapshot')) {
+                    return item.originSnapshot !== snapshotId;
+                }
+                return false;
+            });
+            if (
+                !periodKey
+                || !snapshotId
+                || !Array.isArray(latestZaloResults)
+                || latestZaloResults.length === 0
+                || normalizedResultsPeriodKey !== periodKey
+                || latestZaloResultsSnapshotId !== snapshotId
+                || hasMismatchedRowSnapshot
+            ) {
+                clearSelectiveScanBaseline();
+                return false;
+            }
+            selectiveBaselinePeriodKey = periodKey;
+            selectiveBaselineSnapshotId = snapshotId;
+            selectiveBaselineResults = latestZaloResults.map(item => ({ ...item }));
+            return true;
+        }
+
+        function clearSelectiveScanBaseline() {
+            selectiveBaselineResults = [];
+            selectiveBaselinePeriodKey = '';
+            selectiveBaselineSnapshotId = null;
+        }
+
+        function mergeSelectiveZaloResults(incomingItems, isSelectivePayload = false, payload = null) {
+            const incoming = Array.isArray(incomingItems) ? incomingItems : [];
+            const periodKey = currentRequiredPeriodKey();
+            const snapshotId = zaloScanPlan && zaloScanPlan.snapshot_id ? zaloScanPlan.snapshot_id : null;
+            const payloadSnapshotId = payload && payload.snapshot_id != null ? payload.snapshot_id : null;
+            if (
+                !isSelectivePayload
+                || !periodKey
+                || !snapshotId
+                || selectiveBaselinePeriodKey !== periodKey
+                || selectiveBaselineSnapshotId !== snapshotId
+                || (payloadSnapshotId != null && payloadSnapshotId !== selectiveBaselineSnapshotId)
+                || selectiveBaselineResults.length === 0
+            ) {
+                return incoming;
+            }
+            if (incoming.length === 0) {
+                return selectiveBaselineResults.map(item => ({ ...item }));
+            }
+            const incomingByKey = new Map();
+            incoming.forEach(item => {
+                const key = canonicalTargetKey(item && item.scan_target);
+                if (key) incomingByKey.set(key, item);
+            });
+            if (incomingByKey.size === 0) return incoming;
+            const usedKeys = new Set();
+            const merged = selectiveBaselineResults.map(existing => {
+                const key = canonicalTargetKey(existing && existing.scan_target);
+                if (key && incomingByKey.has(key)) {
+                    usedKeys.add(key);
+                    return incomingByKey.get(key);
+                }
+                return existing;
+            });
+            incoming.forEach(item => {
+                const key = canonicalTargetKey(item && item.scan_target);
+                if (!key || !usedKeys.has(key)) {
+                    merged.push(item);
+                }
+            });
+            selectiveBaselineResults = merged.map(item => ({ ...item }));
+            return merged;
+        }
+
+        function collectFailedRequiredWeekTargetKeys(resultsArray) {
+            const period = requiredDashboardPeriod();
+            if (!period) {
+                return { keys: [], missingPeriod: true, totalCount: 0, failedCount: 0, skippedWithoutIdentity: 0 };
+            }
+            const sourceRows = dashboardResultsForRequiredWeek(Array.isArray(resultsArray) ? resultsArray : []);
+            const failedRows = sourceRows.filter(r => {
+                const status = String((r && r.status) || '');
+                return status.includes('❌') || status.includes('⚠️');
+            });
+            const keys = [];
+            const seen = new Set();
+            let skippedWithoutIdentity = 0;
+            failedRows.forEach(r => {
+                const key = canonicalTargetKey(r && r.scan_target);
+                if (!key) {
+                    skippedWithoutIdentity += 1;
+                    return;
+                }
+                if (!seen.has(key)) {
+                    seen.add(key);
+                    keys.push(key);
+                }
+            });
+            return {
+                keys,
+                missingPeriod: false,
+                totalCount: sourceRows.length,
+                failedCount: failedRows.length,
+                skippedWithoutIdentity,
+            };
+        }
+
+        async function startSelectiveRescanFailed() {
+            if (isHistoricalWeekViewActive()) {
+                alert('Đang ở chế độ xem lịch sử theo tuần; chỉ có thể quét lại lớp lỗi cho tuần cần báo cáo hiện tại.');
+                return;
+            }
+            const summary = collectFailedRequiredWeekTargetKeys(latestZaloResults);
+            if (summary.missingPeriod) {
+                alert('Chưa có tuần cần báo cáo hợp lệ để quét lại.');
+                return;
+            }
+            if (summary.totalCount === 0) {
+                alert('Chưa có dữ liệu kết quả quét Zalo để quét lại.');
+                return;
+            }
+            if (summary.failedCount === 0) {
+                alert('Tất cả các lớp trong tuần kiểm tra đã hoàn thành hoặc được miễn báo cáo!');
+                return;
+            }
+            if (summary.keys.length === 0) {
+                alert('Các dòng lỗi hiện tại thiếu định danh target chuẩn; hãy chạy quét đầy đủ.');
+                return;
+            }
+            await startScan(summary.keys);
+        }
+
+        const WEEKLY_CSV_HEADERS = [
+            'Mã lớp',
+            'Giáo viên',
+            'Buổi học',
+            'Ngày học',
+            'Trạng thái Zalo',
+            'Trạng thái LMS',
+            'Thời gian kiểm chứng',
+        ];
+
+        function sanitizeCsvCell(value) {
+            if (value == null) return '';
+            const raw = String(value);
+            const hadLeadingTabOrCr = raw.startsWith('\t') || raw.startsWith('\r');
+            const cleaned = raw.replace(/[\r\n\t]+/g, ' ').trim();
+            if (!cleaned) return '';
+            if (hadLeadingTabOrCr || ['=', '+', '-', '@'].includes(cleaned[0])) {
+                return `'${cleaned}`;
+            }
+            return cleaned;
+        }
+
+        function escapeCsvField(value) {
+            const sanitized = sanitizeCsvCell(value);
+            if (
+                sanitized.includes(',')
+                || sanitized.includes('"')
+                || sanitized.includes('\n')
+                || sanitized.includes('\r')
+            ) {
+                return `"${sanitized.replace(/"/g, '""')}"`;
+            }
+            return sanitized;
+        }
+
+        function extractRowClassCodeForCsv(item) {
+            if (!item || typeof item !== 'object') return 'KHONG_RO_LOP';
+            const st = item.scan_target && typeof item.scan_target === 'object' ? item.scan_target : null;
+            if (st && st.class_code) return String(st.class_code).trim().toUpperCase();
+            if (item.class_code) return String(item.class_code).trim().toUpperCase();
+            const ev = item.evidence && typeof item.evidence === 'object' ? item.evidence : null;
+            const ctx = ev && ev.date_context && typeof ev.date_context === 'object' ? ev.date_context : null;
+            if (ctx && ctx.target_class_code) return String(ctx.target_class_code).trim().toUpperCase();
+            const grp = String(item.group || '').trim();
+            if (grp) {
+                return grp.replace(/^MindX\s*[-–—]\s*/i, '').replace(/\s*\([^)]*\)\s*$/, '').trim().toUpperCase() || grp;
+            }
+            return 'KHONG_RO_LOP';
+        }
+
+        function buildWeeklySummaryCsvRowsFromDashboard(resultsArray, targetPeriod = null, targetJobId = null) {
+            const period = targetPeriod || effectiveDashboardPeriod();
+            if (!period) return [];
+            const rawList = Array.isArray(resultsArray) ? resultsArray : [];
+            const sourceRows = rawList.filter(r => {
+                const target = r && r.scan_target;
+                if (
+                    !target
+                    || Number(target.week) !== Number(period.week)
+                    || Number(target.year) !== Number(period.year)
+                ) {
+                    return false;
+                }
+                if (targetJobId != null) {
+                    const rowJobId = resolveResultRowSourceJobId(r);
+                    return Number(rowJobId) === Number(targetJobId);
+                }
+                return true;
+            });
+            return sourceRows.map(r => {
+                const st = r && r.scan_target && typeof r.scan_target === 'object' ? r.scan_target : {};
+                const ev = r && r.evidence && typeof r.evidence === 'object' ? r.evidence : {};
+                const verifiedAt = String(ev.scanned_at || r.timestamp || '—').trim() || '—';
+                return {
+                    class_code: extractRowClassCodeForCsv(r),
+                    teacher: String((r && r.person) || 'Chưa phân công').trim() || 'Chưa phân công',
+                    lesson: String(st.lesson != null ? st.lesson : '—').trim() || '—',
+                    class_date: String(st.class_date || st.class_date_iso || '—').trim() || '—',
+                    zalo_status: String((r && r.status) || 'Chưa xác định').trim(),
+                    lms_status: String((r && r.lms_status) || 'Chưa quét LMS').trim(),
+                    verified_at: verifiedAt,
+                };
+            });
+        }
+
+        function buildWeeklySummaryCsv(rows) {
+            const safeRows = Array.isArray(rows) ? rows : [];
+            const lines = [WEEKLY_CSV_HEADERS.map(escapeCsvField).join(',')];
+            safeRows.forEach(row => {
+                if (!row || typeof row !== 'object') return;
+                const cells = [
+                    row.class_code,
+                    row.teacher,
+                    row.lesson,
+                    row.class_date,
+                    row.zalo_status,
+                    row.lms_status,
+                    row.verified_at,
+                ];
+                lines.push(cells.map(escapeCsvField).join(','));
+            });
+            return '\uFEFF' + lines.join('\r\n') + '\r\n';
+        }
+
+        function triggerCsvFileDownload(csvText, filename) {
+            lastExportedWeeklyCsv = String(csvText || '');
+            if (
+                typeof Blob === 'function'
+                && typeof URL !== 'undefined'
+                && typeof URL.createObjectURL === 'function'
+                && typeof document !== 'undefined'
+                && typeof document.createElement === 'function'
+            ) {
+                try {
+                    const blob = new Blob([lastExportedWeeklyCsv], { type: 'text/csv;charset=utf-8;' });
+                    const url = URL.createObjectURL(blob);
+                    const link = document.createElement('a');
+                    link.href = url;
+                    link.download = filename || 'Bao_Cao_Tuan.csv';
+                    link.style = 'display:none';
+                    if (document.body && typeof document.body.appendChild === 'function') {
+                        document.body.appendChild(link);
+                    }
+                    if (typeof link.click === 'function') {
+                        link.click();
+                    }
+                    if (typeof URL.revokeObjectURL === 'function') {
+                        setTimeout(() => URL.revokeObjectURL(url), 1000);
+                    }
+                } catch (_) {
+                    // Bỏ qua lỗi tạo link tải trong môi trường headless/test
+                }
+            }
+            return lastExportedWeeklyCsv;
+        }
+
+        function parseWeekSelectValue(rawValue) {
+            const text = String(rawValue || '').trim();
+            if (!text) return null;
+            const isoMatch = text.match(/^(\d{4})-W(\d{1,2})$/i);
+            if (isoMatch) {
+                const year = Number(isoMatch[1]);
+                const week = Number(isoMatch[2]);
+                if (Number.isInteger(week) && Number.isInteger(year) && week >= 1 && week <= 53) {
+                    return { week, year };
+                }
+            }
+            const slashMatch = text.match(/^W?(\d{1,2})\/(\d{4})$/i);
+            if (slashMatch) {
+                const week = Number(slashMatch[1]);
+                const year = Number(slashMatch[2]);
+                if (Number.isInteger(week) && Number.isInteger(year) && week >= 1 && week <= 53) {
+                    return { week, year };
+                }
+            }
+            return null;
+        }
+
+        function updateWeeklyHistoryStatusBadge() {
+            const badge = document.getElementById('weekly-history-status-badge');
+            if (!badge) return;
+            if (!isHistoricalWeekViewActive()) {
+                const req = requiredDashboardPeriod();
+                badge.textContent = req
+                    ? `Chế độ: Tuần hiện tại W${req.week}/${req.year}`
+                    : 'Chế độ: Theo dõi phiên hiện tại';
+                return;
+            }
+            const w = Number(weeklyHistoryView.week);
+            const y = Number(weeklyHistoryView.year);
+            const jobId = weeklyHistoryView.jobId;
+            const lms = weeklyHistoryView.lmsSummary || {};
+            let lmsText = ' · LMS: chưa quét';
+            if (lms.has_lms_data) {
+                const lmsParts = [`${lms.ticked_count || 0} đã tích`];
+                if (Number(lms.dry_run_count || 0) > 0) {
+                    lmsParts.push(`${lms.dry_run_count} chạy thử (dry-run)`);
+                }
+                if (Number(lms.already_checked_count || 0) > 0) {
+                    lmsParts.push(`${lms.already_checked_count} đã tích sẵn`);
+                }
+                if (Number(lms.pending_tick_count || 0) > 0) {
+                    lmsParts.push(`${lms.pending_tick_count} chờ tích`);
+                }
+                lmsParts.push(`${lms.missing_count || 0} trễ`);
+                lmsText = ` · LMS: ${lmsParts.join(', ')}`;
+            }
+            const jobText = jobId ? `Job #${jobId}` : 'Tổng hợp tuần';
+            badge.textContent = `Đang xem lịch sử W${w}/${y} (${jobText})${lmsText}`;
+        }
+
+        function syncWeeklyHistoryControlsWithPlan() {
+            const weekSelect = document.getElementById('history-week-select');
+            if (!weekSelect) return;
+            const knownMap = new Map();
+            const addPeriod = (w, y) => {
+                const week = Number(w);
+                const year = Number(y);
+                if (!Number.isInteger(week) || !Number.isInteger(year) || week < 1 || week > 53) return;
+                const key = `${String(year).padStart(4, '0')}-W${String(week).padStart(2, '0')}`;
+                if (!knownMap.has(key)) {
+                    knownMap.set(key, { week, year, period_key: key, label: `W${String(week).padStart(2, '0')}/${year}` });
+                }
+            };
+            if (Array.isArray(weeklyHistoryAvailableWeeks)) {
+                weeklyHistoryAvailableWeeks.forEach(item => {
+                    if (item && typeof item === 'object') addPeriod(item.week, item.year);
+                });
+            }
+            if (zaloScanPlan && typeof zaloScanPlan === 'object') {
+                if (zaloScanPlan.required_week) {
+                    addPeriod(zaloScanPlan.required_week.week, zaloScanPlan.required_week.year);
+                }
+                if (Array.isArray(zaloScanPlan.selected_weeks)) {
+                    zaloScanPlan.selected_weeks.forEach(item => {
+                        if (item && typeof item === 'object') addPeriod(item.week, item.year);
+                    });
+                }
+            }
+            const sorted = [...knownMap.values()].sort((a, b) => (b.year - a.year) || (b.week - a.week));
+            const currentVal = weekSelect.value;
+            weekSelect.replaceChildren();
+            const defaultOpt = document.createElement('option');
+            defaultOpt.value = '';
+            const req = requiredDashboardPeriod();
+            defaultOpt.textContent = req
+                ? `Tuần hiện tại (W${req.week}/${req.year})`
+                : 'Tuần hiện tại (theo kế hoạch)';
+            weekSelect.appendChild(defaultOpt);
+            sorted.forEach(item => {
+                const opt = document.createElement('option');
+                opt.value = item.period_key;
+                opt.textContent = `Tuần ${item.label}`;
+                weekSelect.appendChild(opt);
+            });
+            if (isHistoricalWeekViewActive()) {
+                const activeKey = `${String(weeklyHistoryView.year).padStart(4, '0')}-W${String(weeklyHistoryView.week).padStart(2, '0')}`;
+                weekSelect.value = activeKey;
+            } else if (currentVal && knownMap.has(currentVal)) {
+                weekSelect.value = currentVal;
+            } else {
+                weekSelect.value = '';
+            }
+            updateWeeklyHistoryStatusBadge();
+        }
+
+        function renderWeeklyHistoryControls(summaryPayload) {
+            if (summaryPayload && Array.isArray(summaryPayload.available_weeks)) {
+                weeklyHistoryAvailableWeeks = summaryPayload.available_weeks;
+            }
+            if (summaryPayload && Array.isArray(summaryPayload.jobs)) {
+                weeklyHistoryJobs = summaryPayload.jobs;
+            }
+            syncWeeklyHistoryControlsWithPlan();
+            const jobSelect = document.getElementById('history-job-select');
+            if (jobSelect) {
+                jobSelect.replaceChildren();
+                const allOpt = document.createElement('option');
+                allOpt.value = '';
+                allOpt.textContent = 'Mới nhất / Tổng hợp tuần';
+                jobSelect.appendChild(allOpt);
+                (Array.isArray(weeklyHistoryJobs) ? weeklyHistoryJobs : []).forEach(job => {
+                    if (!job || !job.job_id) return;
+                    const opt = document.createElement('option');
+                    opt.value = String(job.job_id);
+                    const modeLabel = job.execution_mode === 'production' ? 'Prod' : 'Dry-run';
+                    const selLabel = job.selective_rescan ? ' · Quét chọn lọc' : '';
+                    opt.textContent = `Job #${job.job_id} (${job.status || 'UNKNOWN'} · ${modeLabel}${selLabel} · ${job.target_count || 0} lớp)`;
+                    jobSelect.appendChild(opt);
+                });
+                if (weeklyHistoryView && weeklyHistoryView.jobId) {
+                    jobSelect.value = String(weeklyHistoryView.jobId);
+                } else {
+                    jobSelect.value = '';
+                }
+            }
+            updateWeeklyHistoryStatusBadge();
+            if (typeof applyZaloRunState === 'function') {
+                applyZaloRunState();
+            }
+        }
+
+        async function loadWeeklyHistorySummary(options = {}) {
+            const weekSelect = document.getElementById('history-week-select');
+            const jobSelect = document.getElementById('history-job-select');
+            const keepLiveMode = Boolean(options && options.keepLiveMode);
+            let targetPeriod = null;
+            if (options && Number.isInteger(Number(options.week)) && Number.isInteger(Number(options.year))) {
+                targetPeriod = { week: Number(options.week), year: Number(options.year) };
+            } else if (weekSelect && weekSelect.value) {
+                targetPeriod = parseWeekSelectValue(weekSelect.value);
+            } else {
+                targetPeriod = effectiveDashboardPeriod();
+            }
+            let explicitJobId = null;
+            if (options && options.jobId !== undefined) {
+                explicitJobId = options.jobId ? Number(options.jobId) : null;
+            } else if (jobSelect && jobSelect.value) {
+                const parsedJob = Number(jobSelect.value);
+                if (Number.isInteger(parsedJob) && parsedJob > 0) explicitJobId = parsedJob;
+            }
+            const params = [];
+            if (targetPeriod) {
+                params.push(`week=${encodeURIComponent(targetPeriod.week)}`);
+                params.push(`year=${encodeURIComponent(targetPeriod.year)}`);
+            }
+            if (explicitJobId) {
+                params.push(`job_id=${encodeURIComponent(explicitJobId)}`);
+            }
+            const query = params.length > 0 ? `?${params.join('&')}` : '';
+            const requestSeq = (typeof weeklyHistoryRequestSeq === 'number')
+                ? (++weeklyHistoryRequestSeq)
+                : 1;
+            try {
+                const res = await fetch(`/api/reports/weekly-summary${query}`);
+                const data = await res.json();
+                if (typeof weeklyHistoryRequestSeq === 'number' && requestSeq !== weeklyHistoryRequestSeq) {
+                    return null;
+                }
+                if (!res.ok) {
+                    if (keepLiveMode) {
+                        renderZaloResults([], true, {
+                            snapshotId: null,
+                            periodKey: '',
+                            sourceJobId: null,
+                        });
+                    }
+                    const detail = data && data.detail;
+                    const message = detail && typeof detail === 'object'
+                        ? (detail.message || detail.code)
+                        : (detail || 'Không thể tải lịch sử báo cáo tuần.');
+                    alert('Lỗi: ' + message);
+                    return null;
+                }
+                if (!keepLiveMode && data && data.week != null && data.year != null) {
+                    weeklyHistoryView = {
+                        week: Number(data.week),
+                        year: Number(data.year),
+                        jobId: explicitJobId || null,
+                        selectedJobId: data.selected_job_id || null,
+                        rows: Array.isArray(data.rows) ? data.rows : [],
+                        summary: data.summary || null,
+                        lmsSummary: data.lms_summary || null,
+                    };
+                } else {
+                    weeklyHistoryView = null;
+                }
+                renderWeeklyHistoryControls(data);
+                if (keepLiveMode && weekSelect) {
+                    weekSelect.value = '';
+                }
+                const items = Array.isArray(data && data.items) ? data.items : [];
+                const summarySnapshotId = (
+                    data
+                    && data.snapshot_id != null
+                    && !data.is_selective_only
+                ) ? data.snapshot_id : null;
+                const summaryPeriodKey = (
+                    data
+                    && Number.isInteger(Number(data.week))
+                    && Number.isInteger(Number(data.year))
+                )
+                    ? `${Number(data.year)}-W${Number(data.week)}`
+                    : normalizePeriodKey((data && data.period_key) || '');
+                const summaryJobId = (
+                    data
+                    && Number.isInteger(Number(data.selected_job_id))
+                    && Number(data.selected_job_id) > 0
+                )
+                    ? Number(data.selected_job_id)
+                    : null;
+                if (
+                    !keepLiveMode
+                    || summarySnapshotId == null
+                    || !zaloScanPlan
+                    || zaloScanPlan.snapshot_id !== summarySnapshotId
+                    || summaryPeriodKey !== normalizePeriodKey(currentRequiredPeriodKey())
+                ) {
+                    clearSelectiveScanBaseline();
+                }
+                renderZaloResults(items, true, {
+                    isHistoricalView: !keepLiveMode,
+                    preserveOrigin: false,
+                    snapshotId: summarySnapshotId,
+                    periodKey: summaryPeriodKey,
+                    sourceJobId: summaryJobId,
+                });
+                return data;
+            } catch (err) {
+                if (typeof weeklyHistoryRequestSeq === 'number' && requestSeq !== weeklyHistoryRequestSeq) {
+                    return null;
+                }
+                if (keepLiveMode) {
+                    renderZaloResults([], true, {
+                        snapshotId: null,
+                        periodKey: '',
+                        sourceJobId: null,
+                    });
+                }
+                alert('Lỗi kết nối khi tải lịch sử tuần!');
+                return null;
+            }
+        }
+
+        async function onHistoryWeekChange() {
+            const weekSelect = document.getElementById('history-week-select');
+            const jobSelect = document.getElementById('history-job-select');
+            if (jobSelect) jobSelect.value = '';
+            if (!weekSelect || !weekSelect.value) {
+                if (typeof weeklyHistoryRequestSeq === 'number') {
+                    weeklyHistoryRequestSeq += 1;
+                }
+                weeklyHistoryView = null;
+                clearSelectiveScanBaseline();
+                updateWeeklyHistoryStatusBadge();
+                if (typeof applyZaloRunState === 'function') {
+                    applyZaloRunState();
+                }
+                const req = requiredDashboardPeriod();
+                if (req) {
+                    await loadWeeklyHistorySummary({
+                        week: req.week,
+                        year: req.year,
+                        jobId: null,
+                        keepLiveMode: true,
+                    });
+                } else {
+                    renderZaloResults([], true, {
+                        snapshotId: null,
+                        periodKey: '',
+                        sourceJobId: null,
+                    });
+                }
+                return;
+            }
+            const period = parseWeekSelectValue(weekSelect.value);
+            if (!period) return;
+            await loadWeeklyHistorySummary({ week: period.week, year: period.year, jobId: null });
+        }
+
+        async function onHistoryJobChange() {
+            const weekSelect = document.getElementById('history-week-select');
+            const jobSelect = document.getElementById('history-job-select');
+            const selectedJobId = jobSelect && jobSelect.value ? Number(jobSelect.value) : null;
+            const validJobId = Number.isInteger(selectedJobId) && selectedJobId > 0 ? selectedJobId : null;
+            const dropdownPeriod = weekSelect && weekSelect.value
+                ? parseWeekSelectValue(weekSelect.value)
+                : null;
+            const period = dropdownPeriod || effectiveDashboardPeriod();
+            await loadWeeklyHistorySummary({
+                week: period ? period.week : undefined,
+                year: period ? period.year : undefined,
+                jobId: validJobId,
+                keepLiveMode: !dropdownPeriod && !validJobId,
+            });
+        }
+
+        async function exportWeeklySummaryCsv() {
+            const weekSelect = document.getElementById('history-week-select');
+            const jobSelect = document.getElementById('history-job-select');
+            const selectedFromDropdown = weekSelect && weekSelect.value
+                ? parseWeekSelectValue(weekSelect.value)
+                : null;
+            const period = selectedFromDropdown || effectiveDashboardPeriod();
+            if (!period) {
+                alert('Chưa có tuần báo cáo hợp lệ để xuất CSV.');
+                return '';
+            }
+            const matchesActiveHistoryPeriod = Boolean(
+                isHistoricalWeekViewActive()
+                && Number(weeklyHistoryView.week) === Number(period.week)
+                && Number(weeklyHistoryView.year) === Number(period.year)
+            );
+            const selectedJobId = (jobSelect && jobSelect.value && Number.isInteger(Number(jobSelect.value)) && Number(jobSelect.value) > 0)
+                ? Number(jobSelect.value)
+                : (matchesActiveHistoryPeriod && weeklyHistoryView.jobId ? Number(weeklyHistoryView.jobId) : null);
+
+            let snapshotFallbackRows = [];
+            if (
+                matchesActiveHistoryPeriod
+                && (weeklyHistoryView.jobId || null) === (selectedJobId || null)
+                && Array.isArray(weeklyHistoryView.rows)
+            ) {
+                snapshotFallbackRows = weeklyHistoryView.rows
+                    .filter(r => r && typeof r === 'object')
+                    .map(r => ({ ...r }));
+            } else if (!isHistoricalWeekViewActive() && !selectedJobId) {
+                snapshotFallbackRows = buildWeeklySummaryCsvRowsFromDashboard(latestZaloResults, period, null);
+            }
+
+            let rowsToExport = [];
+            try {
+                const params = [
+                    `week=${encodeURIComponent(period.week)}`,
+                    `year=${encodeURIComponent(period.year)}`,
+                ];
+                if (selectedJobId) {
+                    params.push(`job_id=${encodeURIComponent(selectedJobId)}`);
+                }
+                const res = await fetch(`/api/reports/weekly-summary?${params.join('&')}`);
+                if (res && res.ok) {
+                    const payload = await res.json();
+                    const payloadMatchesPeriod = !payload
+                        || payload.week == null
+                        || payload.year == null
+                        || (Number(payload.week) === Number(period.week) && Number(payload.year) === Number(period.year));
+                    if (payload && payloadMatchesPeriod && Array.isArray(payload.rows)) {
+                        rowsToExport = payload.rows;
+                    }
+                } else if (res && !res.ok) {
+                    let message = 'Không thể xuất báo cáo tuần.';
+                    try {
+                        const errData = await res.json();
+                        const detail = errData && errData.detail;
+                        message = detail && typeof detail === 'object'
+                            ? (detail.message || detail.code || message)
+                            : (detail || message);
+                    } catch (_) {
+                        // ignore json parse error
+                    }
+                    alert('Lỗi: ' + message);
+                    return '';
+                }
+            } catch (_) {
+                // Chỉ fallback sang snapshot bất biến đã chụp trước khi gửi request
+                rowsToExport = snapshotFallbackRows;
+            }
+
+            if (rowsToExport.length === 0) {
+                alert('Chưa có dữ liệu báo cáo trong tuần đã chọn để xuất CSV.');
+                return '';
+            }
+
+            const csvText = buildWeeklySummaryCsv(rowsToExport);
+            const filename = `Bao_Cao_Tuan_W${String(period.week).padStart(2, '0')}_${period.year}.csv`;
+            triggerCsvFileDownload(csvText, filename);
+            return csvText;
         }
 
         document.getElementById('searchInput').addEventListener('input', () => {
-            renderZaloResults(latestZaloResults, true);
+            renderZaloResults(latestZaloResults, true, {
+                preserveOrigin: true,
+                isHistoricalView: isHistoricalWeekViewActive(),
+            });
         });
 
         // Một lần tải ban đầu để khôi phục job đang chạy sau khi reload.

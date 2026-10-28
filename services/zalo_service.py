@@ -57,6 +57,21 @@ async def run_zalo_automation(
     except JobCancelledError as exc:
         actions = await audit_repo.list_for_job(job_id, 200)
         verified = [item for item in actions if item["outcome"] == "VERIFIED"]
+        cancelled_payload: dict[str, Any] = {
+            "kind": "zalo_scan_cancelled",
+            "verified_actions": len(verified),
+            "cancelled": True,
+        }
+        if isinstance(scan_plan, dict):
+            if scan_plan.get("snapshot_id") is not None:
+                cancelled_payload["snapshot_id"] = scan_plan.get("snapshot_id")
+            if isinstance(scan_plan.get("required_week"), dict):
+                cancelled_payload["required_week"] = dict(scan_plan["required_week"])
+            if scan_plan.get("selective_rescan"):
+                cancelled_payload["selective_rescan"] = True
+                cancelled_payload["selected_target_keys"] = list(
+                    scan_plan.get("selected_target_keys") or []
+                )
         await job_repo.update_job(
             job_id,
             status="PARTIAL_SUCCESS" if verified else "CANCELLED",
@@ -67,11 +82,7 @@ async def run_zalo_automation(
                 else str(exc)
             ),
             results=json.dumps(
-                {
-                    "kind": "zalo_scan_cancelled",
-                    "verified_actions": len(verified),
-                    "cancelled": True,
-                },
+                cancelled_payload,
                 ensure_ascii=False,
             ),
         )
@@ -382,6 +393,7 @@ async def _run_zalo_automation(
                 )
                 continue
 
+            ai_classifier = getattr(external, "zalo_ai_classifier", None)
             result = await scan_open_zalo_chat(
                 page,
                 job_id=job_id,
@@ -393,6 +405,11 @@ async def _run_zalo_automation(
                 scan_target=scan_target if isinstance(scan_target, dict) else None,
                 today=today,
                 ensure_not_cancelled=lambda: job_repo.ensure_not_cancelled(job_id),
+                **(
+                    {"ai_report_classifier": ai_classifier}
+                    if ai_classifier is not None
+                    else {}
+                ),
             )
             if scan_target:
                 context = result.setdefault("evidence", {}).setdefault("date_context", {})

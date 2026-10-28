@@ -1,15 +1,27 @@
 from datetime import timedelta
+import re
 
-from fastapi import APIRouter, Body, Depends, Query
+from fastapi import APIRouter, Body, Depends, Query, Response
 
 from api.dependencies import enqueue_job, get_container, require_operator, require_viewer
 from api.errors import public_error
 from api.errors import internal_error
+from core.auth import AuthUser
 from core.container import AppContainer
 from core.time_utils import now_business
 from core.time_utils import now_utc, parse_timestamp, utc_iso
+from repositories.report_repository import (
+    WeeklySummaryError,
+    build_weekly_summary_csv,
+)
 from repositories.zalo_batch_repository import canonical_target_key
-from repositories.job_repository import JobStateError
+from repositories.job_repository import JobStateError, TERMINAL_STATUSES
+from services.zalo_bcnb_service import (
+    collect_result_item_evidence_paths,
+    find_manual_approve_target_matches,
+    is_result_item_already_submitted,
+    parse_scan_job_results_envelope,
+)
 from services.zalo_target_eligibility import split_scan_targets_for_execution
 from services.zalo_preflight import (
     assess_zalo_scan_preflight,
@@ -78,6 +90,7 @@ async def run_scan(
     container: AppContainer = Depends(get_container),
     snapshot_id: int | None = Body(default=None, embed=True),
     confirm_yellow: bool = Body(default=False, embed=True),
+    selected_target_keys: list[str] | None = Body(default=None, embed=True),
 ):
     # Direct unit calls do not pass through FastAPI's dependency/body parser;
     # normalize its ``Body(...)`` sentinel values before using them.
@@ -85,6 +98,40 @@ async def run_scan(
         snapshot_id = None
     if not isinstance(confirm_yellow, bool):
         confirm_yellow = False
+    if not isinstance(selected_target_keys, list):
+        if selected_target_keys is not None and not hasattr(selected_target_keys, "default"):
+            raise public_error(
+                422,
+                "SCAN_SELECTED_TARGETS_INVALID",
+                "Danh sách target chọn lọc không hợp lệ.",
+            )
+        selected_target_keys = None
+    normalized_selected_keys: list[str] | None = None
+    if selected_target_keys is not None:
+        normalized_selected_keys = []
+        seen_selected: set[str] = set()
+        for raw_key in selected_target_keys:
+            if not isinstance(raw_key, str) or not raw_key.strip():
+                raise public_error(
+                    422,
+                    "SCAN_SELECTED_TARGETS_INVALID",
+                    "Danh sách target chọn lọc có phần tử rỗng hoặc sai kiểu.",
+                )
+            clean_key = raw_key.strip()
+            if clean_key in seen_selected:
+                raise public_error(
+                    422,
+                    "SCAN_SELECTED_TARGETS_DUPLICATE",
+                    "Danh sách target chọn lọc bị trùng lặp.",
+                )
+            seen_selected.add(clean_key)
+            normalized_selected_keys.append(clean_key)
+        if not normalized_selected_keys:
+            raise public_error(
+                422,
+                "SCAN_SELECTED_TARGETS_EMPTY",
+                "Danh sách target chọn lọc không được rỗng.",
+            )
     dry_run = container.settings.bcnb_dry_run
     execution_mode = "dry-run" if dry_run else "production"
     preflight = await assess_zalo_scan_preflight(
@@ -169,6 +216,14 @@ async def run_scan(
             "SCAN_PLAN_DUPLICATE_TARGET",
             "Kế hoạch BCNB có target trùng; hãy Dò tìm lại.",
         )
+    if normalized_selected_keys is not None:
+        admitted_key_set = set(target_keys)
+        if any(key not in admitted_key_set for key in normalized_selected_keys):
+            raise public_error(
+                409,
+                "SCAN_SELECTED_TARGET_NOT_IN_PLAN",
+                "Target chọn lọc không thuộc kế hoạch tuần BCNB hiện tại; hãy Dò tìm lại.",
+            )
     if _snapshot_is_stale(
         snapshot,
         int(getattr(container.settings, "zalo_plan_max_age_minutes", 30)),
@@ -193,6 +248,18 @@ async def run_scan(
         latest_week=week_plan.get("latest_week"),
         now=now_business(),
     )
+    if normalized_selected_keys is not None:
+        selected_key_set = set(normalized_selected_keys)
+        scan_targets = [
+            target
+            for target in scan_targets
+            if canonical_target_key(target) in selected_key_set
+        ]
+        deferred_targets = [
+            target
+            for target in deferred_targets
+            if canonical_target_key(target) in selected_key_set
+        ]
     if not scan_targets:
         raise public_error(
             409,
@@ -218,6 +285,11 @@ async def run_scan(
         "targets": scan_targets,
         "deferred_targets": deferred_targets,
     }
+    if normalized_selected_keys is not None:
+        scan_plan["selective_rescan"] = True
+        scan_plan["selected_target_keys"] = [
+            canonical_target_key(target) for target in scan_targets
+        ]
     try:
         job_id = await container.job_repo.create_job(
             "ZALO_SCAN",
@@ -252,6 +324,225 @@ async def run_scan(
             effective_scan_worker_count(container.settings, execution_mode)
         ),
         "deferred_target_count": len(deferred_targets),
+        "selective_rescan": normalized_selected_keys is not None,
+    }
+
+
+@router.post("/api/zalo-manual-approve", dependencies=[Depends(require_operator)])
+async def manual_approve_zalo_report(
+    container: AppContainer = Depends(get_container),
+    user: AuthUser = Depends(require_operator),
+    job_id: int | None = Body(default=None, embed=True),
+    group_name: str | None = Body(default=None, embed=True),
+    class_code: str | None = Body(default=None, embed=True),
+    week: int | None = Body(default=None, embed=True),
+    year: int | None = Body(default=None, embed=True),
+    lesson: str | None = Body(default=None, embed=True),
+    class_date_iso: str | None = Body(default=None, embed=True),
+    evidence_path: str | None = Body(default=None, embed=True),
+):
+    """Queue a single-target audited BCNB report checkbox tick backed by job evidence."""
+    if not isinstance(job_id, int) or isinstance(job_id, bool) or job_id <= 0:
+        raise public_error(
+            422,
+            "MANUAL_APPROVE_INVALID_INPUT",
+            "Mã job gốc không hợp lệ.",
+        )
+    if not isinstance(group_name, str) or not group_name.strip():
+        raise public_error(
+            422,
+            "MANUAL_APPROVE_INVALID_INPUT",
+            "Tên nhóm Zalo không được để trống.",
+        )
+    if not isinstance(evidence_path, str) or not evidence_path.strip():
+        raise public_error(
+            422,
+            "MANUAL_APPROVE_EVIDENCE_REQUIRED",
+            "Bắt buộc có đường dẫn ảnh bằng chứng hợp lệ để duyệt tay.",
+        )
+    if (
+        not isinstance(week, int)
+        or isinstance(week, bool)
+        or not isinstance(year, int)
+        or isinstance(year, bool)
+        or not (1 <= week <= 53)
+        or not (2000 < year <= 2100)
+    ):
+        raise public_error(
+            422,
+            "MANUAL_APPROVE_INVALID_TARGET",
+            "Tuần hoặc năm BCNB không hợp lệ.",
+        )
+    if not isinstance(lesson, str) or not lesson.strip():
+        raise public_error(
+            422,
+            "MANUAL_APPROVE_INVALID_TARGET",
+            "Buổi học BCNB không hợp lệ.",
+        )
+    if (
+        not isinstance(class_date_iso, str)
+        or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", class_date_iso.strip())
+    ):
+        raise public_error(
+            422,
+            "MANUAL_APPROVE_INVALID_TARGET",
+            "Ngày học ISO (YYYY-MM-DD) không hợp lệ.",
+        )
+    normalized_class_code: str | None = None
+    if isinstance(class_code, str) and class_code.strip():
+        normalized_class_code = class_code.strip().upper()
+    elif class_code is not None and not hasattr(class_code, "default"):
+        raise public_error(
+            422,
+            "MANUAL_APPROVE_INVALID_TARGET",
+            "Mã lớp không hợp lệ.",
+        )
+
+    source_job = await container.job_repo.get_job(job_id)
+    if source_job is None:
+        raise public_error(
+            404,
+            "SOURCE_JOB_NOT_FOUND",
+            "Không tìm thấy job quét Zalo gốc.",
+        )
+    if source_job.get("job_type") != "ZALO_SCAN":
+        raise public_error(
+            409,
+            "MANUAL_APPROVE_INVALID_SOURCE_JOB",
+            "Job gốc phải là job quét Zalo (ZALO_SCAN).",
+        )
+    if source_job.get("status") not in TERMINAL_STATUSES:
+        raise public_error(
+            409,
+            "SOURCE_JOB_NOT_TERMINAL",
+            "Job quét Zalo gốc chưa hoàn tất; hãy chờ job kết thúc trước khi duyệt tay.",
+        )
+
+    audit_repo = getattr(container, "audit_repo", None)
+    if audit_repo is not None and hasattr(audit_repo, "count_unresolved"):
+        if int(await audit_repo.count_unresolved()) > 0:
+            raise public_error(
+                409,
+                "AUDIT_PENDING",
+                "Còn thao tác bên ngoài chưa được đối soát; hãy kiểm tra audit trước khi duyệt tay.",
+            )
+
+    _, items = parse_scan_job_results_envelope(source_job.get("results"))
+    matches = find_manual_approve_target_matches(
+        items,
+        group_name=group_name.strip(),
+        week=week,
+        year=year,
+        lesson=lesson.strip(),
+        class_date_iso=class_date_iso.strip(),
+        class_code=normalized_class_code,
+    )
+    if not matches:
+        raise public_error(
+            409,
+            "MANUAL_APPROVE_TARGET_NOT_IN_JOB",
+            "Không tìm thấy buổi học tương ứng trong kết quả của job gốc.",
+        )
+    if len(matches) > 1:
+        raise public_error(
+            409,
+            "MANUAL_APPROVE_AMBIGUOUS_TARGET",
+            "Dòng kết quả trong job gốc bị trùng; dừng để tránh duyệt nhầm.",
+        )
+    _, matched_item, resolved_class_code = matches[0]
+    try:
+        target_key = canonical_target_key(
+            {
+                "week": week,
+                "year": year,
+                "class_code": resolved_class_code,
+                "lesson": lesson.strip(),
+                "class_date_iso": class_date_iso.strip(),
+            }
+        )
+    except ValueError as exc:
+        raise public_error(
+            422,
+            "MANUAL_APPROVE_INVALID_TARGET",
+            "Thông tin định danh target BCNB không hợp lệ.",
+        ) from exc
+
+    if is_result_item_already_submitted(matched_item):
+        raise public_error(
+            409,
+            "MANUAL_APPROVE_ALREADY_SUBMITTED",
+            "Lớp này đã được tích hoặc miễn báo cáo trên BCNB.",
+        )
+
+    clean_evidence_path = evidence_path.strip()
+    if clean_evidence_path not in collect_result_item_evidence_paths(matched_item):
+        raise public_error(
+            409,
+            "MANUAL_APPROVE_EVIDENCE_NOT_IN_TARGET",
+            "Ảnh bằng chứng không thuộc dòng kết quả của lớp được chọn.",
+        )
+
+    verified_artifact = await container.evidence_repo.verify(
+        clean_evidence_path,
+        job_id=job_id,
+    )
+    if (
+        not verified_artifact
+        or verified_artifact.get("status") != "AVAILABLE"
+        or not verified_artifact.get("sha256")
+    ):
+        raise public_error(
+            409,
+            "MANUAL_APPROVE_EVIDENCE_UNAVAILABLE",
+            "Ảnh bằng chứng không khả dụng hoặc không thuộc job gốc.",
+        )
+    evidence_sha256 = str(verified_artifact["sha256"]).strip().upper()
+    dry_run = container.settings.bcnb_dry_run
+    execution_mode = "dry-run" if dry_run else "production"
+    approved_by = (
+        str(getattr(user, "username", None) or "operator").strip() or "operator"
+    )
+    target_payload = {
+        "group_name": group_name.strip(),
+        "class_code": resolved_class_code,
+        "week": week,
+        "year": year,
+        "lesson": lesson.strip(),
+        "class_date_iso": class_date_iso.strip(),
+        "target_key": target_key,
+    }
+    try:
+        manual_job_id = await container.job_repo.create_job(
+            "ZALO_MANUAL_APPROVE",
+            {
+                "version": 1,
+                "source_job_id": job_id,
+                "target": target_payload,
+                "evidence_path": clean_evidence_path,
+                "evidence_sha256": evidence_sha256,
+                "approved_by": approved_by,
+                "dry_run": dry_run,
+                "execution_mode": execution_mode,
+            },
+            retryable=dry_run,
+            recoverable=dry_run,
+            mutates_external=not dry_run,
+            message=f"Đang chờ duyệt & tích BCNB cho {resolved_class_code}...",
+            reject_if_active=True,
+        )
+    except JobStateError as exc:
+        raise public_error(
+            409,
+            "ACTIVE_JOB_PRESENT",
+            "Một job khác vừa được bắt đầu; hãy chờ job đó kết thúc rồi thử lại.",
+        ) from exc
+    await enqueue_job(container, manual_job_id)
+    return {
+        "message": f"Đang duyệt & tích BCNB cho lớp {resolved_class_code}...",
+        "job_id": manual_job_id,
+        "source_job_id": job_id,
+        "target_key": target_key,
+        "dry_run": dry_run,
     }
 
 
@@ -458,3 +749,91 @@ async def get_class_lifecycles(
         }
     except Exception as exc:
         raise internal_error(exc, event="api.class_lifecycles.read_failed") from exc
+
+
+@router.get("/api/reports/weekly-summary", dependencies=[Depends(require_viewer)])
+async def get_weekly_summary(
+    week: int | None = Query(default=None, ge=1, le=53),
+    year: int | None = Query(default=None, ge=2000, le=2100),
+    job_id: int | None = Query(default=None, ge=1),
+    format: str | None = Query(default=None),
+    container: AppContainer = Depends(get_container),
+):
+    if hasattr(week, "default"):
+        week = None
+    elif week is not None and (
+        isinstance(week, bool) or not isinstance(week, int) or not (1 <= week <= 53)
+    ):
+        raise public_error(
+            422,
+            "INVALID_PERIOD",
+            "Tham số tuần (week) phải từ 1 đến 53.",
+        )
+
+    if hasattr(year, "default"):
+        year = None
+    elif year is not None and (
+        isinstance(year, bool) or not isinstance(year, int) or not (2000 <= year <= 2100)
+    ):
+        raise public_error(
+            422,
+            "INVALID_PERIOD",
+            "Tham số năm (year) phải từ 2000 đến 2100.",
+        )
+
+    if (week is None) != (year is None):
+        raise public_error(
+            422,
+            "INVALID_PERIOD",
+            "Hãy cung cấp đồng thời cả tuần (week) và năm (year).",
+        )
+
+    if hasattr(job_id, "default"):
+        job_id = None
+    elif job_id is not None and (
+        isinstance(job_id, bool) or not isinstance(job_id, int) or job_id <= 0
+    ):
+        raise public_error(
+            422,
+            "INVALID_JOB_ID",
+            "Mã job quét không hợp lệ.",
+        )
+
+    if hasattr(format, "default"):
+        format = None
+    fmt = str(format or "").strip().lower()
+    if fmt not in {"", "json", "csv"}:
+        raise public_error(
+            422,
+            "INVALID_REPORT_FORMAT",
+            "Định dạng báo cáo không hợp lệ (chỉ hỗ trợ json hoặc csv).",
+        )
+
+    try:
+        payload = await container.report_repo.get_weekly_summary(
+            week=week,
+            year=year,
+            job_id=job_id,
+        )
+    except WeeklySummaryError as exc:
+        raise public_error(exc.status_code, exc.code, str(exc)) from exc
+    except Exception as exc:
+        raise internal_error(exc, event="api.reports.weekly_summary_failed") from exc
+
+    if fmt == "csv":
+        csv_text = build_weekly_summary_csv(payload.get("rows") or [])
+        sel_w = payload.get("week")
+        sel_y = payload.get("year")
+        filename = (
+            f"Bao_Cao_Tuan_W{int(sel_w):02d}_{int(sel_y)}.csv"
+            if sel_w is not None and sel_y is not None
+            else "Bao_Cao_Tuan.csv"
+        )
+        return Response(
+            content=csv_text.encode("utf-8"),
+            media_type="text/csv; charset=utf-8",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+            },
+        )
+    return payload

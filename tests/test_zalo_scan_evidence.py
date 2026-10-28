@@ -1218,6 +1218,274 @@ class ZaloScanEvidenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any("khoảng trống tin nhắn" in err for err in validation_errors))
         self.assertTrue(any("chưa đồng bộ" in err for err in validation_errors))
 
+    async def test_ai_assist_not_called_when_disabled_or_rule_matched_or_out_of_window(self):
+        informal_text = (
+            "Dạ thầy gửi ba mẹ tình hình học hôm nay của các bạn lớp mình nhé ạ: "
+            "Hôm nay cả lớp đã cùng nhau lắp ráp mô hình robot cảm biến khoảng cách "
+            "và lập trình cho robot tự tránh vật cản trên sa bàn thành công."
+        )
+        opening_notice = (
+            "Mindx Vũng Tàu Quản Lí Lớp Học\n"
+            "📣 THÔNG BÁO KHAI GIẢNG LỚP LẬP TRÌNH VT-C4K-GB40 📣 @All\n"
+            "Em chào quý phụ huynh và học viên của lớp. Lịch học Chủ nhật hàng tuần."
+        )
+        ai_gateway = AsyncMock(
+            return_value={
+                "is_likely_report": False,
+                "confidence": 0.1,
+                "reason": "Tin nhắn trao đổi thông thường",
+            }
+        )
+        target = {
+            "class_code": "VT-C4K-GB40",
+            "class_date": "11/09/2026",
+            "class_date_iso": "2026-09-11",
+            "lesson": "4",
+            "week": 37,
+            "year": 2026,
+            "zalo_deadline": "12:00 13/09/2026",
+        }
+        with tempfile.TemporaryDirectory() as root:
+            # 1. Disabled flag -> 0 AI calls even with eligible in-window message
+            await scan_open_zalo_chat(
+                FakePage([FakeMessage(informal_text, "12/09/2026")]),
+                job_id=240,
+                screenshots_dir=root,
+                group_name="MindX - VT-C4K-GB40",
+                actual_group_name="MindX - VT-C4K-GB40",
+                person="Teacher",
+                class_date_str="11/09/2026",
+                scan_target=target,
+                today=datetime(2026, 9, 17),
+                ensure_not_cancelled=AsyncMock(),
+                ai_report_classifier=ai_gateway,
+                ai_assist_enabled=False,
+            )
+            ai_gateway.evaluate_ambiguous_message.assert_not_awaited()
+
+            # 2. Rule-based already matched -> 0 AI calls even when enabled
+            valid_report = (
+                "Kính gửi phụ huynh. Báo cáo buổi học ngày 11/09/2026 buổi 4. "
+                "Mã lớp: VT-C4K-GB40. NỘI DUNG và NHẬN XÉT học viên."
+            )
+            rule_matched = await scan_open_zalo_chat(
+                FakePage(
+                    [
+                        FakeMessage(informal_text, "12/09/2026"),
+                        FakeMessage(valid_report, "12/09/2026"),
+                    ]
+                ),
+                job_id=241,
+                screenshots_dir=root,
+                group_name="MindX - VT-C4K-GB40",
+                actual_group_name="MindX - VT-C4K-GB40",
+                person="Teacher",
+                class_date_str="11/09/2026",
+                scan_target=target,
+                today=datetime(2026, 9, 17),
+                ensure_not_cancelled=AsyncMock(),
+                ai_report_classifier=ai_gateway,
+                ai_assist_enabled=True,
+            )
+            self.assertTrue(rule_matched["submitted_for_bcnb"])
+            ai_gateway.evaluate_ambiguous_message.assert_not_awaited()
+
+            # 3. Missing lesson date (no scan_target and empty class_date_str) -> 0 AI calls
+            await scan_open_zalo_chat(
+                FakePage([FakeMessage(informal_text, "12/09/2026")]),
+                job_id=2415,
+                screenshots_dir=root,
+                group_name="MindX - VT-C4K-GB40",
+                actual_group_name="MindX - VT-C4K-GB40",
+                person="Teacher",
+                class_date_str="",
+                scan_target=None,
+                today=datetime(2026, 9, 17),
+                ensure_not_cancelled=AsyncMock(),
+                ai_report_classifier=ai_gateway,
+                ai_assist_enabled=True,
+            )
+            ai_gateway.evaluate_ambiguous_message.assert_not_awaited()
+
+            # 4. Out-of-window or penalized messages -> 0 AI calls, max 3 calls per group across two weekly targets in same job
+            mixed_messages = [
+                FakeMessage(informal_text, "02/09/2026"),  # before W36 class_date (04/09)
+                FakeMessage(opening_notice, "05/09/2026"),  # penalized opening notice
+                FakeMessage(informal_text + " (w36-1)", "05/09/2026"),
+                FakeMessage(informal_text + " (w36-2)", "06/09/2026"),
+                FakeMessage(informal_text + " (w37-1)", "11/09/2026"),
+                FakeMessage(informal_text + " (w37-2)", "12/09/2026"),
+                FakeMessage(informal_text + " (w37-3)", "13/09/2026"),
+            ]
+            ai_gateway.evaluate_ambiguous_message = AsyncMock(
+                return_value={
+                    "is_likely_report": False,
+                    "confidence": 0.15,
+                    "reason": "Không phải báo cáo",
+                }
+            )
+            w36_target = {
+                "class_code": "VT-C4K-GB40",
+                "class_date": "04/09/2026",
+                "class_date_iso": "2026-09-04",
+                "lesson": "3",
+                "week": 36,
+                "year": 2026,
+                "zalo_deadline": "12:00 06/09/2026",
+            }
+            res_w36 = await scan_open_zalo_chat(
+                FakePage(mixed_messages),
+                job_id=242,
+                screenshots_dir=root,
+                group_name="MindX - VT-C4K-GB40",
+                actual_group_name="MindX - VT-C4K-GB40",
+                person="Teacher",
+                class_date_str="04/09/2026",
+                scan_target=w36_target,
+                today=datetime(2026, 9, 17),
+                ensure_not_cancelled=AsyncMock(),
+                ai_report_classifier=ai_gateway,
+                ai_assist_enabled=True,
+            )
+            res_w37 = await scan_open_zalo_chat(
+                FakePage(mixed_messages),
+                job_id=242,
+                screenshots_dir=root,
+                group_name="MindX - VT-C4K-GB40",
+                actual_group_name="MindX - VT-C4K-GB40",
+                person="Teacher",
+                class_date_str="11/09/2026",
+                scan_target=target,
+                today=datetime(2026, 9, 17),
+                ensure_not_cancelled=AsyncMock(),
+                ai_report_classifier=ai_gateway,
+                ai_assist_enabled=True,
+            )
+            self.assertEqual(
+                res_w36["evidence"]["classifier_result"]["ai_assist_evaluated"], 2
+            )
+            self.assertEqual(
+                res_w37["evidence"]["classifier_result"]["ai_assist_evaluated"], 1
+            )
+            self.assertEqual(ai_gateway.evaluate_ambiguous_message.await_count, 3)
+
+    async def test_ai_assist_positive_suggestion_never_auto_ticks_bcnb_and_captures_report_image(self):
+        informal_text = (
+            "Dạ thầy gửi ba mẹ tình hình học hôm nay của các bạn lớp mình nhé ạ: "
+            "Hôm nay cả lớp đã cùng nhau lắp ráp mô hình robot cảm biến khoảng cách "
+            "và lập trình cho robot tự tránh vật cản trên sa bàn thành công."
+        )
+        messages = [
+            FakeMessage("Tin nhắn cũ thông thường " * 5, "05/09/2026"),
+            FakeMessage(informal_text, "12/09/2026"),
+        ]
+        ai_gateway = AsyncMock()
+        ai_gateway.evaluate_ambiguous_message = AsyncMock(
+            return_value={
+                "is_likely_report": True,
+                "confidence": 0.92,
+                "reason": "Có tóm tắt kiến thức buổi học của giáo viên",
+            }
+        )
+        target = {
+            "class_code": "VT-C4K-GB40",
+            "class_date": "11/09/2026",
+            "class_date_iso": "2026-09-11",
+            "lesson": "4",
+            "week": 37,
+            "year": 2026,
+            "zalo_deadline": "12:00 13/09/2026",
+        }
+        with tempfile.TemporaryDirectory() as root:
+            result = await scan_open_zalo_chat(
+                FakePage(messages),
+                job_id=243,
+                screenshots_dir=root,
+                group_name="MindX - VT-C4K-GB40",
+                actual_group_name="MindX - VT-C4K-GB40",
+                person="Teacher",
+                class_date_str="11/09/2026",
+                scan_target=target,
+                today=datetime(2026, 9, 17),
+                ensure_not_cancelled=AsyncMock(),
+                ai_report_classifier=ai_gateway,
+                ai_assist_enabled=True,
+            )
+        ai_gateway.evaluate_ambiguous_message.assert_awaited_once()
+        # Absolute safety boundary: NEVER auto-tick BCNB
+        self.assertFalse(result["submitted_for_bcnb"])
+        self.assertEqual(result["evidence_state"], INSUFFICIENT_EVIDENCE)
+        self.assertEqual(
+            result["status"],
+            "⚠️ AI gợi ý có thể là báo cáo – Cần kiểm tra thủ công",
+        )
+        self.assertEqual(
+            result["evidence"]["classifier_result"]["decision"],
+            "AI_SUGGESTED_REPORT_NEEDS_REVIEW",
+        )
+        self.assertFalse(result["evidence"]["classifier_result"]["report_found"])
+        report_image = result["evidence"]["images"]["report"]
+        self.assertIsNotNone(report_image)
+        self.assertEqual(result["screenshot_path"], report_image["path"])
+
+    async def test_gemini_zalo_report_classifier_gateway_fails_closed(self):
+        from services.external_gateways import GeminiZaloReportClassifierGateway
+
+        informal_text = (
+            "Dạ thầy gửi ba mẹ tình hình học hôm nay của các bạn lớp mình nhé ạ: "
+            "Hôm nay cả lớp đã cùng nhau lắp ráp mô hình robot cảm biến khoảng cách "
+            "và lập trình cho robot tự tránh vật cản trên sa bàn thành công."
+        )
+        # 1. Isolated quality mode without custom client_factory must refuse network
+        default_gw = GeminiZaloReportClassifierGateway(api_key_provider=lambda: "key")
+        with patch.dict(os.environ, {"ZALO_QUALITY_ISOLATED": "1"}, clear=False):
+            isolated_res = await default_gw.evaluate_ambiguous_message(informal_text)
+        self.assertFalse(isolated_res["is_likely_report"])
+        self.assertEqual(isolated_res["reason"], "ISOLATED_QUALITY_MODE_DISABLED")
+
+        # 2. Valid JSON response via injected client_factory
+        class _FakeModels:
+            async def generate_content(self, **_kwargs):
+                return type(
+                    "Resp",
+                    (),
+                    {
+                        "text": '{"is_likely_report": true, "confidence": 0.88, "reason": "Báo cáo tự do"}'
+                    },
+                )()
+
+        fake_client = type(
+            "Client", (), {"aio": type("Aio", (), {"models": _FakeModels()})()}
+        )()
+        gw = GeminiZaloReportClassifierGateway(
+            api_key_provider=lambda: "fake-key",
+            client_factory=lambda _k: fake_client,
+        )
+        ok_res = await gw.evaluate_ambiguous_message(
+            informal_text,
+            group_name="MindX - VT-C4K-GB40",
+            lesson="4",
+            class_date_iso="2026-09-11",
+        )
+        self.assertTrue(ok_res["is_likely_report"])
+        self.assertAlmostEqual(ok_res["confidence"], 0.88)
+
+        # 3. Runtime error fails closed
+        class _ErrorModels:
+            async def generate_content(self, **_kwargs):
+                raise RuntimeError("network error")
+
+        err_client = type(
+            "Client", (), {"aio": type("Aio", (), {"models": _ErrorModels()})()}
+        )()
+        err_gw = GeminiZaloReportClassifierGateway(
+            api_key_provider=lambda: "fake-key",
+            client_factory=lambda _k: err_client,
+        )
+        err_res = await err_gw.evaluate_ambiguous_message(informal_text)
+        self.assertFalse(err_res["is_likely_report"])
+        self.assertEqual(err_res["reason"], "AI_CLASSIFIER_ERROR")
+
 
 if __name__ == "__main__":
     unittest.main()

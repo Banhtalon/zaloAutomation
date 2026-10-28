@@ -135,6 +135,10 @@ class JobDispatcherDispatchTests(unittest.IsolatedAsyncioTestCase):
                 "services.lms_service.run_lms_automation",
                 new_callable=AsyncMock,
             ) as automation,
+            patch(
+                "services.lms_service.run_googleform_fetch_lms_students",
+                new_callable=AsyncMock,
+            ) as fetch_lms_students,
         ):
             await dispatcher._dispatch(job(1, "ZALO_DISCOVERY"))
             await dispatcher._dispatch(
@@ -162,6 +166,16 @@ class JobDispatcherDispatchTests(unittest.IsolatedAsyncioTestCase):
                     {
                         "plan": {"rows": []},
                         "expected_digest": "digest",
+                        "execution_mode": "dry-run",
+                    },
+                )
+            )
+            await dispatcher._dispatch(
+                job(
+                    7,
+                    "GOOGLEFORM_LMS_STUDENTS",
+                    {
+                        "class_codes": ["VT-C4K-GA41"],
                         "execution_mode": "dry-run",
                     },
                 )
@@ -194,6 +208,11 @@ class JobDispatcherDispatchTests(unittest.IsolatedAsyncioTestCase):
             "dry-run",
             runtime=runtime,
         )
+        fetch_lms_students.assert_awaited_once_with(
+            7,
+            ["VT-C4K-GA41"],
+            runtime=runtime,
+        )
 
     async def test_dispatch_rejects_missing_lms_image_and_unknown_job(self):
         uploads = FakeUploadStore()
@@ -205,6 +224,20 @@ class JobDispatcherDispatchTests(unittest.IsolatedAsyncioTestCase):
         uploads.paths_for_job = AsyncMock(return_value=[])
         with self.assertRaises(ValueError):
             await dispatcher._dispatch(job(1, "LMS_ANALYSIS"))
+        with patch("services.lms_service.run_lms_analysis", AsyncMock()) as web_analysis:
+            await dispatcher._dispatch(
+                job(
+                    11,
+                    "LMS_ANALYSIS",
+                    {"source": "lms_web", "execution_mode": "dry-run"},
+                )
+            )
+            web_analysis.assert_awaited_once_with(
+                11,
+                None,
+                "dry-run",
+                runtime=dispatcher.worker_runtime,
+            )
         with self.assertRaises(ValueError):
             await dispatcher._dispatch(job(2, "UNKNOWN"))
 

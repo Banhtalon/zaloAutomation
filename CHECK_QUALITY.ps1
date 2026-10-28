@@ -30,9 +30,11 @@ $isolatedEnvironmentNames = @(
     "PYTHONPYCACHEPREFIX",
     "GOOGLE_FORM_MODE",
     "BCNB_DRY_RUN",
+    "ZALO_AI_ASSIST_CLASSIFIER",
     "FORM_URL",
     "BCNB_URL",
-    "BCNB_CLASS_STATUS_URL"
+    "BCNB_CLASS_STATUS_URL",
+    "LMS_URL"
 )
 $coverageJsonPath = Join-Path $PSScriptRoot "coverage-phase9a.json"
 
@@ -89,9 +91,11 @@ if ($Isolated) {
         PYTHONPYCACHEPREFIX = (Join-Path $isolatedRoot "pycache")
         GOOGLE_FORM_MODE = "dry-run"
         BCNB_DRY_RUN = "true"
+        ZALO_AI_ASSIST_CLASSIFIER = "false"
         FORM_URL = ""
         BCNB_URL = "http://127.0.0.1/quality-disabled/check_nhanxet.php"
         BCNB_CLASS_STATUS_URL = "http://127.0.0.1/quality-disabled/hocsinh.php"
+        LMS_URL = "http://127.0.0.1/quality-disabled/lms-class-sessions"
     }
     foreach ($entry in $isolatedValues.GetEnumerator()) {
         [Environment]::SetEnvironmentVariable(

@@ -55,9 +55,21 @@ class Config:
     HEADLESS = os.getenv("GOOGLE_FORM_HEADLESS", "false").lower() == "true"
     GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite")
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+    # Secondary AI assist for ambiguous Zalo report messages. Disabled by
+    # default; even when enabled it only flags messages for manual review and
+    # never sets submitted_for_bcnb=True automatically.
+    ZALO_AI_ASSIST_CLASSIFIER = (
+        os.getenv("ZALO_AI_ASSIST_CLASSIFIER", "false").strip().lower() == "true"
+    )
     BCNB_USERNAME = os.getenv("BCNB_USERNAME", "")
     BCNB_PASSWORD = os.getenv("BCNB_PASSWORD", "")
     BCNB_URL = os.getenv("BCNB_URL", "https://teachingmindx.top/check_nhanxet.php")
+    LMS_USERNAME = os.getenv("LMS_USERNAME", "")
+    LMS_PASSWORD = os.getenv("LMS_PASSWORD", "")
+    LMS_URL = os.getenv(
+        "LMS_URL",
+        'https://lms.mindx.edu.vn/admin/class-sessions?centres=[%22644346f794300678908f79bc%22]&type=[%22MISS_ATTEND%22,%22DUE_COMMENT%22]&haveSlot=[]&status=[%22FINISHED%22,%22RUNNING%22]&pageIndex=0&itemsPerPage=20&orderBy=%22createdAt_desc%22',
+    ).strip()
     # Safety default: browser jobs may inspect BCNB, but never mutate it unless
     # the operator explicitly opts in through the local .env file.
     BCNB_DRY_RUN = os.getenv("BCNB_DRY_RUN", "true").lower() != "false"

@@ -137,7 +137,9 @@ async def _background_submit_forms(
                                 "error": "Đã có lần nộp chưa xác định kết quả; cần kiểm tra trước khi gửi lại.",
                             }
                         await _ensure_not_cancelled(job_id)
-                        log_message(f"🚀 Nộp form cho: {student_name} ({class_code})")
+                        log_message(
+                            f"🚀 Nộp form cho học viên #{idx + 1} ({class_code})"
+                        )
                         screenshot_path = await submitter.submit_form(student_name, class_code)
                         status_text = "Thành công (DryRun)" if execution_mode != "production" else "Thành công"
                         await audit_repo.complete_action(
@@ -166,6 +168,12 @@ async def _background_submit_forms(
                         }
                     except Exception as exc:
                         error = str(exc)
+                        if student_name and student_name.strip():
+                            error = error.replace(
+                                student_name, "[REDACTED_STUDENT_NAME]"
+                            ).replace(
+                                student_name.strip(), "[REDACTED_STUDENT_NAME]"
+                            )
                         cancelled = await _is_cancel_requested(job_id)
                         failure_outcome = (
                             "CANCELLED_BEFORE_WRITE"
@@ -183,7 +191,9 @@ async def _background_submit_forms(
                                 after_state=None,
                                 error_message=error[:500],
                             )
-                        log_message(f"❌ Nộp thất bại cho {student_name}: {error}")
+                        log_message(
+                            f"❌ Nộp thất bại cho học viên #{idx + 1} ({class_code}): {error}"
+                        )
                         await report_repo.add_form_submission(
                             student_name,
                             class_code,

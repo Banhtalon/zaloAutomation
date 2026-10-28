@@ -5,11 +5,13 @@ from unittest.mock import AsyncMock, patch
 from fastapi import HTTPException
 
 from api.googleform_routes import (
+    FetchLmsStudentsRequest,
     MappingItem,
     OcrRequest,
     RestoreGroupRequest,
     StudentItem,
     SubmitRequest,
+    api_fetch_googleform_lms_students,
     api_run_googleform_ocr,
     clear_history,
     confirm_ignored_group_ended,
@@ -46,6 +48,7 @@ from api.zalo_routes import (
     get_groups,
     get_zalo_scan_preflight,
     get_zalo_scan_plan,
+    manual_approve_zalo_report,
     run_scan,
 )
 from core.time_utils import BUSINESS_TIMEZONE
@@ -297,6 +300,21 @@ class FakeLmsRepo:
         return self.confirmation
 
 
+class FakeEvidenceRepo:
+    def __init__(self):
+        self.verify_result = {
+            "status": "AVAILABLE",
+            "reason": "verified",
+            "sha256": "a" * 64,
+            "size_bytes": 1024,
+        }
+        self.calls = []
+
+    async def verify(self, evidence_ref, *, job_id=None):
+        self.calls.append((evidence_ref, job_id))
+        return dict(self.verify_result)
+
+
 class FakeContainer:
     def __init__(self):
         self.settings = FakeSettings()
@@ -307,6 +325,7 @@ class FakeContainer:
         self.upload_store = FakeUploadStore()
         self.audit_repo = FakeAuditRepo()
         self.zalo_batch_repo = FakeZaloBatchRepo()
+        self.evidence_repo = FakeEvidenceRepo()
         self.lms_repo = None
 
 
@@ -912,6 +931,47 @@ class ApiRoutesUnitTests(unittest.IsolatedAsyncioTestCase):
             (41, {"upload_ids": ["googleform_ocr:upload-1:41"]}),
         )
 
+        lms_fetch = await api_fetch_googleform_lms_students(
+            FetchLmsStudentsRequest(class_codes=["vt-c4k-ga41", "VT-C4K-GI35"]),
+            container,
+        )
+        self.assertEqual(lms_fetch["job_id"], 41)
+        self.assertEqual(
+            lms_fetch["class_codes"],
+            ["VT-C4K-GA41", "VT-C4K-GI35"],
+        )
+        self.assertEqual(
+            container.job_repo.created[-1][0],
+            "GOOGLEFORM_LMS_STUDENTS",
+        )
+        for bad_req, expected_code in (
+            (FetchLmsStudentsRequest(class_codes=[]), "LMS_CLASS_CODES_EMPTY"),
+            (
+                FetchLmsStudentsRequest(
+                    class_codes=["VT-C4K-GA41", "vt-c4k-ga41"]
+                ),
+                "LMS_CLASS_CODES_DUPLICATE",
+            ),
+            (
+                FetchLmsStudentsRequest(class_codes=["bad_code"]),
+                "LMS_CLASS_CODES_INVALID",
+            ),
+            (
+                FetchLmsStudentsRequest(
+                    class_codes=["VT-C4K-GA41"],
+                    class_code="VT-C4K-GI35",
+                ),
+                "LMS_CLASS_CODES_INVALID",
+            ),
+        ):
+            with self.assertRaises(HTTPException) as bad_lms_fetch:
+                await api_fetch_googleform_lms_students(bad_req, container)
+            self.assertEqual(bad_lms_fetch.exception.status_code, 422)
+            self.assertEqual(
+                bad_lms_fetch.exception.detail["code"],
+                expected_code,
+            )
+
         submitted = await run_submit(
             SubmitRequest(
                 students=[StudentItem(name=" Student ", class_code=" vt-jsb ")],
@@ -1019,6 +1079,10 @@ class ApiRoutesUnitTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_lms_routes_cover_analysis_confirmation_and_plan_drift(self):
         container = FakeContainer()
+        web_result = await api_lms_analyze(None, container)
+        self.assertEqual(web_result["job_id"], 41)
+        self.assertEqual(web_result["dry_run"], True)
+
         result = await api_lms_analyze(
             LMSAnalyzeRequest(upload_id="upload-lms"),
             container,
@@ -1081,6 +1145,1015 @@ class ApiRoutesUnitTests(unittest.IsolatedAsyncioTestCase):
             caught.exception.detail["code"],
             "LMS_CONFIRMATION_MODE_MISMATCH",
         )
+
+        # Subset selection on api_lms_confirm
+        subset_plan = {
+            "can_confirm": True,
+            "classes_to_tick": ["VT-JSB14", "VT-JSB15"],
+        }
+        subset_confirmation = {
+            "job_id": 43,
+            "plan": dict(subset_plan),
+            "plan_digest": compute_plan_digest(subset_plan),
+            "dry_run": True,
+        }
+        container.lms_repo = FakeLmsRepo(subset_confirmation)
+        subset_res = await api_lms_confirm(
+            LMSConfirmRequest(
+                analysis_job_id=41,
+                confirmation_token="token",
+                selected_classes_to_tick=["vt-jsb15"],
+            ),
+            container,
+        )
+        self.assertEqual(subset_res["selected_classes_to_tick"], ["VT-JSB15"])
+
+        # Reject outside plan (409) and empty selection (422)
+        subset_confirmation["plan"] = dict(subset_plan)
+        with self.assertRaises(HTTPException) as caught:
+            await api_lms_confirm(
+                LMSConfirmRequest(
+                    analysis_job_id=41,
+                    confirmation_token="token",
+                    selected_classes_to_tick=["VT-OUTSIDE-99"],
+                ),
+                container,
+            )
+        self.assertEqual(caught.exception.status_code, 409)
+        self.assertEqual(
+            caught.exception.detail["code"],
+            "LMS_SELECTED_CLASS_NOT_IN_PLAN",
+        )
+
+        subset_confirmation["plan"] = dict(subset_plan)
+        with self.assertRaises(HTTPException) as caught:
+            await api_lms_confirm(
+                LMSConfirmRequest(
+                    analysis_job_id=41,
+                    confirmation_token="token",
+                    selected_classes_to_tick=[],
+                ),
+                container,
+            )
+        self.assertEqual(caught.exception.status_code, 422)
+        self.assertEqual(
+            caught.exception.detail["code"],
+            "LMS_SELECTED_CLASSES_EMPTY",
+        )
+
+    async def test_run_scan_selective_rescan_filters_admitted_targets_and_rejects_invalid_keys(self):
+        container = FakeContainer()
+        container.group_repo.snapshot["plan"]["scan_targets"].append(
+            {
+                "person": "Teacher 2",
+                "class_code": "VT-C4K-GI35",
+                "lesson": "2",
+                "class_date": "08/08/2026",
+                "class_date_iso": "2026-08-08",
+                "group_name": "MindX - VT-C4K-GI35 T7 (18H-20H)",
+                "week": 32,
+                "year": 2026,
+            }
+        )
+        valid_key = "2026-W32|VT-C4K-GI35|2|2026-08-08"
+        result = await run_scan(
+            container,
+            selected_target_keys=[valid_key],
+        )
+        self.assertEqual(result["target_count"], 1)
+        self.assertTrue(result["selective_rescan"])
+        created_payload = container.job_repo.created[-1][1]
+        self.assertTrue(created_payload["scan_plan"]["selective_rescan"])
+        self.assertEqual(
+            created_payload["scan_plan"]["selected_target_keys"],
+            [valid_key],
+        )
+        self.assertEqual(len(created_payload["scan_plan"]["targets"]), 1)
+        self.assertEqual(
+            created_payload["scan_plan"]["targets"][0]["class_code"],
+            "VT-C4K-GI35",
+        )
+
+        # Reject unknown target key outside snapshot
+        with self.assertRaises(HTTPException) as caught:
+            await run_scan(
+                container,
+                selected_target_keys=["2026-W32|UNKNOWN|1|2026-08-08"],
+            )
+        self.assertEqual(caught.exception.status_code, 409)
+        self.assertEqual(
+            caught.exception.detail["code"],
+            "SCAN_SELECTED_TARGET_NOT_IN_PLAN",
+        )
+
+        # Reject empty or duplicate target keys
+        with self.assertRaises(HTTPException) as caught:
+            await run_scan(container, selected_target_keys=[])
+        self.assertEqual(caught.exception.status_code, 422)
+        self.assertEqual(
+            caught.exception.detail["code"],
+            "SCAN_SELECTED_TARGETS_EMPTY",
+        )
+
+        with self.assertRaises(HTTPException) as caught:
+            await run_scan(
+                container,
+                selected_target_keys=[valid_key, valid_key],
+            )
+        self.assertEqual(caught.exception.status_code, 422)
+        self.assertEqual(
+            caught.exception.detail["code"],
+            "SCAN_SELECTED_TARGETS_DUPLICATE",
+        )
+
+    async def test_manual_approve_zalo_report_validates_target_and_evidence_fail_closed(self):
+        container = FakeContainer()
+        container.job_repo.job = {
+            "id": 900,
+            "job_type": "ZALO_SCAN",
+            "status": "PARTIAL_SUCCESS",
+            "results": {
+                "snapshot_id": 9,
+                "items": [
+                    {
+                        "group": "MindX - VT-C4K-GI35 T7",
+                        "person": "Teacher 2",
+                        "status": "❌ Chưa tìm thấy trong khoảng đã kiểm chứng",
+                        "evidence": {
+                            "images": {
+                                "latest": {
+                                    "path": "/api/evidence/900/gi35.png",
+                                    "evidence_status": "AVAILABLE",
+                                }
+                            }
+                        },
+                        "scan_target": {
+                            "week": 32,
+                            "year": 2026,
+                            "class_code": "VT-C4K-GI35",
+                            "lesson": "2",
+                            "class_date": "08/08/2026",
+                            "class_date_iso": "2026-08-08",
+                            "group_name": "MindX - VT-C4K-GI35 T7",
+                        },
+                    }
+                ],
+            },
+        }
+        from types import SimpleNamespace
+        fake_user = SimpleNamespace(username="operator-1")
+        res = await manual_approve_zalo_report(
+            container,
+            user=fake_user,
+            job_id=900,
+            group_name="MindX - VT-C4K-GI35 T7",
+            class_code="VT-C4K-GI35",
+            week=32,
+            year=2026,
+            lesson="2",
+            class_date_iso="2026-08-08",
+            evidence_path="/api/evidence/900/gi35.png",
+        )
+        self.assertEqual(res["job_id"], 41)
+        self.assertEqual(res["source_job_id"], 900)
+        self.assertEqual(res["target_key"], "2026-W32|VT-C4K-GI35|2|2026-08-08")
+        created_type, created_payload, _meta = container.job_repo.created[-1]
+        self.assertEqual(created_type, "ZALO_MANUAL_APPROVE")
+        self.assertEqual(created_payload["approved_by"], "operator-1")
+        self.assertEqual(
+            container.evidence_repo.calls[-1],
+            ("/api/evidence/900/gi35.png", 900),
+        )
+
+        # Reject missing evidence path
+        with self.assertRaises(HTTPException) as caught:
+            await manual_approve_zalo_report(
+                container,
+                user=fake_user,
+                job_id=900,
+                group_name="MindX - VT-C4K-GI35 T7",
+                class_code="VT-C4K-GI35",
+                week=32,
+                year=2026,
+                lesson="2",
+                class_date_iso="2026-08-08",
+                evidence_path="   ",
+            )
+        self.assertEqual(caught.exception.status_code, 422)
+        self.assertEqual(
+            caught.exception.detail["code"],
+            "MANUAL_APPROVE_EVIDENCE_REQUIRED",
+        )
+
+        # Reject evidence path not belonging to target
+        with self.assertRaises(HTTPException) as caught:
+            await manual_approve_zalo_report(
+                container,
+                user=fake_user,
+                job_id=900,
+                group_name="MindX - VT-C4K-GI35 T7",
+                class_code="VT-C4K-GI35",
+                week=32,
+                year=2026,
+                lesson="2",
+                class_date_iso="2026-08-08",
+                evidence_path="/api/evidence/900/other.png",
+            )
+        self.assertEqual(caught.exception.status_code, 409)
+        self.assertEqual(
+            caught.exception.detail["code"],
+            "MANUAL_APPROVE_EVIDENCE_NOT_IN_TARGET",
+        )
+
+        # Reject unavailable evidence in registry
+        container.evidence_repo.verify_result = {
+            "status": "MISSING",
+            "reason": "File ảnh đã bị xóa",
+        }
+        with self.assertRaises(HTTPException) as caught:
+            await manual_approve_zalo_report(
+                container,
+                user=fake_user,
+                job_id=900,
+                group_name="MindX - VT-C4K-GI35 T7",
+                class_code="VT-C4K-GI35",
+                week=32,
+                year=2026,
+                lesson="2",
+                class_date_iso="2026-08-08",
+                evidence_path="/api/evidence/900/gi35.png",
+            )
+        self.assertEqual(caught.exception.status_code, 409)
+        self.assertEqual(
+            caught.exception.detail["code"],
+            "MANUAL_APPROVE_EVIDENCE_UNAVAILABLE",
+        )
+
+        # Cover all input validation & state guard branches
+        for bad_kwargs, expected_code in (
+            ({"job_id": 0}, "MANUAL_APPROVE_INVALID_INPUT"),
+            ({"group_name": "  "}, "MANUAL_APPROVE_INVALID_INPUT"),
+            ({"week": 99}, "MANUAL_APPROVE_INVALID_TARGET"),
+            ({"lesson": ""}, "MANUAL_APPROVE_INVALID_TARGET"),
+            ({"class_date_iso": "08-08-2026"}, "MANUAL_APPROVE_INVALID_TARGET"),
+            ({"class_code": 123}, "MANUAL_APPROVE_INVALID_TARGET"),
+        ):
+            base_kwargs = {
+                "job_id": 900,
+                "group_name": "MindX - VT-C4K-GI35 T7",
+                "class_code": "VT-C4K-GI35",
+                "week": 32,
+                "year": 2026,
+                "lesson": "2",
+                "class_date_iso": "2026-08-08",
+                "evidence_path": "/api/evidence/900/gi35.png",
+            }
+            base_kwargs.update(bad_kwargs)
+            with self.assertRaises(HTTPException) as caught:
+                await manual_approve_zalo_report(container, user=fake_user, **base_kwargs)
+            self.assertEqual(caught.exception.detail["code"], expected_code)
+
+        # Target not in job
+        with self.assertRaises(HTTPException) as caught:
+            await manual_approve_zalo_report(
+                container,
+                user=fake_user,
+                job_id=900,
+                group_name="MindX - VT-C4K-GI35 T7",
+                class_code="VT-C4K-GI35",
+                week=32,
+                year=2026,
+                lesson="99",
+                class_date_iso="2026-08-08",
+                evidence_path="/api/evidence/900/gi35.png",
+            )
+        self.assertEqual(caught.exception.detail["code"], "MANUAL_APPROVE_TARGET_NOT_IN_JOB")
+
+        # Already submitted target
+        container.job_repo.job["results"]["items"][0]["status"] = "✅ Đã nộp – Có minh chứng"
+        with self.assertRaises(HTTPException) as caught:
+            await manual_approve_zalo_report(
+                container,
+                user=fake_user,
+                job_id=900,
+                group_name="MindX - VT-C4K-GI35 T7",
+                class_code="VT-C4K-GI35",
+                week=32,
+                year=2026,
+                lesson="2",
+                class_date_iso="2026-08-08",
+                evidence_path="/api/evidence/900/gi35.png",
+            )
+        self.assertEqual(caught.exception.detail["code"], "MANUAL_APPROVE_ALREADY_SUBMITTED")
+
+        # Ambiguous duplicate target in job
+        container.job_repo.job["results"]["items"][0]["status"] = "❌ Chưa báo cáo"
+        container.job_repo.job["results"]["items"].append(
+            dict(container.job_repo.job["results"]["items"][0])
+        )
+        with self.assertRaises(HTTPException) as caught:
+            await manual_approve_zalo_report(
+                container,
+                user=fake_user,
+                job_id=900,
+                group_name="MindX - VT-C4K-GI35 T7",
+                class_code="VT-C4K-GI35",
+                week=32,
+                year=2026,
+                lesson="2",
+                class_date_iso="2026-08-08",
+                evidence_path="/api/evidence/900/gi35.png",
+            )
+        self.assertEqual(caught.exception.detail["code"], "MANUAL_APPROVE_AMBIGUOUS_TARGET")
+
+        # Non-terminal, wrong job_type, missing source job
+        container.job_repo.job["status"] = "RUNNING"
+        with self.assertRaises(HTTPException) as caught:
+            await manual_approve_zalo_report(
+                container,
+                user=fake_user,
+                job_id=900,
+                group_name="MindX - VT-C4K-GI35 T7",
+                class_code="VT-C4K-GI35",
+                week=32,
+                year=2026,
+                lesson="2",
+                class_date_iso="2026-08-08",
+                evidence_path="/api/evidence/900/gi35.png",
+            )
+        self.assertEqual(caught.exception.detail["code"], "SOURCE_JOB_NOT_TERMINAL")
+
+        container.job_repo.job["job_type"] = "ZALO_DISCOVERY"
+        with self.assertRaises(HTTPException) as caught:
+            await manual_approve_zalo_report(
+                container,
+                user=fake_user,
+                job_id=900,
+                group_name="MindX - VT-C4K-GI35 T7",
+                class_code="VT-C4K-GI35",
+                week=32,
+                year=2026,
+                lesson="2",
+                class_date_iso="2026-08-08",
+                evidence_path="/api/evidence/900/gi35.png",
+            )
+        self.assertEqual(caught.exception.detail["code"], "MANUAL_APPROVE_INVALID_SOURCE_JOB")
+
+        container.job_repo.job = None
+        with self.assertRaises(HTTPException) as caught:
+            await manual_approve_zalo_report(
+                container,
+                user=fake_user,
+                job_id=900,
+                group_name="MindX - VT-C4K-GI35 T7",
+                class_code="VT-C4K-GI35",
+                week=32,
+                year=2026,
+                lesson="2",
+                class_date_iso="2026-08-08",
+                evidence_path="/api/evidence/900/gi35.png",
+            )
+        self.assertEqual(caught.exception.detail["code"], "SOURCE_JOB_NOT_FOUND")
+
+    def test_weekly_summary_csv_format_and_formula_injection_sanitization(self):
+        from repositories.report_repository import (
+            CSV_HEADERS,
+            build_weekly_summary_csv,
+            sanitize_csv_cell,
+        )
+
+        self.assertEqual(sanitize_csv_cell("=CMD|' /C calc'!A0"), "'=CMD|' /C calc'!A0")
+        self.assertEqual(sanitize_csv_cell("+SUM(A1:A2)"), "'+SUM(A1:A2)")
+        self.assertEqual(sanitize_csv_cell("-10+20"), "'-10+20")
+        self.assertEqual(sanitize_csv_cell("@HYPERLINK()"), "'@HYPERLINK()")
+        self.assertEqual(sanitize_csv_cell("\t=1+1"), "'=1+1")
+        self.assertEqual(sanitize_csv_cell("Nguyễn\r\nVăn A"), "Nguyễn Văn A")
+
+        csv_text = build_weekly_summary_csv(
+            [
+                {
+                    "class_code": "VT-C4K-GI35",
+                    "teacher": "=Nguyễn Văn A",
+                    "lesson": "5",
+                    "class_date": "18/10/2026",
+                    "zalo_status": "✅ Đã nộp – Có minh chứng",
+                    "lms_status": "✅ Đã nhận xét & Tích BCNB",
+                    "verified_at": "2026-10-18T14:00:00Z",
+                    "raw_chat_text": "TIN_NHAN_NHAY_CAM_KHONG_DUOC_XUAT",
+                    "student_phone": "0909123456",
+                }
+            ]
+        )
+        self.assertTrue(csv_text.startswith("\ufeff"))
+        lines = [line for line in csv_text.lstrip("\ufeff").split("\r\n") if line]
+        self.assertEqual(len(lines), 2)
+        self.assertEqual(lines[0], ",".join(CSV_HEADERS))
+        self.assertIn("VT-C4K-GI35,'=Nguyễn Văn A,5,18/10/2026", lines[1])
+        self.assertNotIn("TIN_NHAN_NHAY_CAM_KHONG_DUOC_XUAT", csv_text)
+        self.assertNotIn("0909123456", csv_text)
+
+    async def test_weekly_summary_api_route_and_sqlite_aggregation(self):
+        import json
+        import tempfile
+        from pathlib import Path
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from api.zalo_routes import get_weekly_summary
+        from db import database
+        from repositories.report_repository import ReportRepository
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            db_file = str(Path(tmp_dir) / "weekly_summary_test.db")
+            with patch.object(database, "DB_PATH", db_file):
+                database.init_db()
+                async with database.get_db_connection() as db:
+                    await db.execute(
+                        "INSERT INTO groups (group_name, person_in_charge, class_code) VALUES (?, ?, ?)",
+                        ("MindX - VT-LMS-ONLY", "Lê Thị C", "VT-LMS-ONLY"),
+                    )
+                    # Job 1: Full ZALO_SCAN for W42/2026
+                    full_results = {
+                        "snapshot_id": 10,
+                        "required_week": {"week": 42, "year": 2026},
+                        "selected_weeks": [
+                            {"week": 42, "year": 2026},
+                            {"week": 43, "year": 2026},
+                        ],
+                        "items": [
+                            {
+                                "group": "VT-JSB16",
+                                "person": "Trần Thị B",
+                                "status": "✅ Đã nộp – Có minh chứng",
+                                "timestamp": "2026-10-18T10:00:00Z",
+                                "raw_message_secret": "NOI_DUNG_CHAT_RIENG_TU",
+                                "scan_target": {
+                                    "week": 42,
+                                    "year": 2026,
+                                    "class_code": "VT-JSB16",
+                                    "lesson": "5",
+                                    "class_date": "18/10/2026",
+                                    "class_date_iso": "2026-10-18",
+                                },
+                                "evidence": {
+                                    "scanned_at": "2026-10-18T10:00:00Z",
+                                    "messages_checked": 14,
+                                    "images": {
+                                        "report": {
+                                            "path": "/api/evidence/1/report.png",
+                                            "evidence_status": "AVAILABLE",
+                                        }
+                                    },
+                                },
+                            },
+                            {
+                                "group": "VT-C4K-GI35",
+                                "person": "Nguyễn Văn A",
+                                "status": "❌ Chưa tìm thấy báo cáo",
+                                "timestamp": "2026-10-18T10:02:00Z",
+                                "scan_target": {
+                                    "week": 42,
+                                    "year": 2026,
+                                    "class_code": "VT-C4K-GI35",
+                                    "lesson": "2",
+                                    "class_date": "17/10/2026",
+                                    "class_date_iso": "2026-10-17",
+                                },
+                            },
+                        ],
+                    }
+                    await db.execute(
+                        """
+                        INSERT INTO scan_jobs (id, job_type, status, created_at, finished_at, results, request_payload, mutates_external)
+                        VALUES (?, 'ZALO_SCAN', 'SUCCESS', '2026-10-18T09:55:00Z', '2026-10-18T10:05:00Z', ?, ?, 0)
+                        """,
+                        (
+                            1,
+                            json.dumps(full_results, ensure_ascii=False),
+                            json.dumps(
+                                {
+                                    "execution_mode": "dry-run",
+                                    "scan_plan": {
+                                        "snapshot_id": 10,
+                                        "required_week": {"week": 42, "year": 2026},
+                                    },
+                                }
+                            ),
+                        ),
+                    )
+                    # Job 2: Selective rescan ZALO_SCAN updating VT-C4K-GI35 in W42/2026
+                    selective_results = {
+                        "snapshot_id": 10,
+                        "selective_rescan": True,
+                        "required_week": {"week": 42, "year": 2026},
+                        "items": [
+                            {
+                                "group": "VT-C4K-GI35",
+                                "person": "Nguyễn Văn A",
+                                "status": "✅ Đã nộp – Có minh chứng",
+                                "timestamp": "2026-10-18T11:00:00Z",
+                                "scan_target": {
+                                    "week": 42,
+                                    "year": 2026,
+                                    "class_code": "VT-C4K-GI35",
+                                    "lesson": "2",
+                                    "class_date": "17/10/2026",
+                                    "class_date_iso": "2026-10-17",
+                                },
+                                "evidence": {
+                                    "scanned_at": "2026-10-18T11:00:00Z",
+                                    "messages_checked": 18,
+                                },
+                            }
+                        ],
+                    }
+                    await db.execute(
+                        """
+                        INSERT INTO scan_jobs (id, job_type, status, created_at, finished_at, results, request_payload, mutates_external)
+                        VALUES (?, 'ZALO_SCAN', 'SUCCESS', '2026-10-18T10:55:00Z', '2026-10-18T11:01:00Z', ?, ?, 0)
+                        """,
+                        (
+                            2,
+                            json.dumps(selective_results, ensure_ascii=False),
+                            json.dumps(
+                                {
+                                    "execution_mode": "dry-run",
+                                    "scan_plan": {
+                                        "snapshot_id": 10,
+                                        "selective_rescan": True,
+                                        "required_week": {"week": 42, "year": 2026},
+                                    },
+                                }
+                            ),
+                        ),
+                    )
+                    # Job 3: LMS_ANALYSIS preview for W42/2026
+                    lms_plan = {
+                        "kind": "lms_preview",
+                        "week": 42,
+                        "year": 2026,
+                        "classes_to_tick": ["VT-JSB16"],
+                        "already_checked_classes": [],
+                        "missing_classes": ["VT-C4K-GI35", "VT-LMS-ONLY"],
+                        "missing_but_checked_classes": [],
+                        "unmatched_classes": [],
+                        "overdue_details": {
+                            "VT-C4K-GI35": "Trễ 2 ngày",
+                            "VT-LMS-ONLY": "Trễ 4 ngày",
+                        },
+                    }
+                    await db.execute(
+                        """
+                        INSERT INTO scan_jobs (id, job_type, status, created_at, finished_at, results, request_payload, mutates_external)
+                        VALUES (3, 'LMS_ANALYSIS', 'SUCCESS', '2026-10-18T11:10:00Z', '2026-10-18T11:12:00Z', ?, '{}', 0)
+                        """,
+                        (json.dumps(lms_plan, ensure_ascii=False),),
+                    )
+                    # Job 4: LMS_AUTOMATION execution for W42/2026
+                    lms_exec = {
+                        "kind": "lms_execution",
+                        "week": 42,
+                        "year": 2026,
+                        "dry_run": False,
+                        "verified_classes": ["VT-JSB16"],
+                        "failed_classes": [],
+                    }
+                    await db.execute(
+                        """
+                        INSERT INTO scan_jobs (id, job_type, status, created_at, finished_at, results, request_payload, mutates_external)
+                        VALUES (4, 'LMS_AUTOMATION', 'SUCCESS', '2026-10-18T11:15:00Z', '2026-10-18T11:16:00Z', ?, '{}', 1)
+                        """,
+                        (json.dumps(lms_exec, ensure_ascii=False),),
+                    )
+                    await db.commit()
+
+                container = SimpleNamespace(report_repo=ReportRepository())
+
+                # 1. Aggregated summary for W42/2026 merges Job 1 + Job 2 + LMS
+                summary = await get_weekly_summary(
+                    week=42,
+                    year=2026,
+                    container=container,
+                )
+                self.assertEqual(summary["week"], 42)
+                self.assertEqual(summary["year"], 2026)
+                self.assertEqual(summary["period_key"], "2026-W42")
+                self.assertEqual(len(summary["jobs"]), 2)
+                self.assertEqual(len(summary["rows"]), 3)
+                rows_by_code = {r["class_code"]: r for r in summary["rows"]}
+                self.assertEqual(
+                    rows_by_code["VT-JSB16"]["lms_status"],
+                    "✅ Đã nhận xét & Tích BCNB",
+                )
+                self.assertEqual(
+                    rows_by_code["VT-C4K-GI35"]["zalo_status"],
+                    "✅ Đã nộp – Có minh chứng",
+                )
+                self.assertEqual(
+                    rows_by_code["VT-C4K-GI35"]["lms_status"],
+                    "❌ Chưa nhận xét (Trễ 2 ngày)",
+                )
+                self.assertEqual(
+                    rows_by_code["VT-LMS-ONLY"]["zalo_status"],
+                    "Chưa quét Zalo",
+                )
+                self.assertEqual(
+                    rows_by_code["VT-LMS-ONLY"]["teacher"],
+                    "Lê Thị C",
+                )
+                # Ensure sensitive raw message field was stripped from sanitized items
+                self.assertNotIn("NOI_DUNG_CHAT_RIENG_TU", json.dumps(summary))
+
+                # 2. Querying explicit historical Job #1 shows unmerged pre-rescan status
+                job1_summary = await get_weekly_summary(
+                    week=42,
+                    year=2026,
+                    job_id=1,
+                    container=container,
+                )
+                self.assertEqual(job1_summary["selected_job_id"], 1)
+                job1_by_code = {r["class_code"]: r for r in job1_summary["rows"]}
+                self.assertEqual(
+                    job1_by_code["VT-C4K-GI35"]["zalo_status"],
+                    "❌ Chưa tìm thấy báo cáo",
+                )
+
+                # 3. Exporting CSV via format='csv'
+                csv_resp = await get_weekly_summary(
+                    week=42,
+                    year=2026,
+                    format="csv",
+                    container=container,
+                )
+                self.assertEqual(csv_resp.media_type, "text/csv; charset=utf-8")
+                self.assertIn(
+                    "Bao_Cao_Tuan_W42_2026.csv",
+                    csv_resp.headers.get("Content-Disposition", ""),
+                )
+                csv_decoded = csv_resp.body.decode("utf-8")
+                self.assertTrue(csv_decoded.startswith("\ufeff"))
+                self.assertIn("Mã lớp,Giáo viên,Buổi học,Ngày học,Trạng thái Zalo,Trạng thái LMS,Thời gian kiểm chứng", csv_decoded)
+                self.assertIn("VT-JSB16,Trần Thị B,5,18/10/2026", csv_decoded)
+
+                # 4. Validation errors
+                with self.assertRaises(HTTPException) as bad_period:
+                    await get_weekly_summary(week=42, year=None, container=container)
+                self.assertEqual(bad_period.exception.detail["code"], "INVALID_PERIOD")
+
+                with self.assertRaises(HTTPException) as bad_fmt:
+                    await get_weekly_summary(
+                        week=42,
+                        year=2026,
+                        format="xlsx",
+                        container=container,
+                    )
+                self.assertEqual(bad_fmt.exception.detail["code"], "INVALID_REPORT_FORMAT")
+
+                with self.assertRaises(HTTPException) as missing_job:
+                    await get_weekly_summary(
+                        week=42,
+                        year=2026,
+                        job_id=999,
+                        container=container,
+                    )
+                self.assertEqual(missing_job.exception.detail["code"], "JOB_NOT_FOUND")
+
+                with self.assertRaises(HTTPException) as wrong_job_type:
+                    await get_weekly_summary(
+                        week=42,
+                        year=2026,
+                        job_id=3,
+                        container=container,
+                    )
+                self.assertEqual(wrong_job_type.exception.detail["code"], "INVALID_SCAN_JOB")
+
+                # 5. Cross-snapshot guard, late vs exempt Zalo classification, dry-run LMS separation, and >200 jobs history retention
+                async with database.get_db_connection() as db:
+                    # W41/2026 Job 10: Snapshot 10 full scan with [VT-SNAP10-A, VT-SNAP10-B]
+                    snap10_results = {
+                        "snapshot_id": 10,
+                        "required_week": {"week": 41, "year": 2026},
+                        "items": [
+                            {
+                                "group": "VT-SNAP10-A",
+                                "person": "GV A",
+                                "status": "✅ Đã nộp – Có minh chứng",
+                                "scan_target": {
+                                    "week": 41,
+                                    "year": 2026,
+                                    "class_code": "VT-SNAP10-A",
+                                    "lesson": "1",
+                                    "class_date": "10/10/2026",
+                                    "class_date_iso": "2026-10-10",
+                                },
+                            },
+                            {
+                                "group": "VT-SNAP10-B",
+                                "person": "GV B",
+                                "status": "❌ Chưa tìm thấy báo cáo",
+                                "scan_target": {
+                                    "week": 41,
+                                    "year": 2026,
+                                    "class_code": "VT-SNAP10-B",
+                                    "lesson": "2",
+                                    "class_date": "11/10/2026",
+                                    "class_date_iso": "2026-10-11",
+                                },
+                            },
+                        ],
+                    }
+                    await db.execute(
+                        """
+                        INSERT INTO scan_jobs (id, job_type, status, created_at, finished_at, results, request_payload, mutates_external)
+                        VALUES (10, 'ZALO_SCAN', 'SUCCESS', '2026-10-11T10:00:00Z', '2026-10-11T10:05:00Z', ?, '{"execution_mode":"dry-run"}', 0)
+                        """,
+                        (json.dumps(snap10_results, ensure_ascii=False),),
+                    )
+                    # W41/2026 Job 11: Snapshot 20 selective rescan with [VT-SNAP20-LATE, VT-SNAP20-EXEMPT]
+                    snap20_selective = {
+                        "snapshot_id": 20,
+                        "selective_rescan": True,
+                        "required_week": {"week": 41, "year": 2026},
+                        "items": [
+                            {
+                                "group": "VT-SNAP20-LATE",
+                                "person": "GV Trễ",
+                                "status": "🟡 Đã nộp trễ – Có minh chứng",
+                                "scan_target": {
+                                    "week": 41,
+                                    "year": 2026,
+                                    "class_code": "VT-SNAP20-LATE",
+                                    "lesson": "3",
+                                    "class_date": "11/10/2026",
+                                    "class_date_iso": "2026-10-11",
+                                },
+                            },
+                            {
+                                "group": "VT-SNAP20-EXEMPT",
+                                "person": "GV Miễn",
+                                "status": "🟡 Miễn báo cáo (Buổi 14)",
+                                "scan_target": {
+                                    "week": 41,
+                                    "year": 2026,
+                                    "class_code": "VT-SNAP20-EXEMPT",
+                                    "lesson": "14",
+                                    "class_date": "11/10/2026",
+                                    "class_date_iso": "2026-10-11",
+                                },
+                            },
+                        ],
+                    }
+                    await db.execute(
+                        """
+                        INSERT INTO scan_jobs (id, job_type, status, created_at, finished_at, results, request_payload, mutates_external)
+                        VALUES (11, 'ZALO_SCAN', 'SUCCESS', '2026-10-11T11:00:00Z', '2026-10-11T11:05:00Z', ?, '{"execution_mode":"dry-run"}', 0)
+                        """,
+                        (json.dumps(snap20_selective, ensure_ascii=False),),
+                    )
+                    # W41/2026 Job 12: Dry-run LMS_AUTOMATION must count in dry_run_count, NOT ticked_count
+                    w41_lms_dry = {
+                        "kind": "lms_execution",
+                        "week": 41,
+                        "year": 2026,
+                        "dry_run": True,
+                        "verified_classes": ["VT-SNAP20-LATE"],
+                        "failed_classes": [],
+                    }
+                    await db.execute(
+                        """
+                        INSERT INTO scan_jobs (id, job_type, status, created_at, finished_at, results, request_payload, mutates_external)
+                        VALUES (12, 'LMS_AUTOMATION', 'SUCCESS', '2026-10-11T11:10:00Z', '2026-10-11T11:12:00Z', ?, '{}', 0)
+                        """,
+                        (json.dumps(w41_lms_dry, ensure_ascii=False),),
+                    )
+                    # Insert 205 newer ZALO_SCAN jobs in W43/2026 to ensure W41 and W42 never disappear past 200 jobs
+                    w43_payload = json.dumps(
+                        {
+                            "snapshot_id": 30,
+                            "required_week": {"week": 43, "year": 2026},
+                            "items": [],
+                        }
+                    )
+                    await db.executemany(
+                        """
+                        INSERT INTO scan_jobs (id, job_type, status, created_at, finished_at, results, request_payload, mutates_external)
+                        VALUES (?, 'ZALO_SCAN', 'SUCCESS', '2026-10-25T10:00:00Z', '2026-10-25T10:01:00Z', ?, '{"execution_mode":"dry-run"}', 0)
+                        """,
+                        [(100 + idx, w43_payload) for idx in range(205)],
+                    )
+                    await db.commit()
+
+                w41_summary = await get_weekly_summary(
+                    week=41,
+                    year=2026,
+                    container=container,
+                )
+                w41_codes = [r["class_code"] for r in w41_summary["rows"]]
+                # Must not mix Snapshot 10 rows into Snapshot 20 selective scan
+                self.assertEqual(w41_codes, ["VT-SNAP20-LATE", "VT-SNAP20-EXEMPT"])
+                # Late report must NOT be counted as exempt
+                self.assertEqual(w41_summary["summary"]["zalo_exempt"], 1)
+                self.assertEqual(w41_summary["summary"]["zalo_late"], 1)
+                self.assertEqual(w41_summary["summary"]["zalo_pending"], 1)
+                # Dry-run LMS must NOT be counted as production ticked_count
+                self.assertEqual(w41_summary["lms_summary"]["ticked_count"], 0)
+                self.assertEqual(w41_summary["lms_summary"]["dry_run_count"], 1)
+                self.assertEqual(w41_summary["summary"]["lms_completed"], 0)
+                self.assertEqual(w41_summary["summary"]["lms_dry_run"], 1)
+                # Available weeks still include W41 and W42 even after >200 newer jobs
+                avail_keys = {w["period_key"] for w in w41_summary["available_weeks"]}
+                self.assertIn("2026-W41", avail_keys)
+                self.assertIn("2026-W42", avail_keys)
+
+                # 6. Manual approval reconciliation: scan twice in W40/2026 (Job 310, then Job 311),
+                # then manually approve from Job 310 -> weekly summary must report "✅ Đã duyệt tay & Tích BCNB"
+                async with database.get_db_connection() as db:
+                    w40_scan1 = {
+                        "snapshot_id": 40,
+                        "required_week": {"week": 40, "year": 2026},
+                        "items": [
+                            {
+                                "group": "VT-C4K-MA01",
+                                "person": "GV Duyệt Tay",
+                                "status": "❌ Chưa tìm thấy báo cáo",
+                                "scan_target": {
+                                    "week": 40,
+                                    "year": 2026,
+                                    "class_code": "VT-C4K-MA01",
+                                    "lesson": "6",
+                                    "class_date": "04/10/2026",
+                                    "class_date_iso": "2026-10-04",
+                                },
+                                "evidence": {
+                                    "scanned_at": "2026-10-04T10:00:00Z",
+                                    "images": {
+                                        "latest": {
+                                            "path": "/api/evidence/310/latest.png",
+                                            "evidence_status": "AVAILABLE",
+                                        }
+                                    },
+                                },
+                            }
+                        ],
+                    }
+                    w40_scan2 = {
+                        "snapshot_id": 40,
+                        "required_week": {"week": 40, "year": 2026},
+                        "items": [
+                            {
+                                "group": "VT-C4K-MA01",
+                                "person": "GV Duyệt Tay",
+                                "status": "❌ Chưa tìm thấy báo cáo",
+                                "scan_target": {
+                                    "week": 40,
+                                    "year": 2026,
+                                    "class_code": "VT-C4K-MA01",
+                                    "lesson": "6",
+                                    "class_date": "04/10/2026",
+                                    "class_date_iso": "2026-10-04",
+                                },
+                            }
+                        ],
+                    }
+                    await db.execute(
+                        """
+                        INSERT INTO scan_jobs (id, job_type, status, created_at, finished_at, results, request_payload, mutates_external)
+                        VALUES (310, 'ZALO_SCAN', 'SUCCESS', '2026-10-04T10:00:00Z', '2026-10-04T10:05:00Z', ?, '{"execution_mode":"production"}', 1)
+                        """,
+                        (json.dumps(w40_scan1, ensure_ascii=False),),
+                    )
+                    await db.execute(
+                        """
+                        INSERT INTO scan_jobs (id, job_type, status, created_at, finished_at, results, request_payload, mutates_external)
+                        VALUES (311, 'ZALO_SCAN', 'SUCCESS', '2026-10-04T11:00:00Z', '2026-10-04T11:05:00Z', ?, '{"execution_mode":"production"}', 1)
+                        """,
+                        (json.dumps(w40_scan2, ensure_ascii=False),),
+                    )
+                    await db.execute(
+                        """
+                        INSERT INTO scan_jobs (id, job_type, status, created_at, finished_at, results, request_payload, mutates_external)
+                        VALUES (312, 'ZALO_MANUAL_APPROVE', 'SUCCESS', '2026-10-04T12:00:00Z', '2026-10-04T12:00:05Z', '{}', '{"execution_mode":"production"}', 1)
+                        """
+                    )
+                    await db.execute(
+                        """
+                        INSERT INTO external_action_audit (
+                            job_id, action_key, action_type, target_type, target_id, mode,
+                            reason_json, evidence_path, evidence_sha256,
+                            outcome, created_at, completed_at
+                        )
+                        VALUES (
+                            312,
+                            'bcnb-manual-approve:production:310:2026:W40:VT-C4K-MA01:6:2026-10-04',
+                            'BCNB_MANUAL_APPROVE_TICK',
+                            'bcnb_checkbox',
+                            'VT-C4K-MA01',
+                            'production',
+                            ?,
+                            '/api/evidence/310/latest.png',
+                            'ABC123SHA',
+                            'VERIFIED',
+                            '2026-10-04T12:00:00Z',
+                            '2026-10-04T12:00:05Z'
+                        )
+                        """,
+                        (
+                            json.dumps(
+                                {
+                                    "manual_approve": True,
+                                    "approved_by": "owner_admin",
+                                    "source_job_id": 310,
+                                    "group_name": "VT-C4K-MA01",
+                                    "class_code": "VT-C4K-MA01",
+                                    "week": 40,
+                                    "year": 2026,
+                                    "lesson": "6",
+                                    "class_date_iso": "2026-10-04",
+                                    "target_key": "2026-W40|VT-C4K-MA01|6|2026-10-04",
+                                }
+                            ),
+                        ),
+                    )
+                    await db.commit()
+
+                w40_summary = await get_weekly_summary(
+                    week=40,
+                    year=2026,
+                    container=container,
+                )
+                self.assertEqual(w40_summary["snapshot_id"], 40)
+                self.assertFalse(w40_summary["is_selective_only"])
+                self.assertEqual(len(w40_summary["rows"]), 1)
+                self.assertEqual(
+                    w40_summary["rows"][0]["zalo_status"],
+                    "✅ Đã duyệt tay & Tích BCNB",
+                )
+                self.assertEqual(
+                    w40_summary["rows"][0]["verified_at"],
+                    "2026-10-04T12:00:05Z",
+                )
+                self.assertEqual(w40_summary["summary"]["zalo_completed"], 1)
+                self.assertEqual(w40_summary["summary"]["zalo_pending"], 0)
+                self.assertTrue(w40_summary["items"][0]["manual_approved"])
+                self.assertEqual(w40_summary["items"][0]["source_job_id"], 310)
+                self.assertEqual(w40_summary["items"][0]["snapshot_id"], 40)
+
+                # 7. Cross-snapshot manual approval row (not present in latest snapshot)
+                # must preserve its own row snapshot_id and clear top-level snapshot_id
+                async with database.get_db_connection() as db:
+                    await db.execute(
+                        """
+                        INSERT INTO external_action_audit (
+                            job_id, action_key, action_type, target_type, target_id, mode,
+                            reason_json, evidence_path, evidence_sha256,
+                            outcome, created_at, completed_at
+                        )
+                        VALUES (
+                            312,
+                            'bcnb-manual-approve:production:999:2026:W40:VT-C4K-EXTRA:2:2026-10-03',
+                            'BCNB_MANUAL_APPROVE_TICK',
+                            'bcnb_checkbox',
+                            'VT-C4K-EXTRA',
+                            'production',
+                            ?,
+                            '/api/evidence/310/extra.png',
+                            'DEF456SHA',
+                            'VERIFIED',
+                            '2026-10-04T12:10:00Z',
+                            '2026-10-04T12:10:05Z'
+                        )
+                        """,
+                        (
+                            json.dumps(
+                                {
+                                    "manual_approve": True,
+                                    "approved_by": "owner_admin",
+                                    "source_job_id": 999,
+                                    "group_name": "VT-C4K-EXTRA",
+                                    "class_code": "VT-C4K-EXTRA",
+                                    "week": 40,
+                                    "year": 2026,
+                                    "lesson": "2",
+                                    "class_date_iso": "2026-10-03",
+                                    "target_key": "2026-W40|VT-C4K-EXTRA|2|2026-10-03",
+                                }
+                            ),
+                        ),
+                    )
+                    await db.commit()
+
+                w40_mixed_summary = await get_weekly_summary(
+                    week=40,
+                    year=2026,
+                    container=container,
+                )
+                self.assertIsNone(w40_mixed_summary["snapshot_id"])
+                self.assertEqual(len(w40_mixed_summary["items"]), 2)
+                by_group = {
+                    item["group"]: item for item in w40_mixed_summary["items"]
+                }
+                self.assertEqual(by_group["VT-C4K-MA01"]["snapshot_id"], 40)
+                self.assertIsNone(by_group["VT-C4K-EXTRA"]["snapshot_id"])
 
 
 if __name__ == "__main__":

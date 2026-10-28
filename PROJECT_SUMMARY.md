@@ -16,7 +16,7 @@ Ba luồng nghiệp vụ chính:
 |---|---|---|
 | Zalo + BCNB | Hai tuần BCNB và các nhóm Zalo | Bằng chứng báo cáo theo lớp; dry-run hoặc cập nhật BCNB có kiểm chứng |
 | Google Form | Ảnh danh sách học viên | Danh sách OCR để duyệt; điền form ở dry-run hoặc production có chống gửi trùng |
-| LMS + BCNB | Ảnh danh sách lớp chưa hoàn thành LMS | Kế hoạch có mã xác nhận dùng một lần; dry-run hoặc cập nhật BCNB có đọc lại |
+| LMS + BCNB | Trang `admin/class-sessions` trên LMS (hoặc ảnh danh sách lớp chưa hoàn thành LMS) | Kế hoạch có mã xác nhận dùng một lần; dry-run hoặc cập nhật BCNB có đọc lại |
 
 ## 2. Công nghệ và cách chạy
 
@@ -47,7 +47,7 @@ Không dùng nhiều Uvicorn worker với kiến trúc hiện tại.
 | `db/` | Tạo/nâng schema, transaction, backup và thử khôi phục |
 | `googleform_autosubmit/` | Cấu hình, OCR và thao tác Google Form |
 | `classifiers/` | Bộ phân loại báo cáo Zalo theo luật và trích ngày |
-| `templates/`, `static/` | Dashboard bốn khu vực và mã giao diện |
+| `templates/`, `static/` | Dashboard năm khu vực và mã giao diện |
 | `tests/` | 55 file `test_*.py` cùng các cổng kiểm tra riêng |
 | `scripts/` | Khởi động local, backup/restore, smoke test và runner chẩn đoán giới hạn |
 | `deploy/staging/` | Mẫu cấu hình staging; không tự triển khai |
@@ -130,9 +130,9 @@ Vòng đời lớp nằm trong `CLASS_LIFECYCLE.md`.
 
 ## 8. Luồng LMS
 
-1. Ảnh đầu vào được Gemini trích mã lớp.
-2. Server lập kế hoạch theo tuần BCNB và trả mã xác nhận có hạn dùng.
-3. Admin xác nhận đúng plan digest; plan cũ, dùng lại hoặc thay đổi mode bị từ chối.
+1. Worker tự động truy cập trang `admin/class-sessions` trên MindX LMS (có tự động đăng nhập qua `LMS_USERNAME`/`LMS_PASSWORD` nếu bị thoát), quét qua các trang phân trang và lọc những lớp có giá trị tại cột `"Buổi học gần nhất quá hạn nhận xét"` làm danh sách chưa nhận xét (vẫn giữ tương thích ngược với trích mã lớp từ ảnh đầu vào).
+2. Server đối chiếu với bảng BCNB (`check_nhanxet.php`, tự động đăng nhập qua `BCNB_USERNAME`/`BCNB_PASSWORD` nếu bị thoát) của tuần kiểm tra để lập kế hoạch và trả mã xác nhận có hạn dùng.
+3. Admin xem trước bảng kế hoạch và xác nhận đúng plan digest; plan cũ, dùng lại hoặc thay đổi mode bị từ chối.
 4. Hệ thống chỉ tích các lớp đủ điều kiện, rồi tải lại và đọc trạng thái server.
 
 ## 9. Dữ liệu
