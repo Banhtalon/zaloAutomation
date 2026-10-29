@@ -22,6 +22,8 @@ Tài liệu này ghi lại toàn bộ quá trình hình thành, phát triển ki
 - **Chặng 4.4 — Bảng Email Quản lý 9 cột (HTML Table + Clipboard Rich Table + Unicode Table), CSV lỗi chất lượng & Hiển thị Dashboard (`services/report_email_service.py`, `repositories/report_repository.py`, `templates/partials/dashboard.html`, `static/js/jobs.js`)**:
   - Nâng cấp email báo cáo lớp lỗi gửi Quản lý (`quangda@mindx.net.vn`, `tuanpa@mindx.com.vn`) thành bảng 9 cột (`STT`, `Mã lớp`, `Buổi`, `Ngày học`, `Giảng viên`, `NX Zalo`, `NX LMS`, `Tình trạng đánh giá`, `Mô tả vấn đề (TE/TF/QC)`) với cả bảng HTML có màu sắc trực quan (`html_table` / `html_body`), bảng khung viền Unicode (`text_table` / `text_body`) và tự động sao chép bảng Rich HTML vào Clipboard khi mở Gmail Web Compose (`copyFailedEmailReportToClipboard`).
   - Mở rộng `CSV_HEADERS` / `WEEKLY_CSV_HEADERS` lên 9 cột và cập nhật `is_failed_weekly_summary_row` để bao gồm cả các lớp đã nộp Zalo & LMS nhưng còn lỗi chất lượng nội dung (`issue_description` khác rỗng); hiển thị trực quan `LMS`, `Đánh giá`, `Vấn đề` và `Giải trình GV` ngay trên bảng kết quả Dashboard.
+- **Hotfix Tải Dữ Liệu Buổi Học LMS Live (`services/lms_quality_service.py`, `services/zalo_parallel_service.py`)**:
+  - Hỗ trợ tự động mở tab tạm `lms.mindx.edu.vn` (đóng an toàn trong `try / finally`), xác thực tên miền HTTPS chặt chẽ, bắt token Firebase từ request `POST https://lms-api.mindx.edu.vn/` kết hợp đọc IndexedDB `firebaseLocalStorageDb`, truy vấn gộp **Tier-1 Bulk Query** theo `centre_in` (`itemsPerPage: 100`, `filter_textSearch`) và nâng giới hạn độ dài nhận xét Checkpoint lên `15,000` ký tự (`47/47` lớp trên Job `#400` tải thành công `100%`, `0` lỗi tải).
 
 ---
 

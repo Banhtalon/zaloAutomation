@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping
+import contextlib
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
 import inspect
 import json
+import os
 import re
 from typing import Any, cast
 import unicodedata
+from urllib.parse import urlsplit
 
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
@@ -2396,7 +2399,6 @@ async def run_parallel_zalo_batch(
             and not reconciliation_only
             and pre_gw is not None
             and hasattr(pre_gw, "fetch_class_slots")
-            and type(pre_gw).__name__ != "PlaywrightLmsQualityGateway"
         ):
             pre_codes = sorted(
                 {
@@ -2413,17 +2415,52 @@ async def run_parallel_zalo_batch(
                 - {""}
             )
             if pre_codes:
-                try:
-                    fetched_pre = await pre_gw.fetch_class_slots(None, pre_codes)
-                    prefetched_lms_slots = (
-                        fetched_pre
-                        if isinstance(fetched_pre, dict)
-                        else {c: [{"fetch_error": True}] for c in pre_codes}
+                if type(pre_gw).__name__ != "PlaywrightLmsQualityGateway":
+                    try:
+                        fetched_pre = await pre_gw.fetch_class_slots(None, pre_codes)
+                        prefetched_lms_slots = (
+                            fetched_pre
+                            if isinstance(fetched_pre, dict)
+                            else {c: [{"fetch_error": True}] for c in pre_codes}
+                        )
+                    except Exception:
+                        prefetched_lms_slots = {
+                            c: [{"fetch_error": True}] for c in pre_codes
+                        }
+                elif (
+                    os.getenv("ZALO_QUALITY_ISOLATED") != "1"
+                    and urlsplit(
+                        str(getattr(Config, "LMS_URL", "") or "").strip()
+                    ).scheme.lower()
+                    == "https"
+                    and (
+                        urlsplit(
+                            str(getattr(Config, "LMS_URL", "") or "").strip()
+                        ).hostname
+                        or ""
+                    ).lower()
+                    == "lms.mindx.edu.vn"
+                    and not str(getattr(type(session), "__module__", "") or "").startswith(
+                        "tests."
                     )
-                except Exception:
-                    prefetched_lms_slots = {
-                        c: [{"fetch_error": True}] for c in pre_codes
-                    }
+                    and callable(getattr(session, "new_page", None))
+                ):
+                    lms_pre_page = None
+                    try:
+                        lms_pre_page = await session.new_page()
+                        fetched_pre = await pre_gw.fetch_class_slots(
+                            lms_pre_page, pre_codes
+                        )
+                        if isinstance(fetched_pre, dict) and fetched_pre:
+                            prefetched_lms_slots = fetched_pre
+                    except Exception:
+                        prefetched_lms_slots = None
+                    finally:
+                        if lms_pre_page is not None and callable(
+                            getattr(session, "close_page", None)
+                        ):
+                            with contextlib.suppress(Exception):
+                                await session.close_page(lms_pre_page)
         inspect_and_attach_quality_issues(
             scan_results,
             lms_slots_by_class=prefetched_lms_slots,

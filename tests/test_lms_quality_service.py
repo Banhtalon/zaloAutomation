@@ -828,6 +828,127 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(pkg_large["gmail_body_truncated"])
         self.assertIn("Ctrl+V", unquote(pkg_large["gmail_compose_url"]))
 
+    async def test_hotfix_hostname_validation_temp_page_cleanup_and_rubric_regressions(self) -> None:
+        import asyncio
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from googleform_autosubmit.config import Config
+
+        # 1. Positive-only comment with "cần tiếp tục duy trì / phát huy" (no improvement) must be flagged as shallow
+        positive_only = (
+            "NHẬN XÉT BUỔI HỌC SỐ 1: Học viên A (VT-C4K-PTB16)\n"
+            "Con đi học đúng giờ, có thái độ học tập nghiêm túc và tập trung lắng nghe giáo viên giảng bài. "
+            "Con cần tiếp tục duy trì và phát huy tinh thần học tập tích cực để tiếp thu kiến thức tốt hơn. "
+            "Về nhà con làm bài tập đầy đủ nhé."
+        )
+        pos_slot = {
+            "summary": "Tìm hiểu khái niệm biến và vòng lặp trong Python",
+            "studentAttendance": [{"status": "ATTENDED", "comment": positive_only}],
+        }
+        pos_res = evaluate_lms_slot_quality(
+            pos_slot, class_code="VT-C4K-PTB16", khoi="Coding", lesson=1
+        )
+        self.assertTrue(
+            any("sơ sài" in issue for issue in pos_res["issues"]),
+            pos_res["issues"],
+        )
+
+        # 2. Numbered Checkpoint rubric without "Điểm năng lực" on non-default session (B6) is recognized as Checkpoint
+        numbered_rubric = (
+            "1. KIẾN THỨC\nCon nắm vững các khái niệm thuật toán và cấu trúc dữ liệu.\n"
+            "2. KỸ NĂNG\nCon vận dụng thành thạo kỹ năng lập trình và giải quyết vấn đề.\n"
+            "3. THÁI ĐỘ\nCon tập trung, chủ động phát biểu và hợp tác tốt trong giờ học."
+        )
+        num_slot = {
+            "summary": "Ôn tập các thuật toán và làm bài kiểm tra lập trình Python",
+            "studentAttendance": [{"status": "ATTENDED", "comment": numbered_rubric}],
+        }
+        num_res = evaluate_lms_slot_quality(
+            num_slot, class_code="SYNTH-JSB01", khoi="Coding", lesson=6
+        )
+        self.assertTrue(num_res["is_checkpoint"])
+        self.assertEqual(num_res["issues"], [])
+
+        # 3. Hostname spoofing in LMS_URL or redirect off lms.mindx.edu.vn must never trigger login,
+        # and temp_page must close even if goto raises CancelledError.
+        class _FakeTempPage:
+            def __init__(self, *, cancel_on_goto: bool = False, redirect_url: str = "") -> None:
+                self.url = "about:blank"
+                self.closed = False
+                self.listeners: dict[str, object] = {}
+                self.removed_listeners: list[str] = []
+                self._cancel_on_goto = cancel_on_goto
+                self._redirect_url = redirect_url
+
+            def on(self, event: str, cb: object) -> None:
+                self.listeners[event] = cb
+
+            def remove_listener(self, event: str, cb: object) -> None:
+                self.removed_listeners.append(event)
+
+            async def goto(self, target_url: str) -> None:
+                if self._cancel_on_goto:
+                    raise asyncio.CancelledError("simulated cancel during goto")
+                self.url = self._redirect_url or target_url
+
+            async def wait_for_load_state(self, state: str) -> None:
+                return None
+
+            async def evaluate(self, script: str, arg: dict) -> dict:
+                return {c: [{"summary": "Bài học hợp lệ đầy đủ nội dung", "studentAttendance": []}] for c in arg["classCodes"]}
+
+            async def close(self) -> None:
+                self.closed = True
+
+        class _FakeMainPage:
+            def __init__(self, temp_page: _FakeTempPage) -> None:
+                self.url = "https://teachingmindx.top/check_nhanxet.php"
+                self.context = SimpleNamespace(
+                    storage_state=AsyncMock(return_value={"origins": []}),
+                    new_page=AsyncMock(return_value=temp_page),
+                )
+
+            async def evaluate(self, script: str, arg: dict) -> dict:
+                return {}
+
+        # Case 3a: Spoofed LMS_URL (lms.mindx.edu.vn.attacker.invalid) -> must not open temp_page or login
+        temp_spoof = _FakeTempPage()
+        main_spoof = _FakeMainPage(temp_spoof)
+        main_spoof.evaluate = AsyncMock(return_value={})
+        with (
+            patch.dict(os.environ, {"ZALO_QUALITY_ISOLATED": "0"}),
+            patch.object(Config, "LMS_URL", "https://lms.mindx.edu.vn.attacker.invalid/admin"),
+            patch("services.lms_service._login_lms_if_needed", new_callable=AsyncMock) as login_mock,
+        ):
+            await fetch_lms_class_slots_via_page(main_spoof, class_names=["VT-C4K-PTB16"])
+            self.assertEqual(login_mock.await_count, 0)
+            self.assertEqual(main_spoof.context.new_page.await_count, 0)
+
+        # Case 3b: Redirect to untrusted domain after goto -> must not call _login_lms_if_needed and must close temp_page
+        temp_redirect = _FakeTempPage(redirect_url="https://evil.example.com/login")
+        main_redirect = _FakeMainPage(temp_redirect)
+        with (
+            patch.dict(os.environ, {"ZALO_QUALITY_ISOLATED": "0"}),
+            patch.object(Config, "LMS_URL", "https://lms.mindx.edu.vn/admin/class-sessions"),
+            patch("services.lms_service._login_lms_if_needed", new_callable=AsyncMock) as login_mock,
+        ):
+            await fetch_lms_class_slots_via_page(main_redirect, class_names=["VT-C4K-PTB16"])
+            self.assertEqual(login_mock.await_count, 0)
+            self.assertTrue(temp_redirect.closed)
+            self.assertIn("request", temp_redirect.removed_listeners)
+
+        # Case 3c: CancelledError during goto -> temp_page is still closed in finally
+        temp_cancel = _FakeTempPage(cancel_on_goto=True)
+        main_cancel = _FakeMainPage(temp_cancel)
+        with (
+            patch.dict(os.environ, {"ZALO_QUALITY_ISOLATED": "0"}),
+            patch.object(Config, "LMS_URL", "https://lms.mindx.edu.vn/admin/class-sessions"),
+            self.assertRaises(asyncio.CancelledError),
+        ):
+            await fetch_lms_class_slots_via_page(main_cancel, class_names=["VT-C4K-PTB16"])
+        self.assertTrue(temp_cancel.closed)
+        self.assertIn("request", temp_cancel.removed_listeners)
+
 
 if __name__ == "__main__":
     unittest.main()
