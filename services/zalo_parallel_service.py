@@ -25,6 +25,10 @@ from repositories.zalo_batch_repository import (
     canonical_target_key,
 )
 from services.bcnb_safety import verify_checkbox_persisted
+from services.lms_quality_service import (
+    fetch_lms_class_slots_via_page,
+    inspect_and_attach_quality_issues,
+)
 from services.zalo_bcnb_service import get_evidence_reference, update_bcnb_reports
 from services.zalo_discovery_service import _login_bcnb_if_needed
 from services.zalo_safety import open_chat_matches
@@ -2385,6 +2389,45 @@ async def run_parallel_zalo_batch(
             }
 
         scan_results = list(scan_results_by_key.values())
+        prefetched_lms_slots: dict[str, list[dict[str, Any]]] | None = None
+        pre_gw = getattr(runtime.external, "lms_quality", None)
+        if (
+            not policy.halted.is_set()
+            and not reconciliation_only
+            and pre_gw is not None
+            and hasattr(pre_gw, "fetch_class_slots")
+            and type(pre_gw).__name__ != "PlaywrightLmsQualityGateway"
+        ):
+            pre_codes = sorted(
+                {
+                    str(
+                        (r.get("scan_target") or {}).get("class_code")
+                        if isinstance(r.get("scan_target"), dict)
+                        else r.get("class_code") or ""
+                    )
+                    .strip()
+                    .upper()
+                    for r in scan_results
+                    if isinstance(r, dict)
+                }
+                - {""}
+            )
+            if pre_codes:
+                try:
+                    fetched_pre = await pre_gw.fetch_class_slots(None, pre_codes)
+                    prefetched_lms_slots = (
+                        fetched_pre
+                        if isinstance(fetched_pre, dict)
+                        else {c: [{"fetch_error": True}] for c in pre_codes}
+                    )
+                except Exception:
+                    prefetched_lms_slots = {
+                        c: [{"fetch_error": True}] for c in pre_codes
+                    }
+        inspect_and_attach_quality_issues(
+            scan_results,
+            lms_slots_by_class=prefetched_lms_slots,
+        )
         await evidence_repo.register_scan_results(
             job_id=job_id,
             results=scan_results,
@@ -2563,21 +2606,166 @@ async def run_parallel_zalo_batch(
                     if claimed_target is None:
                         break
                     claimed.append(claimed_target)
+                async def record_row_outcome(outcome: dict[str, Any]) -> None:
+                    status = str(outcome.get("status") or "")
+                    error = str(outcome.get("error") or "")
+                    abnormal = status in {
+                        "FAILED_BEFORE_WRITE",
+                        "OUTCOME_UNKNOWN",
+                    }
+                    await policy.record(
+                        abnormal=abnormal,
+                        systemic=abnormal and _is_systemic_error(error),
+                        reason=error,
+                    )
+
                 if not claimed:
+                    if not policy.halted.is_set() and scan_results:
+                        assigned_set = set(assigned)
+                        scoped_unclaimed = [
+                            r
+                            for r in scan_results
+                            if isinstance(r, dict)
+                            and isinstance(r.get("scan_target"), dict)
+                            and (
+                                int(r["scan_target"].get("week") or 0),
+                                int(r["scan_target"].get("year") or 0),
+                            )
+                            in assigned_set
+                        ]
+                        if scoped_unclaimed:
+                            unclaimed_codes = sorted(
+                                {
+                                    str(r["scan_target"].get("class_code") or "")
+                                    .strip()
+                                    .upper()
+                                    for r in scoped_unclaimed
+                                }
+                                - {""}
+                            )
+                            resolved_slots: dict[str, list[dict[str, Any]]] | None = (
+                                prefetched_lms_slots
+                            )
+                            gw = getattr(runtime.external, "lms_quality", None)
+                            if (
+                                resolved_slots is None
+                                and gw is not None
+                                and hasattr(gw, "fetch_class_slots")
+                            ):
+                                try:
+                                    fetched_slots = await gw.fetch_class_slots(
+                                        page, unclaimed_codes
+                                    )
+                                    resolved_slots = (
+                                        fetched_slots
+                                        if isinstance(fetched_slots, dict)
+                                        else {
+                                            c: [{"fetch_error": True}]
+                                            for c in unclaimed_codes
+                                        }
+                                    )
+                                except Exception:
+                                    resolved_slots = {
+                                        c: [{"fetch_error": True}]
+                                        for c in unclaimed_codes
+                                    }
+                            elif (
+                                resolved_slots is None
+                                and page is not None
+                                and hasattr(page, "evaluate")
+                            ):
+                                try:
+                                    fetched_slots = await fetch_lms_class_slots_via_page(
+                                        page, class_names=unclaimed_codes
+                                    )
+                                    if isinstance(fetched_slots, dict) and fetched_slots:
+                                        resolved_slots = fetched_slots
+                                except Exception:
+                                    resolved_slots = {
+                                        c: [{"fetch_error": True}]
+                                        for c in unclaimed_codes
+                                    }
+                            inspect_and_attach_quality_issues(
+                                scoped_unclaimed,
+                                lms_slots_by_class=resolved_slots,
+                            )
+                            has_verifiable_note_issues = any(
+                                "cần kiểm tra thủ công" not in str(issue)
+                                for r in scoped_unclaimed
+                                for issue in (
+                                    *(r.get("lms_quality_issues") or []),
+                                    *(r.get("zalo_content_issues") or []),
+                                    *(r.get("quality_issues") or []),
+                                )
+                            ) or (
+                                resolved_slots is not None
+                                and any(
+                                    "[auto qc:"
+                                    in str(
+                                        r.get("qc_issue_note")
+                                        or (r.get("scan_target") or {}).get(
+                                            "qc_issue_note"
+                                        )
+                                        or ""
+                                    ).lower()
+                                    for r in scoped_unclaimed
+                                )
+                            )
+                            if (
+                                has_verifiable_note_issues
+                                and audit_repo is not None
+                                and hasattr(audit_repo, "record_intent")
+                                and len(scan_plan.get("selected_weeks") or []) == 2
+                                and isinstance(
+                                    (scan_plan.get("latest_week") or {}).get("week"),
+                                    int,
+                                )
+                            ):
+                                try:
+                                    note_summary = await update_bcnb_reports(
+                                        page,
+                                        job_id=job_id,
+                                        execution_mode=execution_mode,
+                                        scan_results=scan_results,
+                                        today=today,
+                                        now=scan_started_at,
+                                        scan_plan=scan_plan,
+                                        job_repo=job_repo,
+                                        audit_repo=audit_repo,
+                                        period_filter=set(assigned),
+                                        should_halt=policy.halted.is_set,
+                                        on_target_outcome=record_row_outcome,
+                                        **(
+                                            {"lms_slots_by_class": resolved_slots}
+                                            if resolved_slots is not None
+                                            and "lms_slots_by_class"
+                                            in inspect.signature(
+                                                update_bcnb_reports
+                                            ).parameters
+                                            else {}
+                                        ),
+                                    )
+                                    summaries.append(note_summary)
+                                except JobCancelledError:
+                                    raise
+                                except Exception as note_sync_err:
+                                    await policy.record(
+                                        abnormal=True,
+                                        systemic=_is_systemic_error(note_sync_err),
+                                        reason=str(note_sync_err),
+                                    )
+                            if hasattr(repository, "update_target_result"):
+                                for key, res in scan_results_by_key.items():
+                                    if (
+                                        key in scan_result_ids
+                                        and res in scoped_unclaimed
+                                    ):
+                                        await repository.update_target_result(
+                                            scan_result_ids[key],
+                                            result=res,
+                                        )
                     return
                 try:
-                    async def record_row_outcome(outcome: dict[str, Any]) -> None:
-                        status = str(outcome.get("status") or "")
-                        error = str(outcome.get("error") or "")
-                        abnormal = status in {
-                            "FAILED_BEFORE_WRITE",
-                            "OUTCOME_UNKNOWN",
-                        }
-                        await policy.record(
-                            abnormal=abnormal,
-                            systemic=abnormal and _is_systemic_error(error),
-                            reason=error,
-                        )
 
                     summary = await update_bcnb_reports(
                         page,
@@ -2592,20 +2780,81 @@ async def run_parallel_zalo_batch(
                         period_filter=set(assigned),
                         should_halt=policy.halted.is_set,
                         on_target_outcome=record_row_outcome,
+                        **(
+                            {"lms_slots_by_class": prefetched_lms_slots}
+                            if prefetched_lms_slots is not None
+                            and "lms_slots_by_class"
+                            in inspect.signature(update_bcnb_reports).parameters
+                            else (
+                                {
+                                    "lms_quality_gateway": getattr(
+                                        runtime.external, "lms_quality", None
+                                    )
+                                }
+                                if getattr(runtime.external, "lms_quality", None)
+                                is not None
+                                and "lms_quality_gateway"
+                                in inspect.signature(update_bcnb_reports).parameters
+                                else {}
+                            )
+                        ),
                     )
                     summaries.append(summary)
+                    assigned_set = set(assigned)
+                    if hasattr(repository, "update_target_result"):
+                        for key, res in scan_results_by_key.items():
+                            raw_st = (
+                                res.get("scan_target")
+                                if isinstance(res, dict)
+                                else None
+                            )
+                            st_meta: dict[str, Any] = (
+                                raw_st if isinstance(raw_st, dict) else {}
+                            )
+                            try:
+                                res_pair = (
+                                    int(st_meta.get("week") or 0),
+                                    int(st_meta.get("year") or 0),
+                                )
+                            except (TypeError, ValueError):
+                                res_pair = (0, 0)
+                            if key in scan_result_ids and res_pair in assigned_set:
+                                await repository.update_target_result(
+                                    scan_result_ids[key],
+                                    result=res,
+                                )
                     outcome_by_key = {
                         canonical_target_key(item): item
                         for item in summary.get("target_outcomes", [])
                     }
+                    complete_write_accepts_result = (
+                        "result"
+                        in inspect.signature(repository.complete_write).parameters
+                        or any(
+                            p.kind == inspect.Parameter.VAR_KEYWORD
+                            for p in inspect.signature(
+                                repository.complete_write
+                            ).parameters.values()
+                        )
+                    )
                     for target in claimed:
                         outcome = outcome_by_key.get(target["target_key"])
+                        extra_write_kwargs = (
+                            {
+                                "result": scan_results_by_key.get(
+                                    target["target_key"]
+                                )
+                            }
+                            if complete_write_accepts_result
+                            else {}
+                        )
                         if outcome is None:
                             await repository.complete_write(
                                 target["id"],
                                 status="FAILED_BEFORE_WRITE",
                                 error_code="TARGET_NOT_UNIQUE_OR_MISSING",
                                 error_message="Không tìm đúng một dòng BCNB cho target.",
+                                **extra_write_kwargs,
                             )
                             await policy.record(
                                 abnormal=True,
@@ -2621,6 +2870,7 @@ async def run_parallel_zalo_batch(
                                 "FAILED_BEFORE_WRITE", "OUTCOME_UNKNOWN"
                             } else None),
                             error_message=outcome.get("error"),
+                            **extra_write_kwargs,
                         )
                 except JobCancelledError:
                     status = (

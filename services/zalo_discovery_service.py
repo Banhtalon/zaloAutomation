@@ -12,7 +12,9 @@ from repositories.job_repository import JobRepository
 from core.time_utils import previous_iso_week
 from services.bcnb_safety import (
     dismiss_current_week_notice,
+    extract_bcnb_extended_row_fields,
     read_current_week_checked,
+    resolve_extended_bcnb_columns,
     resolve_instructor_column,
     resolve_schedule_columns,
     select_week_checked,
@@ -103,12 +105,7 @@ async def _collect_bcnb_data(page, job_id: int) -> list[dict[str, str]]:
 
 
 async def _read_bcnb_week_rows(
-    page,
-    job_id: int,
-    *,
-    week: int,
-    year: int,
-    already_selected: bool = False,
+    page, job_id: int, *, week: int, year: int, already_selected: bool = False,
 ) -> list[dict[str, str]]:
     if not already_selected:
         await select_week_checked(page, week, year)
@@ -117,6 +114,7 @@ async def _read_bcnb_week_rows(
     await asyncio.sleep(1)
     class_index, lesson_index, date_index, deadline_index = await resolve_schedule_columns(page)
     instructor_index = await resolve_instructor_column(page)
+    ext_cols = await resolve_extended_bcnb_columns(page)
     rows = await page.locator("table tr").all()
     result: list[dict[str, str]] = []
     for row in rows:
@@ -134,6 +132,7 @@ async def _read_bcnb_week_rows(
             if instructor_index is not None and len(cells) > instructor_index
             else ""
         )
+        ext = await extract_bcnb_extended_row_fields(row, cells, ext_cols, include_empty=False)
         result.append(
             {
                 "ma_lop": class_code,
@@ -144,6 +143,7 @@ async def _read_bcnb_week_rows(
                 "zalo_deadline": (await cells[deadline_index].inner_text()).strip(),
                 "week": str(week),
                 "year": str(year),
+                **ext,
             }
         )
     log_message(f"Đã lấy thành công {len(result)} dòng BCNB W{week}/{year}.")

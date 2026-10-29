@@ -1,7 +1,7 @@
 # PROJECT SUMMARY — Zalo Automation
 
 > Nguồn tham chiếu tổng quan cho AI và người phát triển. Nội dung này mô tả mã
-> nguồn tại ngày 2026-09-26; dữ liệu và trạng thái chạy phải kiểm tra lại trong
+> nguồn tại ngày 2026-10-29; dữ liệu và trạng thái chạy phải kiểm tra lại trong
 > `PROJECT_STATE.md` và runtime trước mỗi task.
 
 ## 1. Mục tiêu sản phẩm
@@ -14,9 +14,9 @@ Ba luồng nghiệp vụ chính:
 
 | Luồng | Đầu vào | Kết quả |
 |---|---|---|
-| Zalo + BCNB | Hai tuần BCNB và các nhóm Zalo | Bằng chứng báo cáo theo lớp; dry-run hoặc cập nhật BCNB có kiểm chứng |
-| Google Form | Ảnh danh sách học viên | Danh sách OCR để duyệt; điền form ở dry-run hoặc production có chống gửi trùng |
-| LMS + BCNB | Trang `admin/class-sessions` trên LMS (hoặc ảnh danh sách lớp chưa hoàn thành LMS) | Kế hoạch có mã xác nhận dùng một lần; dry-run hoặc cập nhật BCNB có đọc lại |
+| Zalo + BCNB + LMS Quality | Hai tuần BCNB (`check_nhanxet.php`), các nhóm Zalo và nội dung bài học/nhận xét học viên trên LMS | Bằng chứng báo cáo theo lớp, đồng bộ trạng thái nộp LMS & `Tình trạng đánh giá`, kiểm định chất lượng nội dung bài học/nhận xét học viên (Buổi thường 3 ý vs Checkpoint), tự động ghi `Mô tả vấn đề (TE/TF/QC)` có kiểm chứng đọc ngược và xuất Bảng Email Quản lý 9 cột |
+| Google Form | Danh sách học viên lấy trực tiếp từ LMS theo Mã lớp hoặc ảnh danh sách học viên OCR | Danh sách học viên để duyệt; điền form ở dry-run hoặc production có chống gửi trùng |
+| LMS + BCNB | Trang `admin/class-sessions` trên LMS (hoặc ảnh danh sách lớp chưa hoàn thành LMS) | Kế hoạch có mã xác nhận dùng một lần (`selection_digest`); dry-run hoặc cập nhật BCNB có đọc lại |
 
 ## 2. Công nghệ và cách chạy
 

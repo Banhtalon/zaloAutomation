@@ -323,14 +323,14 @@
             }
             ocrStudents.forEach((student, index) => {
                 const tr = document.createElement('tr');
-                tr.className = 'hover:bg-white/5 transition-colors';
+                tr.className = 'hover:bg-slate-50 transition-colors';
                 ['name', 'class_code'].forEach(field => {
                     const td = document.createElement('td');
-                    td.className = 'px-5 py-3 text-gray-200';
+                    td.className = 'px-4 py-2 text-slate-700';
                     const input = document.createElement('input');
                     input.type = 'text';
                     input.value = String(student[field] || '');
-                    input.className = 'bg-black/30 border border-transparent focus:border-brand-blue rounded px-2 py-1 outline-none w-full text-sm';
+                    input.className = 'bg-white border border-slate-200 focus:border-blue-500 rounded px-2 py-1 outline-none w-full text-xs text-slate-800';
                     input.addEventListener('change', event => {
                         ocrStudents[index][field] = event.target.value;
                         if (ocrStudents.length > 0 && typeof ensureGoogleFormIdempotencyKey === 'function') {
@@ -341,9 +341,9 @@
                     tr.appendChild(td);
                 });
                 const action = document.createElement('td');
-                action.className = 'px-5 py-3 text-center';
+                action.className = 'px-3 py-2 text-center';
                 const remove = document.createElement('button');
-                remove.className = 'text-rose-500 hover:text-white hover:bg-rose-500 w-8 h-8 rounded-lg transition-colors';
+                remove.className = 'text-rose-600 hover:text-white hover:bg-rose-600 w-7 h-7 rounded-lg transition-colors font-bold';
                 remove.textContent = '×';
                 remove.addEventListener('click', () => {
                     ocrStudents.splice(index, 1);
@@ -362,28 +362,35 @@
         }
 
         async function fetchMappings() {
+            const tbody = document.getElementById('mapping-table');
+            const countBadge = document.getElementById('mapping-count-badge');
             try {
                 const res = await fetch('/api/googleform/mappings');
+                if (!res.ok) throw new Error('Không tải được cấu hình mapping.');
                 const data = await res.json();
-                const tbody = document.getElementById('mapping-table');
-                if (data.mappings && data.mappings.length > 0) {
+                if (!data || !Array.isArray(data.mappings)) throw new Error('Dữ liệu cấu hình không hợp lệ.');
+                if (data.mappings.length > 0) {
+                    if (countBadge) {
+                        countBadge.textContent = `Đang áp dụng ${data.mappings.length} quy tắc điền tự động`;
+                        countBadge.className = 'ml-2 rounded-full bg-emerald-50 border border-emerald-200 px-2.5 py-0.5 text-[11px] font-semibold text-emerald-700';
+                    }
                     tbody.replaceChildren();
                     data.mappings.forEach(mapping => {
                         const tr = document.createElement('tr');
-                        tr.className = 'hover:bg-white/5 transition-colors group';
+                        tr.className = 'hover:bg-slate-50 transition-colors group';
                         const question = document.createElement('td');
-                        question.className = 'px-5 py-3.5 text-gray-300 font-medium';
+                        question.className = 'px-4 py-2.5 text-slate-700 font-medium';
                         question.textContent = String(mapping.question || '');
                         const type = document.createElement('td');
-                        type.className = 'px-5 py-3.5 text-xs text-gray-300';
+                        type.className = 'px-4 py-2.5 text-xs text-slate-500';
                         type.textContent = mapping.field_type === 'radio' ? 'Trắc nghiệm' : (['select', 'dropdown'].includes(mapping.field_type) ? 'Hộp chọn' : 'Văn bản');
                         const value = document.createElement('td');
-                        value.className = 'px-5 py-3.5 text-emerald-400 font-mono text-[13px]';
+                        value.className = 'px-4 py-2.5 text-emerald-700 font-mono text-xs font-semibold';
                         value.textContent = String(mapping.value || '');
                         const action = document.createElement('td');
-                        action.className = 'px-5 py-3.5 text-center';
+                        action.className = 'px-4 py-2.5 text-center';
                         const remove = document.createElement('button');
-                        remove.className = 'text-gray-500 hover:text-rose-400 transition-colors';
+                        remove.className = 'text-rose-600 hover:text-rose-800 font-semibold text-xs transition-colors';
                         remove.textContent = 'Xóa';
                         remove.addEventListener('click', () => deleteMapping(Number(mapping.id)));
                         action.appendChild(remove);
@@ -391,9 +398,21 @@
                         tbody.appendChild(tr);
                     });
                 } else {
+                    if (countBadge) {
+                        countBadge.textContent = 'Chưa có quy tắc điền tự động';
+                        countBadge.className = 'ml-2 rounded-full bg-amber-50 border border-amber-200 px-2.5 py-0.5 text-[11px] font-semibold text-amber-800';
+                    }
                     renderTableMessage(tbody, 4, 'Chưa có cấu hình mapping nào.');
                 }
-            } catch (err) {}
+            } catch (err) {
+                if (countBadge) {
+                    countBadge.textContent = 'Không tải được cấu hình';
+                    countBadge.className = 'ml-2 rounded-full bg-rose-50 border border-rose-200 px-2.5 py-0.5 text-[11px] font-semibold text-rose-700';
+                }
+                if (tbody && tbody.children.length <= 1) {
+                    renderTableMessage(tbody, 4, 'Không tải được cấu hình mapping từ máy chủ.');
+                }
+            }
         }
 
         async function addMapping() {
@@ -425,44 +444,44 @@
                     tbody.replaceChildren();
                     data.history.forEach(history => {
                         const tr = document.createElement('tr');
-                        tr.className = 'hover:bg-white/5 transition-colors';
+                        tr.className = 'hover:bg-slate-50 transition-colors';
                         const time = document.createElement('td');
-                        time.className = 'px-5 py-3 text-[11px] text-gray-500 font-mono';
+                        time.className = 'px-3.5 py-2.5 text-[11px] text-slate-500 font-mono';
                         time.textContent = String(history.submitted_at || '');
                         const student = document.createElement('td');
-                        student.className = 'px-5 py-3 text-sm text-gray-200';
+                        student.className = 'px-3.5 py-2.5 text-xs font-medium text-slate-800';
                         student.textContent = `${history.student_name || ''} (${history.class_code || ''})`;
                         const status = document.createElement('td');
                         const isSuccess = String(history.status || '').includes('Thành công');
-                        status.className = `px-5 py-3 text-xs font-medium ${isSuccess ? 'text-emerald-400' : 'text-rose-400'}`;
+                        status.className = `px-3.5 py-2.5 text-xs font-semibold ${isSuccess ? 'text-emerald-700' : 'text-rose-600'}`;
                         const statusLabel = document.createElement('div');
                         statusLabel.textContent = String(history.status || '');
                         status.appendChild(statusLabel);
                         if (history.error_message) {
                             const errorMessage = document.createElement('div');
-                            errorMessage.className = 'mt-1 whitespace-pre-wrap break-words text-[11px] font-normal leading-relaxed text-rose-500';
+                            errorMessage.className = 'mt-1 whitespace-pre-wrap break-words text-[11px] font-normal leading-relaxed text-rose-600';
                             errorMessage.textContent = String(history.error_message);
                             status.appendChild(errorMessage);
                         }
                         const actionTd = document.createElement('td');
-                        actionTd.className = 'px-5 py-3 text-xs text-center whitespace-nowrap';
+                        actionTd.className = 'px-3.5 py-2.5 text-xs text-center whitespace-nowrap';
                         if (history.screenshot_path) {
                             const viewBtn = document.createElement('button');
                             viewBtn.type = 'button';
-                            viewBtn.className = 'px-2 py-1 bg-indigo-500/20 text-indigo-300 hover:bg-indigo-500/30 rounded border border-indigo-500/30 mr-1.5 transition text-[11px] font-medium';
+                            viewBtn.className = 'px-2 py-1 bg-indigo-50 text-indigo-700 hover:bg-indigo-100 rounded border border-indigo-200 mr-1.5 transition text-[11px] font-semibold';
                             viewBtn.innerHTML = '<i class="fa-solid fa-image mr-1"></i>Xem hình';
                             viewBtn.onclick = () => openImageModal(`/api/googleform/submissions/${history.id}/screenshot`);
 
                             const deleteBtn = document.createElement('button');
                             deleteBtn.type = 'button';
-                            deleteBtn.className = 'px-2 py-1 bg-rose-500/20 text-rose-300 hover:bg-rose-500/30 rounded border border-rose-500/30 transition text-[11px] font-medium';
+                            deleteBtn.className = 'px-2 py-1 bg-rose-50 text-rose-700 hover:bg-rose-100 rounded border border-rose-200 transition text-[11px] font-semibold';
                             deleteBtn.innerHTML = '<i class="fa-solid fa-trash-can mr-1"></i>Xóa hình';
                             deleteBtn.onclick = () => deleteSubmissionScreenshot(history.id);
 
                             actionTd.append(viewBtn, deleteBtn);
                         } else {
                             const emptySpan = document.createElement('span');
-                            emptySpan.className = 'text-gray-600 text-xs';
+                            emptySpan.className = 'text-slate-400 text-xs';
                             emptySpan.textContent = '—';
                             actionTd.appendChild(emptySpan);
                         }

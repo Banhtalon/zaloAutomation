@@ -27,6 +27,7 @@
         let weeklyHistoryJobs = [];
         let weeklyHistoryRequestSeq = 0;
         let lastExportedWeeklyCsv = '';
+        let lastFailedCsvEmailResult = null;
 
         function trackJob(jobId) {
             currentJobId = jobId;
@@ -53,14 +54,18 @@
 
         // TAB SWITCHING
         function switchTab(tabId) {
+            const isDiagnostics = tabId === 'specs' || tabId === 'logs';
+            const navTarget = isDiagnostics ? 'specs' : tabId;
             document.querySelectorAll('.tab-content').forEach(el => {
-                const isSelected = el.id === `tab-${tabId}`;
+                const isSelected = isDiagnostics
+                    ? (el.id === 'tab-specs' || el.id === 'tab-logs')
+                    : (el.id === `tab-${tabId}`);
                 el.classList.toggle('active', isSelected);
                 el.hidden = !isSelected;
             });
 
             document.querySelectorAll('.tab-btn').forEach(el => {
-                const isSelected = el.id === `btn-${tabId}`;
+                const isSelected = el.id === `btn-${navTarget}`;
                 el.classList.toggle('active', isSelected);
                 el.setAttribute('aria-selected', String(isSelected));
                 el.tabIndex = isSelected ? 0 : -1;
@@ -74,16 +79,20 @@
                 fetchGroups();
                 fetchIgnoredGroups();
                 if (typeof fetchBcnbZaloGaps === 'function') fetchBcnbZaloGaps();
-            } else if (tabId === 'specs') {
-                headerTitle.innerText = "Thông số kỹ thuật";
+            } else if (isDiagnostics) {
+                headerTitle.innerText = "Chẩn đoán & Nhật ký";
                 if (typeof refreshCurrentZaloPreflight === 'function') {
                     refreshCurrentZaloPreflight();
                 }
-            } else if (tabId === 'logs') {
-                headerTitle.innerText = "Nhật ký Hệ thống";
                 if (typeof refreshLogs === 'function') refreshLogs();
                 if (currentJobId && typeof renderJobTimeline === 'function') {
                     renderJobTimeline(currentJobId);
+                }
+                if (tabId === 'logs') {
+                    const logsEl = document.getElementById('tab-logs');
+                    if (logsEl && typeof logsEl.scrollIntoView === 'function') {
+                        logsEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                    }
                 }
             } else if (tabId === 'googleform') {
                 headerTitle.innerText = "Hệ thống Nộp Form Tự động";
@@ -125,7 +134,7 @@
                 || plan.selected_weeks.length !== 2) {
                 zaloScanPlan = null;
                 element.textContent = 'Chưa có kế hoạch tuần BCNB. Hãy bấm “Dò tìm” trước khi quét.';
-                element.className = 'rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-900';
+                element.className = 'rounded-xl border-2 border-amber-400 border-l-8 border-l-amber-600 bg-amber-50 px-4 py-2.5 text-xs font-bold text-amber-950 shadow-sm';
                 if (brief) brief.textContent = 'Chưa có kế hoạch tuần BCNB · Hãy bấm “Dò tìm lại”';
                 if (scanButton) scanButton.disabled = true;
                 refreshDashboardRequiredWeekView();
@@ -138,7 +147,7 @@
             if (!plan.available || Number(plan.target_count || 0) < 1) {
                 zaloScanPlan = null;
                 element.textContent = `Kế hoạch BCNB: mới nhất W${latest.week}/${latest.year} · phải xử lý W${required.week}/${required.year} · Dashboard chỉ hiển thị W${required.week}/${required.year} · ${deferred} lớp chưa đến giờ học, chưa thể quét.`;
-                element.className = 'rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-900';
+                element.className = 'rounded-xl border-2 border-amber-400 border-l-8 border-l-amber-600 bg-amber-50 px-4 py-2.5 text-xs font-bold text-amber-950 shadow-sm';
                 if (brief) brief.textContent = `Tuần W${required.week}/${required.year} · Chưa có lớp đủ điều kiện (${deferred} lớp chờ giờ học)`;
                 if (scanButton) scanButton.disabled = true;
                 refreshDashboardRequiredWeekView();
@@ -150,7 +159,7 @@
                 ? ` · ${deferred} lớp chưa đến giờ học (chưa quét)`
                 : '';
             element.textContent = `Kế hoạch BCNB: mới nhất W${latest.week}/${latest.year} · phải xử lý W${required.week}/${required.year} · Dashboard chỉ hiển thị W${required.week}/${required.year} · ${plan.target_count || 0} target${deferredText}`;
-            element.className = 'rounded-xl border border-indigo-200 bg-indigo-50 px-4 py-3 text-xs text-indigo-900';
+            element.className = 'rounded-xl border-2 border-indigo-400 border-l-8 border-l-indigo-600 bg-indigo-50 px-4 py-2.5 text-xs font-bold text-indigo-950 shadow-sm';
             if (brief) {
                 brief.textContent = `Tuần báo cáo W${required.week}/${required.year} · ${plan.target_count || 0} lớp cần xử lý${deferred > 0 ? ` (${deferred} lớp chờ giờ học)` : ''}`;
             }
@@ -270,12 +279,12 @@
             checks.replaceChildren();
             if (!report) {
                 status.textContent = 'Chưa kiểm tra';
-                status.className = 'rounded-full bg-amber-100 px-3 py-1 text-[11px] font-bold uppercase tracking-wide text-amber-800';
+                status.className = 'rounded-md bg-amber-800 border border-amber-950 px-2.5 py-1 text-[10px] font-extrabold uppercase tracking-wider text-white shadow-sm';
                 summary.textContent = 'Chưa đọc được kiểm tra an toàn. Hãy thử làm mới.';
                 if (checkedAt) checkedAt.textContent = 'Chưa có lần kiểm tra gần nhất';
                 if (!currentJobExecutionMode) renderRuntimeMode(null);
                 if (details) details.classList.add('hidden');
-                panel.className = 'preflight-compact flex flex-wrap items-center justify-between gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3.5 py-2 text-xs text-amber-900';
+                panel.className = 'preflight-compact flex flex-wrap items-center justify-between gap-2.5 rounded-xl border-2 border-amber-400 border-l-8 border-l-amber-600 bg-amber-50 px-3.5 py-2.5 text-xs text-amber-950 shadow-sm';
                 applyZaloRunState();
                 return;
             }
@@ -285,15 +294,15 @@
                 RED: 'Chưa thể chạy'
             };
             const styles = {
-                GREEN: ['border-emerald-200', 'bg-emerald-50', 'text-emerald-900', 'bg-emerald-100', 'text-emerald-800'],
-                YELLOW: ['border-amber-200', 'bg-amber-50', 'text-amber-900', 'bg-amber-100', 'text-amber-800'],
-                RED: ['border-rose-200', 'bg-rose-50', 'text-rose-900', 'bg-rose-100', 'text-rose-800']
+                GREEN: ['border-emerald-400 border-l-emerald-600', 'bg-emerald-50/90', 'text-emerald-950', 'bg-emerald-800 border border-emerald-950', 'text-white'],
+                YELLOW: ['border-amber-400 border-l-amber-600', 'bg-amber-50/90', 'text-amber-950', 'bg-amber-800 border border-amber-950', 'text-white'],
+                RED: ['border-rose-400 border-l-rose-600', 'bg-rose-50/90', 'text-rose-950', 'bg-rose-800 border border-rose-950', 'text-white']
             };
             const level = labels[report.status] ? report.status : 'RED';
             const style = styles[level];
             status.textContent = labels[level];
-            status.className = `rounded-full ${style[3]} px-2.5 py-1 text-[10px] font-bold uppercase tracking-wide ${style[4]} shrink-0`;
-            panel.className = `preflight-compact flex flex-wrap items-center justify-between gap-2 rounded-xl border ${style[0]} ${style[1]} ${style[2]} px-3.5 py-2 text-xs`;
+            status.className = `rounded-md ${style[3]} px-2.5 py-1 text-[10px] font-extrabold uppercase tracking-wider ${style[4]} shadow-sm shrink-0`;
+            panel.className = `preflight-compact flex flex-wrap items-center justify-between gap-2.5 rounded-xl border-2 border-l-8 ${style[0]} ${style[1]} ${style[2]} px-3.5 py-2.5 text-xs shadow-sm`;
             const mode = report.mode === 'production' ? 'production' : 'dry-run';
             const targets = Number(report.target_count || 0);
             if (currentJobExecutionMode) {

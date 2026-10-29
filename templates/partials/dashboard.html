@@ -1,130 +1,170 @@
 <!-- TAB 1: ZALO AUTO -->
 <div id="tab-dashboard" class="tab-content active flex-1 flex-col space-y-4" role="tabpanel" aria-labelledby="btn-dashboard">
     <div class="metrics-grid grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 shrink-0">
-        <div class="metric-card glass-panel glow-card-blue flex items-center">
-            <div class="metric-card__icon rounded-full bg-blue-100 text-blue-600 flex items-center justify-center text-base mr-3.5">
-                <i class="fa-solid fa-users" aria-hidden="true"></i>
+        <div class="metric-card glass-panel glow-card-blue flex items-center justify-between">
+            <div class="flex items-center min-w-0">
+                <div class="metric-card__icon rounded-xl bg-blue-600 text-white border-2 border-blue-800 border-b-4 flex items-center justify-center text-lg shadow-sm mr-3.5 shrink-0">
+                    <i class="fa-solid fa-layer-group" aria-hidden="true"></i>
+                </div>
+                <div class="min-w-0">
+                    <p class="metric-card__label uppercase">Tổng nhóm</p>
+                    <h3 class="metric-card__value font-extrabold font-mono mt-0.5 tabular-nums" id="count-total">0</h3>
+                </div>
             </div>
-            <div>
-                <p class="metric-card__label uppercase">Tổng nhóm</p>
-                <h3 class="metric-card__value font-extrabold mt-0.5 tabular-nums" id="count-total">0</h3>
-            </div>
+            <span class="text-[10px] font-extrabold text-blue-700 bg-blue-50 px-2 py-1 rounded-md border border-blue-300 uppercase shrink-0">Tất cả</span>
         </div>
-        <div class="metric-card glass-panel glow-card-green flex items-center">
-            <div class="metric-card__icon rounded-full bg-emerald-100 text-emerald-600 flex items-center justify-center text-base mr-3.5">
-                <i class="fa-solid fa-check" aria-hidden="true"></i>
+        <div class="metric-card glass-panel glow-card-green flex items-center justify-between">
+            <div class="flex items-center min-w-0">
+                <div class="metric-card__icon rounded-xl bg-emerald-600 text-white border-2 border-emerald-800 border-b-4 flex items-center justify-center text-lg shadow-sm mr-3.5 shrink-0">
+                    <i class="fa-solid fa-circle-check" aria-hidden="true"></i>
+                </div>
+                <div class="min-w-0">
+                    <p class="metric-card__label uppercase">Hoàn thành</p>
+                    <h3 class="metric-card__value font-extrabold font-mono mt-0.5 tabular-nums" id="count-success">0</h3>
+                </div>
             </div>
-            <div>
-                <p class="metric-card__label uppercase">Hoàn thành</p>
-                <h3 class="metric-card__value font-extrabold mt-0.5 tabular-nums" id="count-success">0</h3>
-            </div>
+            <span class="text-[10px] font-extrabold text-emerald-800 bg-emerald-50 px-2 py-1 rounded-md border border-emerald-300 uppercase shrink-0">Đạt chuẩn</span>
         </div>
-        <div class="metric-card glass-panel glow-card-amber flex items-center">
-            <div class="metric-card__icon rounded-full bg-amber-100 text-amber-600 flex items-center justify-center text-base mr-3.5">
-                <i class="fa-solid fa-shield-halved" aria-hidden="true"></i>
+        <div class="metric-card glass-panel glow-card-amber flex items-center justify-between">
+            <div class="flex items-center min-w-0">
+                <div class="metric-card__icon rounded-xl bg-amber-500 text-white border-2 border-amber-700 border-b-4 flex items-center justify-center text-lg shadow-sm mr-3.5 shrink-0">
+                    <i class="fa-solid fa-shield-halved" aria-hidden="true"></i>
+                </div>
+                <div class="min-w-0">
+                    <p class="metric-card__label uppercase">Miễn báo cáo</p>
+                    <h3 class="metric-card__value font-extrabold font-mono mt-0.5 tabular-nums" id="count-exempt">0</h3>
+                </div>
             </div>
-            <div>
-                <p class="metric-card__label uppercase">Miễn báo cáo</p>
-                <h3 class="metric-card__value font-extrabold mt-0.5 tabular-nums" id="count-exempt">0</h3>
-            </div>
+            <span class="text-[10px] font-extrabold text-amber-800 bg-amber-50 px-2 py-1 rounded-md border border-amber-300 uppercase shrink-0">Cuối khóa</span>
         </div>
-        <div class="metric-card glass-panel glow-card-rose flex items-center">
-            <div class="metric-card__icon rounded-full bg-rose-100 text-rose-600 flex items-center justify-center text-base mr-3.5">
-                <i class="fa-solid fa-triangle-exclamation" aria-hidden="true"></i>
+        <div class="metric-card glass-panel glow-card-rose flex items-center justify-between">
+            <div class="flex items-center min-w-0">
+                <div class="metric-card__icon rounded-xl bg-rose-600 text-white border-2 border-rose-800 border-b-4 flex items-center justify-center text-lg shadow-sm mr-3.5 shrink-0">
+                    <i class="fa-solid fa-triangle-exclamation" aria-hidden="true"></i>
+                </div>
+                <div class="min-w-0">
+                    <p class="metric-card__label uppercase">Trễ / Chưa nộp</p>
+                    <h3 class="metric-card__value font-extrabold font-mono mt-0.5 tabular-nums" id="count-failed">0</h3>
+                </div>
             </div>
-            <div>
-                <p class="metric-card__label uppercase">Trễ / Chưa nộp</p>
-                <h3 class="metric-card__value font-extrabold mt-0.5 tabular-nums" id="count-failed">0</h3>
-            </div>
+            <span class="text-[10px] font-extrabold text-rose-700 bg-rose-50 px-2 py-1 rounded-md border border-rose-300 uppercase shrink-0">Cần xử lý</span>
         </div>
     </div>
 
     <!-- COMPACT SAFETY & CONTROL BAR -->
-    <div class="glass-panel p-3.5 space-y-3 shrink-0">
-        <section id="zalo-preflight" class="preflight-compact flex flex-wrap items-center justify-between gap-2 rounded-xl border border-slate-200 bg-slate-50/90 px-3.5 py-2 text-xs text-slate-700" role="status" aria-live="polite" aria-label="Trạng thái sẵn sàng trước khi chạy">
+    <div class="glass-panel p-4 space-y-3 shrink-0">
+        <section id="zalo-preflight" class="preflight-compact flex flex-wrap items-center justify-between gap-2.5 rounded-xl border-2 border-slate-300 border-l-8 border-l-slate-600 bg-slate-50 px-3.5 py-2.5 text-xs text-slate-800 shadow-sm" role="status" aria-live="polite" aria-label="Trạng thái sẵn sàng trước khi chạy">
             <div class="flex flex-wrap items-center gap-2.5 min-w-0">
-                <span id="zalo-preflight-status" class="rounded-full px-2.5 py-1 text-[10px] font-bold uppercase tracking-wide shrink-0">Đang kiểm tra</span>
-                <span id="zalo-dashboard-plan-brief" class="font-semibold truncate">Chưa có kế hoạch tuần BCNB · Hãy bấm “Dò tìm lại”</span>
+                <span id="zalo-preflight-status" class="rounded-md px-2.5 py-1 text-[10px] font-extrabold uppercase tracking-wider shrink-0 border">Đang kiểm tra</span>
+                <span id="zalo-dashboard-plan-brief" class="font-bold truncate">Chưa có kế hoạch tuần BCNB · Hãy bấm “Dò tìm lại”</span>
             </div>
             <div class="preflight-actions flex items-center gap-2 shrink-0">
                 <button id="zalo-preflight-refresh" type="button" onclick="refreshCurrentZaloPreflight()" class="preflight-refresh" aria-label="Kiểm tra lại điều kiện an toàn">
-                    <i class="fa-solid fa-rotate-right" aria-hidden="true"></i>
+                    <i class="fa-solid fa-rotate-right text-blue-600" aria-hidden="true"></i>
                     Kiểm tra lại
                 </button>
-                <button type="button" onclick="switchTab('specs')" class="preflight-refresh" aria-label="Mở tab Thông số kỹ thuật">
-                    <i class="fa-solid fa-sliders" aria-hidden="true"></i>
-                    Thông số kỹ thuật
+                <button type="button" onclick="switchTab('specs')" class="preflight-refresh" aria-label="Mở tab Chẩn đoán và Nhật ký">
+                    <i class="fa-solid fa-sliders text-indigo-600" aria-hidden="true"></i>
+                    Chẩn đoán &amp; Nhật ký
                 </button>
             </div>
         </section>
 
-        <div class="dashboard-action-bar flex flex-wrap items-center justify-between">
-            <label class="search-box glass-panel rounded-xl flex items-center overflow-hidden" for="searchInput">
-                <span class="pl-3.5 text-slate-400" aria-hidden="true"><i class="fa-solid fa-search"></i></span>
-                <span class="sr-only">Tìm theo nhóm hoặc giáo viên</span>
-                <input type="search" id="searchInput" class="bg-transparent border-none text-sm focus:ring-0 block w-full py-2.5 px-3 outline-none" placeholder="Tìm theo nhóm, giáo viên...">
-            </label>
-
-            <div class="dashboard-actions">
-                <button type="button" onclick="openLmsModal()" class="action-button action-button--lms">
+        <!-- ROW 1: PRIMARY 3-STEP WORKFLOW (LEFT) & SECONDARY POST-SCAN TOOLS (RIGHT) -->
+        <div class="dashboard-action-bar flex flex-wrap items-center justify-between gap-3">
+            <div class="dashboard-workflow-group flex flex-wrap items-center gap-2 bg-slate-100 p-1.5 rounded-xl border border-slate-300" role="group" aria-label="Quy trình thực thi chính">
+                <button type="button" onclick="startAutoDiscover()" class="action-button action-button--discover" title="Bước 1: Đọc BCNB và lập kế hoạch 2 tuần">
+                    <span class="step-pill step-pill--dark">1</span>
+                    <i class="fa-solid fa-compass" aria-hidden="true"></i> Dò kế hoạch
+                </button>
+                <i class="fa-solid fa-chevron-right text-slate-400 text-xs hidden sm:inline" aria-hidden="true"></i>
+                <button type="button" onclick="startScan()" class="action-button action-button--scan" title="Bước 2: Kiểm tra an toàn và quét tin nhắn báo cáo Zalo">
+                    <span class="step-pill step-pill--light">2</span>
+                    <i class="fa-solid fa-bolt" aria-hidden="true"></i> Bắt đầu quét
+                </button>
+                <i class="fa-solid fa-chevron-right text-slate-400 text-xs hidden sm:inline" aria-hidden="true"></i>
+                <button type="button" onclick="openLmsModal()" class="action-button action-button--lms" title="Bước 3: Quét trang LMS và đối chiếu tích BCNB">
+                    <span class="step-pill step-pill--dark">3</span>
                     <i class="fa-solid fa-check-double" aria-hidden="true"></i> Tick LMS
                 </button>
-                <button type="button" id="btn-filter-unreported" onclick="toggleUnreportedFilter()" class="action-button action-button--filter">
-                    <i class="fa-solid fa-filter" aria-hidden="true"></i> Cần xem lại
+            </div>
+
+            <div class="dashboard-actions flex flex-wrap items-center gap-2 bg-slate-200/90 p-1.5 rounded-xl border border-slate-400/80" role="group" aria-label="Công cụ hậu kiểm và xuất báo cáo">
+                <button type="button" id="btn-filter-unreported" onclick="toggleUnreportedFilter()" class="action-button action-button--filter" title="Chỉ hiển thị các lớp trễ hoặc cần kiểm tra thủ công">
+                    <i class="fa-solid fa-filter text-rose-600" aria-hidden="true"></i> Cần xem lại
                 </button>
-                <button type="button" id="btn-copy-reminders" onclick="copyZaloTeacherReminders()" class="action-button action-button--filter" title="Copy danh sách lớp chưa báo cáo gom theo giáo viên">
-                    <i class="fa-regular fa-copy" aria-hidden="true"></i> Copy nhắc GV
+                <button type="button" id="btn-rescan-failed" onclick="startSelectiveRescanFailed()" class="action-button action-button--dark" title="Chỉ quét lại các lớp đang báo lỗi hoặc cần xem lại trong tuần">
+                    <i class="fa-solid fa-rotate text-amber-400" aria-hidden="true"></i> Quét lại lớp lỗi
                 </button>
-                <button type="button" id="btn-export-weekly-csv" onclick="exportWeeklySummaryCsv()" class="action-button action-button--filter" title="Xuất báo cáo tổng hợp tuần ra file CSV chuẩn UTF-8 BOM cho Excel">
-                    <i class="fa-solid fa-file-arrow-down" aria-hidden="true"></i> 📥 Xuất CSV Tuần
+                <button type="button" id="btn-copy-reminders" onclick="copyZaloTeacherReminders()" class="action-button action-button--tool" title="Copy danh sách lớp chưa báo cáo gom theo giáo viên">
+                    <i class="fa-regular fa-copy text-blue-600" aria-hidden="true"></i> Copy nhắc GV
                 </button>
-                <button type="button" id="btn-rescan-failed" onclick="startSelectiveRescanFailed()" class="action-button action-button--filter" title="Chỉ quét lại các lớp đang báo lỗi hoặc cần xem lại trong tuần">
-                    <i class="fa-solid fa-rotate" aria-hidden="true"></i> Quét lại lớp lỗi
-                </button>
-                <button type="button" onclick="startAutoDiscover()" class="action-button action-button--discover">
-                    <i class="fa-solid fa-satellite-dish" aria-hidden="true"></i> Dò tìm lại
-                </button>
-                <button type="button" onclick="startScan()" class="action-button action-button--scan" title="Kiểm tra trước khi chạy rồi mới bắt đầu quét">
-                    <i class="fa-solid fa-bolt" aria-hidden="true"></i> Bắt đầu quét
+                <button type="button" id="btn-export-weekly-csv" onclick="exportAndEmailFailedClassesCsv()" class="action-button action-button--tool" title="Xuất file CSV danh sách các lớp lỗi và gửi về email Quản lý (thử nghiệm: quangda@mindx.net.vn; chính thức: quangda@mindx.net.vn, tuanpa@mindx.com.vn)">
+                    <i class="fa-solid fa-paper-plane text-emerald-600" aria-hidden="true"></i> Xuất CSV lỗi &amp; Gửi Mail
                 </button>
             </div>
         </div>
 
-        <div class="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-slate-200/80 bg-slate-50/70 px-3.5 py-2 text-xs text-slate-700">
-            <div class="flex flex-wrap items-center gap-2">
-                <label for="history-week-select" class="font-semibold text-slate-600">
-                    <i class="fa-regular fa-calendar-check mr-1" aria-hidden="true"></i>Tuần tra cứu:
+        <!-- ROW 2: MERGED SEARCH & WEEKLY HISTORY FILTER BAR (RECESSED WELL) -->
+        <div class="well-inset p-2.5 flex flex-wrap items-center justify-between gap-2.5 text-xs text-slate-800">
+            <div class="flex flex-wrap items-center gap-2.5 flex-1 min-w-[260px]">
+                <label class="search-box search-box--compact input-3d rounded-lg flex items-center overflow-hidden" for="searchInput">
+                    <span class="pl-3 text-slate-500" aria-hidden="true"><i class="fa-solid fa-magnifying-glass"></i></span>
+                    <span class="sr-only">Tìm theo nhóm hoặc giáo viên</span>
+                    <input type="search" id="searchInput" class="bg-transparent border-none text-xs font-semibold text-slate-900 focus:ring-0 block w-full py-1.5 px-2.5 outline-none" placeholder="Tìm theo nhóm, giáo viên...">
                 </label>
-                <select id="history-week-select" onchange="onHistoryWeekChange()" class="rounded-lg border border-slate-300 bg-white px-2.5 py-1 text-xs font-medium text-slate-700 focus:border-blue-500 focus:outline-none">
-                    <option value="">Tuần hiện tại (theo kế hoạch)</option>
-                </select>
-                <label for="history-job-select" class="font-semibold text-slate-600 ml-1">Job quét:</label>
-                <select id="history-job-select" onchange="onHistoryJobChange()" class="rounded-lg border border-slate-300 bg-white px-2.5 py-1 text-xs font-medium text-slate-700 focus:border-blue-500 focus:outline-none">
-                    <option value="">Mới nhất / Tổng hợp tuần</option>
-                </select>
-                <button type="button" id="btn-load-weekly-history" onclick="loadWeeklyHistorySummary()" class="preflight-refresh" title="Tải lịch sử các lần quét Zalo và LMS theo tuần đã chọn">
-                    <i class="fa-solid fa-clock-rotate-left" aria-hidden="true"></i> Tra cứu lịch sử
-                </button>
+
+                <div class="flex flex-wrap items-center gap-1.5">
+                    <label for="history-week-select" class="font-extrabold text-slate-700 uppercase text-[11px] whitespace-nowrap">
+                        <i class="fa-regular fa-calendar-check mr-1 text-blue-700" aria-hidden="true"></i>Tuần:
+                    </label>
+                    <select id="history-week-select" onchange="onHistoryWeekChange()" class="input-3d rounded-lg px-2.5 py-1.5 text-xs font-bold text-slate-800 cursor-pointer">
+                        <option value="">Tuần hiện tại (theo kế hoạch)</option>
+                    </select>
+                    <label for="history-job-select" class="font-extrabold text-slate-700 uppercase text-[11px] ml-1 whitespace-nowrap">Phiên:</label>
+                    <select id="history-job-select" onchange="onHistoryJobChange()" class="input-3d rounded-lg px-2.5 py-1.5 text-xs font-bold text-slate-800 cursor-pointer">
+                        <option value="">Mới nhất / Tổng hợp tuần</option>
+                    </select>
+                    <button type="button" id="btn-load-weekly-history" onclick="loadWeeklyHistorySummary()" class="preflight-refresh px-2.5 py-1" title="Làm mới dữ liệu lịch sử tuần đang chọn" aria-label="Làm mới lịch sử tuần">
+                        <i class="fa-solid fa-arrows-rotate text-blue-600" aria-hidden="true"></i>
+                    </button>
+                </div>
             </div>
-            <span id="weekly-history-status-badge" class="text-[11px] font-medium text-slate-500 truncate">Chế độ: Theo dõi phiên hiện tại</span>
+            <span id="weekly-history-status-badge" class="rounded-lg bg-slate-900 text-white border border-slate-950 px-3 py-1.5 text-[11px] font-bold shadow-sm truncate">Chế độ: Theo dõi phiên hiện tại</span>
         </div>
     </div>
 
-    <details id="zalo-review-queue" class="hidden rounded-xl border border-amber-200 bg-amber-50 px-4 py-2.5 text-xs text-amber-900 shrink-0">
-        <summary class="cursor-pointer font-semibold">Danh sách lớp cần kiểm tra thủ công</summary>
-        <div id="zalo-review-queue-items" class="mt-2 space-y-1.5 text-xs"></div>
+    <details id="zalo-review-queue" class="hidden rounded-xl border-2 border-amber-400 border-l-8 border-l-amber-600 bg-amber-50 px-4 py-2.5 text-xs text-amber-950 shadow-sm shrink-0">
+        <summary class="cursor-pointer font-extrabold">Danh sách lớp cần kiểm tra thủ công</summary>
+        <div id="zalo-review-queue-items" class="mt-2 space-y-1.5 text-xs font-semibold"></div>
     </details>
 
     <div class="data-panel glass-panel flex-1 flex flex-col overflow-hidden">
+        <!-- Dark Table Header Bar -->
+        <div class="bg-slate-900 text-white px-5 py-2.5 border-b-2 border-slate-950 flex flex-wrap items-center justify-between gap-2 shrink-0">
+            <div class="flex items-center gap-2.5">
+                <i class="fa-solid fa-table-list text-blue-400" aria-hidden="true"></i>
+                <span class="text-xs font-extrabold uppercase tracking-wider">Bảng giám sát tiến độ báo cáo nhóm Zalo</span>
+            </div>
+            <div class="flex items-center gap-2 text-[11px]">
+                <span class="bg-rose-500/20 text-rose-300 border border-rose-500/40 px-2 py-0.5 rounded font-bold">
+                    <i class="fa-solid fa-circle text-[7px] mr-1 align-middle text-rose-400" aria-hidden="true"></i>Ưu tiên xử lý trễ hạn
+                </span>
+                <span class="bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 px-2 py-0.5 rounded font-bold">
+                    <i class="fa-solid fa-circle text-[7px] mr-1 align-middle text-emerald-400" aria-hidden="true"></i>Đạt chuẩn minh chứng
+                </span>
+            </div>
+        </div>
+
         <div class="table-scroll flex-1">
             <table class="data-table w-full text-sm text-left tabular-nums">
-                <thead class="text-[10px] uppercase tracking-widest sticky top-0 z-10 border-b">
+                <thead class="text-[11px] font-extrabold uppercase tracking-wider sticky top-0 z-10 border-b-2 border-slate-400">
                     <tr>
-                        <th class="px-6 py-3.5">Tên nhóm Zalo</th>
-                        <th class="px-6 py-3.5">Người phụ trách</th>
-                        <th class="px-6 py-3.5">Thời gian quét</th>
-                        <th class="px-6 py-3.5">Trạng thái báo cáo</th>
-                        <th class="px-6 py-3.5 text-center">Minh chứng</th>
+                        <th class="px-5 py-3">Tên nhóm Zalo</th>
+                        <th class="px-5 py-3">Người phụ trách</th>
+                        <th class="px-5 py-3">Thời gian quét</th>
+                        <th class="px-5 py-3">Trạng thái báo cáo &amp; Chất lượng</th>
+                        <th class="px-5 py-3 text-center">Minh chứng</th>
                     </tr>
                 </thead>
                 <tbody id="results-table" class="divide-y bg-transparent">
@@ -134,13 +174,23 @@
                                 <div class="empty-state__icon flex items-center justify-center mb-4">
                                     <i class="fa-regular fa-folder-open text-3xl" aria-hidden="true"></i>
                                 </div>
-                                <p class="font-semibold text-slate-700">Chưa có dữ liệu</p>
-                                <p class="mt-1 text-sm text-slate-500">Hãy Dò tìm kế hoạch, kiểm tra an toàn rồi bắt đầu quét.</p>
+                                <p class="font-extrabold text-slate-800">Chưa có dữ liệu</p>
+                                <p class="mt-1 text-sm font-medium text-slate-600">Hãy Dò tìm kế hoạch, kiểm tra an toàn rồi bắt đầu quét.</p>
                             </div>
                         </td>
                     </tr>
                 </tbody>
             </table>
+        </div>
+
+        <!-- Table Footer Bar -->
+        <div class="bg-slate-100 px-5 py-2 border-t-2 border-slate-300 flex flex-wrap items-center justify-between gap-2 text-[11px] font-bold text-slate-600 shrink-0">
+            <span><i class="fa-solid fa-circle-info text-blue-600 mr-1" aria-hidden="true"></i>Các lớp chưa báo cáo được đóng khung đỏ nổi bật để ưu tiên kiểm tra.</span>
+            <div class="flex items-center gap-4">
+                <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-sm bg-emerald-500 border border-emerald-700 inline-block"></span> Đã báo cáo</span>
+                <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-sm bg-amber-500 border border-amber-700 inline-block"></span> Miễn báo cáo</span>
+                <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-sm bg-rose-500 border border-rose-700 inline-block"></span> Trễ / Chưa nộp</span>
+            </div>
         </div>
     </div>
 </div>

@@ -485,18 +485,33 @@ def _build_scan_targets(
                 # Ambiguous or missing Zalo identity is intentionally not
                 # promoted into an automated target.
                 continue
-            targets.append(
-                {
-                    "group_name": matches[0],
-                    "person": str(row.get("giao_vien", "")).strip() or "Chưa xác định",
-                    "class_code": str(row.get("ma_lop", "")).strip(),
-                    "lesson": str(row.get("buoi_so", "")).strip(),
-                    "class_date": str(row.get("ngay_hoc", "")).strip(),
-                    "class_date_iso": str(row.get("ngay_hoc_iso", "")).strip(),
-                    "zalo_deadline": str(row.get("zalo_deadline", "")).strip(),
-                    "week": week,
-                    "year": year,
-                    "week_source": "BCNB_SERVER",
-                }
-            )
+            target_entry = {
+                "group_name": matches[0],
+                "person": str(row.get("giao_vien", "")).strip() or "Chưa xác định",
+                "class_code": str(row.get("ma_lop", "")).strip(),
+                "lesson": str(row.get("buoi_so", "")).strip(),
+                "class_date": str(row.get("ngay_hoc", "")).strip(),
+                "class_date_iso": str(row.get("ngay_hoc_iso", "")).strip(),
+                "zalo_deadline": str(row.get("zalo_deadline", "")).strip(),
+                "week": week,
+                "year": year,
+                "week_source": "BCNB_SERVER",
+            }
+            for ext_key in (
+                "bcnb_session_id",
+                "khoi",
+                "lms_deadline",
+                "evaluation_status",
+            ):
+                if ext_key in row and row.get(ext_key) is not None:
+                    val = str(row.get(ext_key) or "").strip()
+                    if val:
+                        target_entry[ext_key] = val
+            for note_key in ("qc_issue_note", "instructor_note"):
+                if note_key in row and row.get(note_key) is not None:
+                    target_entry[note_key] = str(row.get(note_key) or "").strip()
+            for bool_key in ("nx_zalo_checked", "nx_lms_checked"):
+                if bool_key in row and isinstance(row.get(bool_key), bool):
+                    target_entry[bool_key] = bool(row[bool_key])
+            targets.append(target_entry)
     return targets

@@ -24,19 +24,38 @@
             const isScrolledToBottom = fullTerminal.scrollHeight - fullTerminal.clientHeight
                 <= fullTerminal.scrollTop + 10;
             const fragment = document.createDocumentFragment();
+            let appendedCount = 0;
             lines.forEach(log => {
-                const text = typeof log === 'string'
-                    ? log
-                    : `[${String(log.timestamp || '').slice(11, 19)}] ${String(log.message || '')}`;
+                const isObject = Boolean(log && typeof log === 'object');
+                const rawMessage = isObject ? String(log.message || '') : String(log || '');
+                const statusCode = isObject && log.status_code !== undefined ? Number(log.status_code) : NaN;
+                const level = isObject ? String(log.level || 'INFO').toUpperCase() : '';
+                const isHttpCompletion = (isObject && log.event === 'http.completed')
+                    || rawMessage.includes('HTTP request hoàn tất.');
+                const isHttpError = (Number.isFinite(statusCode) && statusCode >= 400)
+                    || level === 'ERROR'
+                    || /\b[45]\d{2}\b|Lỗi|LỖI|ERROR/i.test(rawMessage);
+                if (isHttpCompletion && !isHttpError) return;
+                const timePrefix = isObject
+                    ? `[${String(log.timestamp || '').slice(11, 19)}] `
+                    : '';
+                const httpDetail = isObject && isHttpCompletion && isHttpError
+                    ? `HTTP ${Number.isFinite(statusCode) ? statusCode : 'ERR'}${log.method ? ` ${log.method}` : ''}${log.path ? ` ${log.path}` : ''} — `
+                    : '';
+                const text = isObject
+                    ? `${timePrefix}${httpDetail}${rawMessage}`
+                    : rawMessage;
                 let colorClass = "log-info";
-                if (text.includes("Tick xanh") || text.includes("THÀNH CÔNG") || text.includes("thành công") || text.includes("✅")) colorClass = "log-success";
-                else if (text.includes("Lỗi") || text.includes("LỖI") || text.includes("thất bại") || text.includes("❌")) colorClass = "log-error";
+                if (isHttpError || text.includes("Lỗi") || text.includes("LỖI") || text.includes("thất bại") || text.includes("❌")) colorClass = "log-error";
+                else if (text.includes("Tick xanh") || text.includes("THÀNH CÔNG") || text.includes("thành công") || text.includes("✅")) colorClass = "log-success";
                 else if (text.includes("MIỄN BÁO CÁO") || text.includes("Miễn báo cáo") || text.includes("⚠️")) colorClass = "log-warning";
                 const line = document.createElement('div');
                 line.className = `${colorClass} mb-1`;
                 line.textContent = text;
                 fragment.appendChild(line);
+                appendedCount += 1;
             });
+            if (appendedCount === 0 && !replace) return;
             if (replace) fullTerminal.replaceChildren(fragment);
             else fullTerminal.appendChild(fragment);
             while (fullTerminal.children.length > MAX_LOG_DOM_LINES) {
@@ -269,18 +288,18 @@
                     ...events.map(item => ({
                         time: item.created_at || '',
                         text: `${item.event_type}: ${item.message || item.new_status || ''}`,
-                        tone: item.new_status === 'FAILED' ? 'text-rose-400' : 'text-gray-300'
+                        tone: item.new_status === 'FAILED' ? 'text-rose-600 font-semibold' : 'text-slate-700'
                     })),
                     ...actions.map(item => ({
                         time: item.created_at || '',
                         text: `AUDIT ${item.action_type} ${item.target_id}: ${item.outcome}`,
-                        tone: item.outcome === 'FAILED' ? 'text-rose-400' : 'text-emerald-300'
+                        tone: item.outcome === 'FAILED' ? 'text-rose-600 font-semibold' : 'text-emerald-700 font-medium'
                     }))
                 ].sort((a, b) => String(b.time).localeCompare(String(a.time))).slice(0, 100);
                 container.replaceChildren();
                 if (!items.length) {
                     const empty = document.createElement('div');
-                    empty.className = 'text-gray-500';
+                    empty.className = 'text-slate-400';
                     empty.textContent = 'Chưa có event/audit.';
                     container.appendChild(empty);
                     return;
@@ -308,7 +327,7 @@
             });
             if (!codes || codes.length === 0) {
                 const line = document.createElement('div');
-                line.className = 'text-gray-500';
+                line.className = 'text-slate-400';
                 line.textContent = 'Không có';
                 container.appendChild(line);
             }
@@ -319,15 +338,15 @@
                 ? plan.missing_but_checked_classes
                 : [];
             if (checkedList.includes(code)) {
-                return { label: 'BCNB: Đã tích ⚠️', tone: 'text-amber-300 border-amber-400/30 bg-amber-500/10' };
+                return { label: 'BCNB: Đã tích ⚠️', tone: 'text-amber-900 border-amber-300 bg-amber-100 font-semibold' };
             }
             const unmatchedList = plan && Array.isArray(plan.unmatched_classes)
                 ? plan.unmatched_classes
                 : [];
             if (unmatchedList.includes(code)) {
-                return { label: 'Ngoài BCNB tuần này', tone: 'text-gray-400 border-gray-600/40 bg-gray-800/60' };
+                return { label: 'Ngoài BCNB tuần này', tone: 'text-slate-600 border-slate-300 bg-slate-100 font-medium' };
             }
-            return { label: 'BCNB: Chưa tích', tone: 'text-rose-200 border-rose-400/30 bg-rose-500/10' };
+            return { label: 'BCNB: Chưa tích', tone: 'text-rose-800 border-rose-300 bg-rose-100 font-semibold' };
         }
 
         function renderLmsMissingClasses(plan) {
@@ -340,7 +359,7 @@
                 : {};
             if (codes.length === 0) {
                 const line = document.createElement('div');
-                line.className = 'text-gray-500';
+                line.className = 'text-slate-400';
                 line.textContent = 'Không có';
                 container.appendChild(line);
                 return;
@@ -351,10 +370,10 @@
                 const detail = String(overdueDetails[code] || '').trim();
                 const bcnbStatus = resolveLmsMissingBcnbStatus(plan, code);
                 const row = document.createElement('div');
-                row.className = 'flex flex-wrap items-center justify-between gap-1.5 rounded-lg border border-rose-500/15 bg-black/20 px-2 py-1.5';
+                row.className = 'flex flex-wrap items-center justify-between gap-1.5 rounded-lg border border-rose-200 bg-white px-2.5 py-1.5 shadow-sm';
 
                 const codeSpan = document.createElement('span');
-                codeSpan.className = 'font-bold text-rose-200';
+                codeSpan.className = 'font-bold text-rose-900';
                 codeSpan.textContent = detail ? `${code} (${detail})` : code;
                 row.appendChild(codeSpan);
 
@@ -443,7 +462,7 @@
                 : [];
             if (codes.length === 0) {
                 const line = document.createElement('div');
-                line.className = 'text-gray-500';
+                line.className = 'text-slate-400';
                 line.textContent = 'Không có';
                 container.appendChild(line);
                 syncLmsConfirmButtonState();
@@ -453,7 +472,7 @@
             const selectedSet = new Set(getSelectedLmsTickClasses());
             codes.forEach(code => {
                 const label = document.createElement('label');
-                label.className = 'flex items-center justify-between gap-2 rounded-lg border border-emerald-500/20 bg-black/20 px-2.5 py-1.5 cursor-pointer hover:bg-emerald-500/10 transition-colors';
+                label.className = 'flex items-center justify-between gap-2 rounded-lg border border-emerald-200 bg-white px-2.5 py-1.5 cursor-pointer hover:bg-emerald-50 transition-colors shadow-sm';
 
                 const leftWrap = document.createElement('div');
                 leftWrap.className = 'flex items-center gap-2';
@@ -463,7 +482,7 @@
                 checkbox.value = code;
                 checkbox.checked = selectedSet.has(code);
                 checkbox.disabled = isBusy;
-                checkbox.className = 'rounded border-emerald-400/50 text-emerald-500 focus:ring-emerald-500';
+                checkbox.className = 'rounded border-emerald-400 text-emerald-600 focus:ring-emerald-500';
                 checkbox.addEventListener('change', () => {
                     if (typeof lmsConfirmInFlight !== 'undefined' && lmsConfirmInFlight) {
                         checkbox.checked = selectedSet.has(code);
@@ -473,14 +492,14 @@
                 });
 
                 const codeSpan = document.createElement('span');
-                codeSpan.className = 'font-bold text-emerald-200';
+                codeSpan.className = 'font-bold text-emerald-900';
                 codeSpan.textContent = code;
 
                 leftWrap.appendChild(checkbox);
                 leftWrap.appendChild(codeSpan);
 
                 const statusSpan = document.createElement('span');
-                statusSpan.className = 'px-1.5 py-0.5 text-[10px] rounded border border-emerald-400/30 bg-emerald-500/10 text-emerald-200';
+                statusSpan.className = 'px-1.5 py-0.5 text-[10px] rounded border border-emerald-300 bg-emerald-100 text-emerald-800 font-semibold';
                 statusSpan.textContent = 'BCNB: Chưa tích';
 
                 label.textContent = `${code} · ${statusSpan.textContent}`;
@@ -865,6 +884,141 @@
             });
         }
 
+        function splitCheckerIssueNoteInJs(rawNote) {
+            const text = String(rawNote || '').trim();
+            if (!text) return { manual: '', autoIssues: [] };
+            const autoIssues = [];
+            let remaining = text;
+            const pattern = /\[Auto\s+QC:\s*/i;
+            while (true) {
+                const match = pattern.exec(remaining);
+                if (!match) break;
+                const startIdx = match.index;
+                const pos = startIdx + match[0].length;
+                let depth = 1;
+                let endIdx = remaining.length;
+                let inside = '';
+                for (let i = pos; i < remaining.length; i += 1) {
+                    const ch = remaining[i];
+                    if (ch === '[') depth += 1;
+                    else if (ch === ']') {
+                        depth -= 1;
+                        if (depth === 0) {
+                            inside = remaining.slice(pos, i).trim();
+                            endIdx = i + 1;
+                            break;
+                        }
+                    }
+                }
+                if (depth > 0) {
+                    inside = remaining.slice(pos).replace(/[\s\]]+$/g, '').trim();
+                    endIdx = remaining.length;
+                }
+                inside.split(';').forEach(seg => {
+                    const cleaned = seg.replace(/\s+/g, ' ').replace(/^[;| ]+|[;| ]+$/g, '').trim();
+                    if (cleaned) autoIssues.push(cleaned);
+                });
+                const before = remaining.slice(0, startIdx).replace(/\s*\|\s*$/, '').trim();
+                const after = remaining.slice(endIdx).replace(/^\s*\|\s*/, '').trim();
+                remaining = before && after ? `${before} | ${after}` : (before || after);
+            }
+            const manual = remaining.replace(/\s+/g, ' ').trim();
+            return { manual, autoIssues };
+        }
+
+        function resolveDashboardRowLmsStatus(r) {
+            if (!r || typeof r !== 'object') return 'Chưa quét LMS';
+            const st = r.scan_target && typeof r.scan_target === 'object' ? r.scan_target : {};
+            const rawLms = String(r.lms_status || '').trim();
+            if (rawLms && rawLms !== 'Chưa quét LMS') return rawLms;
+            const nxLms = typeof r.nx_lms_checked === 'boolean'
+                ? r.nx_lms_checked
+                : (typeof st.nx_lms_checked === 'boolean' ? st.nx_lms_checked : null);
+            if (nxLms === true) return '✅ Đã nộp LMS';
+            if (nxLms === false) return '❌ Chưa nộp LMS';
+            return rawLms || 'Chưa quét LMS';
+        }
+
+        function resolveDashboardRowIssueDescription(r) {
+            if (!r || typeof r !== 'object') return '';
+            const st = r.scan_target && typeof r.scan_target === 'object' ? r.scan_target : {};
+            const parts = [];
+            const seen = new Set();
+            const normKey = text => String(text || '')
+                .replace(/^\[[^\]]+\]\s*/, '')
+                .replace(/\s+—\s+/g, '; ')
+                .replace(/^[.;\s]+|[.;\s]+$/g, '')
+                .toLowerCase()
+                .replace(/\s+/g, ' ');
+            const addOne = seg => {
+                const cleaned = String(seg || '').replace(/\s+/g, ' ').replace(/^[;\s]+|[;\s]+$/g, '').trim();
+                if (!cleaned) return;
+                const key = normKey(cleaned);
+                if (key && !seen.has(key)) {
+                    seen.add(key);
+                    parts.push(cleaned);
+                }
+            };
+            const addVal = (val, splitSemi = false) => {
+                if (!val) return;
+                if (Array.isArray(val)) {
+                    val.forEach(entry => addVal(entry, false));
+                    return;
+                }
+                const text = String(val).trim();
+                if (!text) return;
+                if (/\[Auto\s+QC:\s*/i.test(text)) {
+                    const parsed = splitCheckerIssueNoteInJs(text);
+                    if (parsed.manual) addOne(parsed.manual);
+                    parsed.autoIssues.forEach(addOne);
+                    return;
+                }
+                if (splitSemi) {
+                    text.split(';').forEach(addOne);
+                } else {
+                    addOne(text);
+                }
+            };
+            if (r.issue_description) {
+                addVal(r.issue_description, true);
+            }
+            const qcNote = r.qc_issue_note !== undefined && r.qc_issue_note !== null
+                ? r.qc_issue_note
+                : st.qc_issue_note;
+            addVal(qcNote, false);
+            addVal(r.quality_issues || st.quality_issues, false);
+            addVal(r.lms_quality_issues || st.lms_quality_issues, false);
+            addVal(r.zalo_content_issues || st.zalo_content_issues, false);
+            return parts.join('; ');
+        }
+
+        function resolveDashboardRowEvaluationStatus(r) {
+            if (!r || typeof r !== 'object') return '';
+            const st = r.scan_target && typeof r.scan_target === 'object' ? r.scan_target : {};
+            const explicitEval = String(r.evaluation_status || st.evaluation_status || '').trim();
+            const zaloStatus = String(r.status || r.zalo_status || '').trim();
+            const lmsStatus = resolveDashboardRowLmsStatus(r);
+            const zaloWarn = zaloStatus.startsWith('⚠️');
+            const lmsWarn = lmsStatus.startsWith('⚠️');
+            const zaloDone = !zaloStatus.startsWith('❌') && !zaloWarn && (
+                zaloStatus.includes('✅') || zaloStatus.includes('Miễn') || zaloStatus.includes('🟡')
+            );
+            const lmsDone = !lmsStatus.startsWith('❌') && !lmsWarn && (
+                lmsStatus.startsWith('✅') || lmsStatus.includes('Dry-run LMS') || lmsStatus.includes('Chờ tích BCNB')
+            );
+            if (lmsWarn || zaloWarn) {
+                if (zaloDone && lmsWarn) return '⚠️ Đã nhận xét Zalo, LMS cần kiểm tra';
+                if (lmsDone && zaloWarn) return '⚠️ Đã hoàn tất nhận xét LMS, Zalo cần kiểm tra';
+                return '⚠️ Cần kiểm tra nhận xét';
+            }
+            if (explicitEval) return explicitEval;
+            if (lmsStatus === 'Chưa quét LMS') return '';
+            if (zaloDone && lmsDone) return '✅ Đã hoàn thành nhận xét';
+            if (lmsDone && !zaloDone) return '⏳ Đã hoàn tất nhận xét LMS, chưa nhận xét Zalo';
+            if (zaloDone && !lmsDone) return '⏳ Đã hoàn tất nhận xét Zalo, chưa nhận xét LMS';
+            return '❌ Chưa hoàn thành nhận xét';
+        }
+
         function renderZaloResults(resultsArray, force = false, options = {}) {
             const isHistoricalOption = Boolean(options && options.isHistoricalView);
             const preserveOrigin = Boolean(
@@ -974,9 +1128,18 @@
             const searchValue = document.getElementById('searchInput').value.toLowerCase();
             const rows = dashboardResults.filter(r => {
                 const status = String(r.status || '');
-                const isFailed = status.includes('❌') || status.includes('⚠️');
+                const lmsStatusText = resolveDashboardRowLmsStatus(r);
+                const issueText = resolveDashboardRowIssueDescription(r);
+                const isFailed = status.includes('❌')
+                    || status.includes('⚠️')
+                    || lmsStatusText.startsWith('❌')
+                    || lmsStatusText.startsWith('⚠️')
+                    || Boolean(issueText);
                 if (filterUnreported && !isFailed) return false;
-                return !searchValue || String(r.group || '').toLowerCase().includes(searchValue) || String(r.person || '').toLowerCase().includes(searchValue);
+                return !searchValue
+                    || String(r.group || '').toLowerCase().includes(searchValue)
+                    || String(r.person || '').toLowerCase().includes(searchValue)
+                    || issueText.toLowerCase().includes(searchValue);
             });
             tbody.replaceChildren();
             rows.forEach(r => {
@@ -1003,11 +1166,34 @@
                             detail.textContent = String(r.status_detail);
                             td.appendChild(detail);
                         }
-                        if (r.lms_status && r.lms_status !== 'Chưa quét LMS') {
+                        const resolvedLms = resolveDashboardRowLmsStatus(r);
+                        if (resolvedLms && resolvedLms !== 'Chưa quét LMS') {
                             const lmsDetail = document.createElement('div');
                             lmsDetail.className = 'status-detail';
-                            lmsDetail.textContent = `LMS: ${r.lms_status}`;
+                            lmsDetail.textContent = `LMS: ${resolvedLms}`;
                             td.appendChild(lmsDetail);
+                        }
+                        const resolvedEval = resolveDashboardRowEvaluationStatus(r);
+                        if (resolvedEval) {
+                            const evalDetail = document.createElement('div');
+                            evalDetail.className = 'status-detail font-medium text-slate-700';
+                            evalDetail.textContent = `Đánh giá: ${resolvedEval}`;
+                            td.appendChild(evalDetail);
+                        }
+                        const resolvedIssue = resolveDashboardRowIssueDescription(r);
+                        if (resolvedIssue) {
+                            const issueDetail = document.createElement('div');
+                            issueDetail.className = 'status-detail font-semibold text-rose-700';
+                            issueDetail.textContent = `Vấn đề: ${resolvedIssue}`;
+                            td.appendChild(issueDetail);
+                        }
+                        const st = r.scan_target && typeof r.scan_target === 'object' ? r.scan_target : {};
+                        const instructorNote = String(r.instructor_note || st.instructor_note || '').trim();
+                        if (instructorNote) {
+                            const noteDetail = document.createElement('div');
+                            noteDetail.className = 'status-detail text-slate-600';
+                            noteDetail.textContent = `Giải trình GV: ${instructorNote}`;
+                            td.appendChild(noteDetail);
                         }
                     } else if (valueIndex === 0) {
                         td.textContent = String(value || '');
@@ -1651,6 +1837,8 @@
             'Ngày học',
             'Trạng thái Zalo',
             'Trạng thái LMS',
+            'Tình trạng đánh giá',
+            'Mô tả vấn đề (TE/TF/QC)',
             'Thời gian kiểm chứng',
         ];
 
@@ -1717,16 +1905,42 @@
                 const st = r && r.scan_target && typeof r.scan_target === 'object' ? r.scan_target : {};
                 const ev = r && r.evidence && typeof r.evidence === 'object' ? r.evidence : {};
                 const verifiedAt = String(ev.scanned_at || r.timestamp || '—').trim() || '—';
+                const zaloStatus = String((r && r.status) || 'Chưa xác định').trim();
+                const lmsStatus = resolveDashboardRowLmsStatus(r);
+                const evaluationStatus = resolveDashboardRowEvaluationStatus(r, zaloStatus, lmsStatus);
+                const issueDescription = resolveDashboardRowIssueDescription(r);
                 return {
                     class_code: extractRowClassCodeForCsv(r),
                     teacher: String((r && r.person) || 'Chưa phân công').trim() || 'Chưa phân công',
                     lesson: String(st.lesson != null ? st.lesson : '—').trim() || '—',
                     class_date: String(st.class_date || st.class_date_iso || '—').trim() || '—',
-                    zalo_status: String((r && r.status) || 'Chưa xác định').trim(),
-                    lms_status: String((r && r.lms_status) || 'Chưa quét LMS').trim(),
+                    zalo_status: zaloStatus,
+                    lms_status: lmsStatus,
+                    evaluation_status: evaluationStatus,
+                    issue_description: issueDescription,
                     verified_at: verifiedAt,
                 };
             });
+        }
+
+        function isFailedWeeklySummaryRow(row) {
+            if (!row || typeof row !== 'object') return false;
+            const zaloStatus = String(row.zalo_status || row.status || '').trim();
+            const lmsStatus = String(row.lms_status || resolveDashboardRowLmsStatus(row)).trim();
+            const evalStatus = String(
+                row.evaluation_status || resolveDashboardRowEvaluationStatus(row, zaloStatus, lmsStatus)
+            ).trim();
+            const issueDesc = String(
+                row.issue_description != null ? row.issue_description : resolveDashboardRowIssueDescription(row)
+            ).trim();
+            const zaloOkOrExempt = zaloStatus.includes('✅') || zaloStatus.includes('Miễn');
+            const lmsFailed = lmsStatus.startsWith('❌') || lmsStatus.startsWith('⚠️');
+            const evalFailed = evalStatus.startsWith('❌') || evalStatus.startsWith('⚠️');
+            return !zaloOkOrExempt || lmsFailed || evalFailed || Boolean(issueDesc);
+        }
+
+        function filterFailedWeeklySummaryRows(rows) {
+            return (Array.isArray(rows) ? rows : []).filter(isFailedWeeklySummaryRow);
         }
 
         function buildWeeklySummaryCsv(rows) {
@@ -1734,18 +1948,65 @@
             const lines = [WEEKLY_CSV_HEADERS.map(escapeCsvField).join(',')];
             safeRows.forEach(row => {
                 if (!row || typeof row !== 'object') return;
+                const zaloStatus = String(row.zalo_status || row.status || '').trim();
+                const lmsStatus = String(row.lms_status || resolveDashboardRowLmsStatus(row)).trim();
+                const evaluationStatus = String(
+                    row.evaluation_status || resolveDashboardRowEvaluationStatus(row, zaloStatus, lmsStatus)
+                ).trim() || '—';
+                const issueDescription = String(
+                    row.issue_description != null ? row.issue_description : resolveDashboardRowIssueDescription(row)
+                ).trim();
                 const cells = [
                     row.class_code,
                     row.teacher,
                     row.lesson,
                     row.class_date,
-                    row.zalo_status,
-                    row.lms_status,
+                    zaloStatus,
+                    lmsStatus,
+                    evaluationStatus,
+                    issueDescription,
                     row.verified_at,
                 ];
                 lines.push(cells.map(escapeCsvField).join(','));
             });
             return '\uFEFF' + lines.join('\r\n') + '\r\n';
+        }
+
+        async function copyFailedEmailReportToClipboard(emailData) {
+            if (!emailData || typeof emailData !== 'object') return false;
+            const htmlPayload = String(emailData.html_body || emailData.html_table || '').trim();
+            const textPayload = String(emailData.text_body || emailData.text_table || '').trim();
+            if (!htmlPayload && !textPayload) return false;
+            try {
+                if (
+                    typeof navigator !== 'undefined'
+                    && navigator.clipboard
+                    && typeof navigator.clipboard.write === 'function'
+                    && typeof ClipboardItem === 'function'
+                    && typeof Blob === 'function'
+                    && htmlPayload
+                ) {
+                    const itemData = {
+                        'text/html': new Blob([htmlPayload], { type: 'text/html' }),
+                    };
+                    if (textPayload) {
+                        itemData['text/plain'] = new Blob([textPayload], { type: 'text/plain' });
+                    }
+                    await navigator.clipboard.write([new ClipboardItem(itemData)]);
+                    return true;
+                }
+                if (
+                    typeof navigator !== 'undefined'
+                    && navigator.clipboard
+                    && typeof navigator.clipboard.writeText === 'function'
+                ) {
+                    await navigator.clipboard.writeText(textPayload || htmlPayload);
+                    return true;
+                }
+            } catch (_) {
+                // Bỏ qua lỗi quyền truy cập clipboard trong trình duyệt
+            }
+            return false;
         }
 
         function triggerCsvFileDownload(csvText, filename) {
@@ -2101,7 +2362,12 @@
             });
         }
 
-        async function exportWeeklySummaryCsv() {
+        async function exportWeeklySummaryCsv(options = {}) {
+            const failedOnly = Boolean(options && options.failedOnly);
+            const sendEmail = Boolean(options && options.sendEmail);
+            const requestedRecipients = (options && Array.isArray(options.recipients))
+                ? options.recipients
+                : null;
             const weekSelect = document.getElementById('history-week-select');
             const jobSelect = document.getElementById('history-job-select');
             const selectedFromDropdown = weekSelect && weekSelect.value
@@ -2132,6 +2398,106 @@
                     .map(r => ({ ...r }));
             } else if (!isHistoricalWeekViewActive() && !selectedJobId) {
                 snapshotFallbackRows = buildWeeklySummaryCsvRowsFromDashboard(latestZaloResults, period, null);
+            }
+
+            if (sendEmail) {
+                const defaultFailedFilename = `Bao_Cao_Lop_Loi_Tuan_W${String(period.week).padStart(2, '0')}_${period.year}.csv`;
+                try {
+                    const emailPayload = {
+                        week: Number(period.week),
+                        year: Number(period.year),
+                        job_id: selectedJobId || null,
+                    };
+                    if (requestedRecipients && requestedRecipients.length > 0) {
+                        emailPayload.recipients = requestedRecipients;
+                    }
+                    const emailRes = await fetch('/api/reports/send-failed-csv-email', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(emailPayload),
+                    });
+                    const emailData = emailRes ? await emailRes.json() : null;
+                    lastFailedCsvEmailResult = emailData;
+                    if (emailRes && emailRes.ok && emailData) {
+                        const filename = emailData.filename || defaultFailedFilename;
+                        const serverCsvText = (typeof emailData.csv_text === 'string' && emailData.csv_text)
+                            ? emailData.csv_text
+                            : '';
+                        if (serverCsvText) {
+                            triggerCsvFileDownload(serverCsvText, filename);
+                        }
+                        const recList = (Array.isArray(emailData.recipients) && emailData.recipients.length > 0)
+                            ? emailData.recipients.join(', ')
+                            : 'quangda@mindx.net.vn';
+                        let clipboardFallbackWarning = '';
+                        if (emailData.delivery_status === 'SMTP_NOT_CONFIGURED') {
+                            const copiedOk = await copyFailedEmailReportToClipboard(emailData);
+                            if (!copiedOk) {
+                                clipboardFallbackWarning =
+                                    '\n⚠️ Không thể tự động sao chép bảng báo cáo vào Clipboard; '
+                                    + `vui lòng sao chép thủ công hoặc đính kèm đầy đủ file CSV (${filename}) trước khi gửi để tránh thiếu lớp.`;
+                                const fullFallbackText = String(emailData.text_body || emailData.text_table || '').trim();
+                                const promptFn = (typeof window !== 'undefined' && typeof window.prompt === 'function')
+                                    ? window.prompt.bind(window)
+                                    : (typeof prompt === 'function' ? prompt : null);
+                                if (fullFallbackText && promptFn) {
+                                    try {
+                                        promptFn(
+                                            'Trình duyệt chặn tự động copy vào Clipboard. Hãy nhấn Ctrl+C để sao chép đầy đủ danh sách lớp lỗi dưới đây:',
+                                            fullFallbackText
+                                        );
+                                    } catch (_) {
+                                        // ignore prompt error in headless mode
+                                    }
+                                }
+                            }
+                            if (
+                                emailData.gmail_compose_url
+                                && typeof window !== 'undefined'
+                                && typeof window.open === 'function'
+                            ) {
+                                try {
+                                    window.open(emailData.gmail_compose_url, '_blank', 'noopener,noreferrer');
+                                } catch (_) {
+                                    // ignore popup block in headless mode
+                                }
+                            }
+                        }
+                        const baseAlertMsg = emailData.message
+                            || `Đã xuất CSV lớp lỗi (${emailData.failed_count || 0} lớp) và gửi báo cáo tới: ${recList}`;
+                        alert(baseAlertMsg + clipboardFallbackWarning);
+                        return serverCsvText;
+                    }
+                    const detail = emailData && emailData.detail;
+                    const errCode = detail && typeof detail === 'object' ? detail.code : '';
+                    const errMsg = detail && typeof detail === 'object'
+                        ? (detail.message || detail.code || 'Không thể gửi email báo cáo.')
+                        : (detail || 'Không thể gửi email báo cáo.');
+                    if (
+                        detail
+                        && typeof detail === 'object'
+                        && typeof detail.csv_text === 'string'
+                        && detail.csv_text
+                    ) {
+                        const errFilename = detail.filename || defaultFailedFilename;
+                        triggerCsvFileDownload(detail.csv_text, errFilename);
+                        alert(`Đã xuất file ${errFilename}, nhưng gửi email thất bại: ${errMsg}`);
+                        return detail.csv_text;
+                    }
+                    if (errCode === 'NO_FAILED_CLASSES' || errCode === 'EMPTY_WEEKLY_SUMMARY') {
+                        alert(errMsg);
+                        return '';
+                    }
+                    alert('Lỗi: ' + errMsg);
+                    return '';
+                } catch (_) {
+                    lastFailedCsvEmailResult = null;
+                    alert(
+                        'Chưa xác định trạng thái gửi email do mất kết nối phản hồi từ máy chủ. '
+                        + 'Hệ thống không tự gửi lại và không tải CSV cục bộ để tránh lệch nội dung với email.'
+                    );
+                    return '';
+                }
             }
 
             let rowsToExport = [];
@@ -2177,10 +2543,27 @@
                 return '';
             }
 
+            if (failedOnly) {
+                rowsToExport = filterFailedWeeklySummaryRows(rowsToExport);
+                if (rowsToExport.length === 0) {
+                    alert('Không có lớp lỗi nào trong tuần đã chọn cần xuất CSV và gửi mail.');
+                    return '';
+                }
+            }
+
             const csvText = buildWeeklySummaryCsv(rowsToExport);
-            const filename = `Bao_Cao_Tuan_W${String(period.week).padStart(2, '0')}_${period.year}.csv`;
+            const filePrefix = failedOnly ? 'Bao_Cao_Lop_Loi_Tuan' : 'Bao_Cao_Tuan';
+            const filename = `${filePrefix}_W${String(period.week).padStart(2, '0')}_${period.year}.csv`;
             triggerCsvFileDownload(csvText, filename);
             return csvText;
+        }
+
+        async function exportAndEmailFailedClassesCsv(options = {}) {
+            return exportWeeklySummaryCsv({
+                ...(options && typeof options === 'object' ? options : {}),
+                failedOnly: true,
+                sendEmail: true,
+            });
         }
 
         document.getElementById('searchInput').addEventListener('input', () => {

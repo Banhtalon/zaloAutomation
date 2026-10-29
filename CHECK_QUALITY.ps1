@@ -34,7 +34,14 @@ $isolatedEnvironmentNames = @(
     "FORM_URL",
     "BCNB_URL",
     "BCNB_CLASS_STATUS_URL",
-    "LMS_URL"
+    "LMS_URL",
+    "REPORT_EMAIL_RECIPIENTS",
+    "SMTP_HOST",
+    "SMTP_PORT",
+    "SMTP_USERNAME",
+    "SMTP_PASSWORD",
+    "SMTP_FROM",
+    "SMTP_USE_TLS"
 )
 $coverageJsonPath = Join-Path $PSScriptRoot "coverage-phase9a.json"
 
@@ -96,6 +103,13 @@ if ($Isolated) {
         BCNB_URL = "http://127.0.0.1/quality-disabled/check_nhanxet.php"
         BCNB_CLASS_STATUS_URL = "http://127.0.0.1/quality-disabled/hocsinh.php"
         LMS_URL = "http://127.0.0.1/quality-disabled/lms-class-sessions"
+        REPORT_EMAIL_RECIPIENTS = "quangda@mindx.net.vn"
+        SMTP_HOST = "smtp.gmail.com"
+        SMTP_PORT = "587"
+        SMTP_USERNAME = ""
+        SMTP_PASSWORD = ""
+        SMTP_FROM = ""
+        SMTP_USE_TLS = "true"
     }
     foreach ($entry in $isolatedValues.GetEnumerator()) {
         [Environment]::SetEnvironmentVariable(

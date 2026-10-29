@@ -188,7 +188,13 @@ class InMemoryBatchRepository:
 
     async def complete_write(self, target_id, *, status, **_kwargs):
         self.complete_write_calls.append((target_id, status))
-        self._row(target_id)["write_status"] = status
+        row = self._row(target_id)
+        row["write_status"] = status
+        if _kwargs.get("result") is not None:
+            row["result"] = _kwargs["result"]
+
+    async def update_target_result(self, target_id, *, result):
+        self._row(target_id)["result"] = result
 
     async def halt_unclaimed(self, job_id, reason):
         scan_blocked = 0

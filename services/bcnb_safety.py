@@ -1,6 +1,9 @@
 """Shared, fail-closed helpers for reading the BCNB table."""
 
+from collections.abc import Mapping, Sequence
+import json
 import re
+from typing import Any
 import unicodedata
 
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
@@ -10,9 +13,10 @@ from core.time_utils import previous_business_week
 
 def fold_text(value: str) -> str:
     normalized = unicodedata.normalize("NFD", value or "")
-    return "".join(
+    stripped = "".join(
         char for char in normalized if unicodedata.category(char) != "Mn"
-    ).lower()
+    )
+    return stripped.replace("đ", "d").replace("Đ", "D").lower()
 
 
 def _canonical_class_code(value: str) -> str:
@@ -484,3 +488,471 @@ async def verify_checkbox_persisted(
     if await checkbox.count() != 1:
         raise RuntimeError(f"BCNB reload không có đúng một checkbox cho {class_code}.")
     return await checkbox.is_checked()
+
+
+_BCNB_NOTE_PLACEHOLDERS = frozenset(
+    {
+        "+ ghi chu qc",
+        "ghi chu qc",
+        "+ gv nhap giai trinh",
+        "gv nhap giai trinh",
+    }
+)
+
+
+def clean_bcnb_note_text(raw: Any) -> str:
+    """Normalize a BCNB note cell value and strip UI placeholder labels."""
+    if raw is None:
+        return ""
+    text = str(raw).strip()
+    if not text:
+        return ""
+    if text.startswith('"') and text.endswith('"'):
+        try:
+            decoded = json.loads(text)
+            if isinstance(decoded, str):
+                text = decoded.strip()
+        except (TypeError, ValueError):
+            pass
+    folded = re.sub(r"\s+", " ", fold_text(text)).strip()
+    if folded in _BCNB_NOTE_PLACEHOLDERS:
+        return ""
+    return text
+
+
+async def resolve_extended_bcnb_columns(page) -> dict[str, int | None]:
+    """Resolve optional extended columns on BCNB check_nhanxet.php by semantic header."""
+    header_cells = await page.locator("table tr").first.locator("th, td").all()
+    headers = [fold_text((await cell.inner_text()).strip()) for cell in header_cells]
+
+    def _unique(indices: list[int]) -> int | None:
+        return indices[0] if len(indices) == 1 else None
+
+    block_indexes = [
+        i for i, text in enumerate(headers) if text == "khoi" or "khoi" in text or text == "block"
+    ]
+    current_zalo_indexes = [
+        i
+        for i, text in enumerate(headers)
+        if "nhan xet zalo" in text or re.fullmatch(r"nx\s*zalo", text)
+    ]
+    legacy_zalo_indexes = [
+        i
+        for i, text in enumerate(headers)
+        if "lms" not in text
+        and ("bao cao" in text or "da nop" in text or "nop bao cao" in text)
+    ]
+    lms_deadline_indexes = [
+        i
+        for i, text in enumerate(headers)
+        if "deadline lms" in text or ("lms" in text and "deadline" in text)
+    ]
+    current_lms_indexes = [
+        i
+        for i, text in enumerate(headers)
+        if "nhan xet lms" in text or re.fullmatch(r"nx\s*lms", text)
+    ]
+    legacy_lms_indexes = [
+        i
+        for i, text in enumerate(headers)
+        if "lms" in text
+        and "deadline" not in text
+        and (
+            text == "lms"
+            or "nhan xet" in text
+            or "da nop" in text
+            or "nop" in text
+        )
+    ]
+    checker_note_indexes = [
+        i
+        for i, text in enumerate(headers)
+        if "mo ta van de" in text or "te/tf/qc" in text or "ghi chu qc" in text
+    ]
+    instructor_note_indexes = [
+        i
+        for i, text in enumerate(headers)
+        if "ghi chu giang vien" in text or "ghi chu gv" in text
+    ]
+    evaluation_status_indexes = [
+        i
+        for i, text in enumerate(headers)
+        if "tinh trang danh gia" in text
+        or "tinh trang kiem tra" in text
+        or "trang thai danh gia" in text
+    ]
+    return {
+        "block_index": _unique(block_indexes),
+        "zalo_checkbox_index": _unique(current_zalo_indexes or legacy_zalo_indexes),
+        "lms_deadline_index": _unique(lms_deadline_indexes),
+        "lms_checkbox_index": _unique(current_lms_indexes or legacy_lms_indexes),
+        "checker_note_index": _unique(checker_note_indexes),
+        "instructor_note_index": _unique(instructor_note_indexes),
+        "evaluation_status_index": _unique(evaluation_status_indexes),
+    }
+
+
+async def _read_optional_checkbox_state(cell) -> bool | None:
+    if cell is None or not hasattr(cell, "locator"):
+        return None
+    try:
+        checkbox = cell.locator('input[type="checkbox"]').first
+        if hasattr(checkbox, "count") and await checkbox.count() == 0:
+            return None
+        return bool(await checkbox.is_checked())
+    except Exception:
+        return None
+
+
+async def _read_optional_note_cell(cell, *, note_type: str) -> str | None:
+    if cell is None:
+        return None
+    attr_value: str | None = None
+    if hasattr(cell, "locator"):
+        try:
+            note_el = cell.locator(f'.note-cell[data-note-type="{note_type}"]').first
+            if hasattr(note_el, "count") and await note_el.count() > 0:
+                if hasattr(note_el, "get_attribute"):
+                    raw_attr = await note_el.get_attribute("data-current-note")
+                    if raw_attr is not None and not isinstance(raw_attr, Exception):
+                        attr_value = clean_bcnb_note_text(str(raw_attr))
+                        if attr_value:
+                            return attr_value
+        except Exception:
+            attr_value = None
+    if hasattr(cell, "inner_text"):
+        try:
+            raw_text = await cell.inner_text()
+            if raw_text is not None:
+                return clean_bcnb_note_text(str(raw_text))
+        except Exception:
+            return attr_value
+    return attr_value
+
+
+async def extract_bcnb_extended_row_fields(
+    row,
+    cells: list[Any],
+    ext_cols: Mapping[str, int | None] | None,
+    *,
+    include_empty: bool = True,
+) -> dict[str, Any]:
+    """Extract extended BCNB columns safely for both real Playwright rows and unit-test fakes."""
+    cols = ext_cols or {}
+    session_id = ""
+    row_block_attr = ""
+    if hasattr(row, "get_attribute"):
+        try:
+            session_id = str((await row.get_attribute("data-session-id")) or "").strip()
+        except Exception:
+            session_id = ""
+        try:
+            row_block_attr = str((await row.get_attribute("data-block")) or "").strip()
+        except Exception:
+            row_block_attr = ""
+
+    def _cell_at(key: str):
+        idx = cols.get(key)
+        if isinstance(idx, int) and 0 <= idx < len(cells):
+            return cells[idx]
+        return None
+
+    block_cell = _cell_at("block_index")
+    khoi = ""
+    if block_cell is not None and hasattr(block_cell, "inner_text"):
+        try:
+            khoi = str((await block_cell.inner_text()) or "").strip()
+        except Exception:
+            khoi = ""
+    if not khoi and row_block_attr:
+        khoi = row_block_attr
+
+    lms_deadline_cell = _cell_at("lms_deadline_index")
+    lms_deadline = ""
+    if lms_deadline_cell is not None and hasattr(lms_deadline_cell, "inner_text"):
+        try:
+            lms_deadline = str((await lms_deadline_cell.inner_text()) or "").strip()
+        except Exception:
+            lms_deadline = ""
+
+    eval_cell = _cell_at("evaluation_status_index")
+    evaluation_status = ""
+    if eval_cell is not None and hasattr(eval_cell, "inner_text"):
+        try:
+            evaluation_status = re.sub(
+                r"\s+",
+                " ",
+                str((await eval_cell.inner_text()) or ""),
+            ).strip()
+        except Exception:
+            evaluation_status = ""
+
+    nx_zalo_checked = await _read_optional_checkbox_state(_cell_at("zalo_checkbox_index"))
+    nx_lms_checked = await _read_optional_checkbox_state(_cell_at("lms_checkbox_index"))
+    checker_cell = _cell_at("checker_note_index")
+    instructor_cell = _cell_at("instructor_note_index")
+    qc_issue_note = await _read_optional_note_cell(checker_cell, note_type="checker")
+    instructor_note = await _read_optional_note_cell(
+        instructor_cell, note_type="instructor"
+    )
+
+    full_result: dict[str, Any] = {
+        "bcnb_session_id": session_id,
+        "khoi": khoi,
+        "nx_zalo_checked": nx_zalo_checked,
+        "nx_lms_checked": nx_lms_checked,
+        "lms_deadline": lms_deadline,
+        "qc_issue_note": qc_issue_note,
+        "instructor_note": instructor_note,
+        "evaluation_status": evaluation_status,
+    }
+    if include_empty:
+        return full_result
+    return {
+        k: v
+        for k, v in full_result.items()
+        if (
+            isinstance(v, bool)
+            or (
+                isinstance(v, str)
+                and (bool(v.strip()) or k in {"qc_issue_note", "instructor_note"})
+            )
+        )
+    }
+
+
+def _balance_issue_brackets(text: str) -> str:
+    """Ensure a single issue string never contains unbalanced '[' or ']'."""
+    chars = list(text)
+    open_indices: list[int] = []
+    for idx, ch in enumerate(chars):
+        if ch == "[":
+            open_indices.append(idx)
+        elif ch == "]":
+            if open_indices:
+                open_indices.pop()
+            else:
+                chars[idx] = ")"
+    for idx in open_indices:
+        chars[idx] = "("
+    return "".join(chars)
+
+
+def _normalize_auto_issue_key(text: str) -> str:
+    stripped = re.sub(r"^\[[^\]]+\]\s*", "", text.strip())
+    stripped = stripped.replace(" — ", "; ").strip(" .;|").lower()
+    return " ".join(stripped.split())
+
+
+def split_checker_issue_note(raw_note: Any) -> tuple[str, list[str]]:
+    """Split a BCNB checker note into ``(manual_note, auto_issues)`` using balanced brackets."""
+    text = clean_bcnb_note_text(raw_note)
+    if not text:
+        return "", []
+    auto_issues: list[str] = []
+    seen_keys: set[str] = set()
+    remaining = text
+    pattern = re.compile(r"\[Auto\s+QC:\s*", flags=re.IGNORECASE)
+    while True:
+        match = pattern.search(remaining)
+        if not match:
+            break
+        start_idx = match.start()
+        pos = match.end()
+        depth = 1
+        end_idx = len(remaining)
+        inside = ""
+        for idx in range(pos, len(remaining)):
+            ch = remaining[idx]
+            if ch == "[":
+                depth += 1
+            elif ch == "]":
+                depth -= 1
+                if depth == 0:
+                    inside = remaining[pos:idx].strip()
+                    end_idx = idx + 1
+                    break
+        if depth > 0:
+            inside = remaining[pos:].strip(" ]")
+            end_idx = len(remaining)
+        for seg in inside.split(";"):
+            cleaned_seg = " ".join(seg.split()).strip(" ;|")
+            if not cleaned_seg:
+                continue
+            key = _normalize_auto_issue_key(cleaned_seg)
+            if key and key not in seen_keys:
+                seen_keys.add(key)
+                auto_issues.append(cleaned_seg)
+        before = re.sub(r"\s*\|\s*$", "", remaining[:start_idx]).strip()
+        after = re.sub(r"^\s*\|\s*", "", remaining[end_idx:]).strip()
+        if before and after:
+            remaining = f"{before} | {after}"
+        else:
+            remaining = before or after
+    manual_clean = " ".join(remaining.split()).strip()
+    return manual_clean, auto_issues
+
+
+def _truncate_single_issue_preserving_tag(issue_text: str, item_budget: int) -> str:
+    """Truncate one auto issue to ``item_budget`` while keeping any leading ``[TAG]`` intact."""
+    tag_match = re.match(r"^(\[[^\]]+\]\s*)", issue_text)
+    tag_prefix = tag_match.group(1) if tag_match else ""
+    body = issue_text[len(tag_prefix) :]
+    effective_budget = max(len(tag_prefix) + 8, int(item_budget))
+    if len(issue_text) <= effective_budget:
+        return _balance_issue_brackets(issue_text)
+    body_budget = max(8, effective_budget - len(tag_prefix))
+    sliced_body = body[:body_budget].rstrip(" ;|,[")
+    return f"{tag_prefix}{_balance_issue_brackets(sliced_body)}"
+
+
+def merge_checker_issue_note(
+    existing_note: Any,
+    auto_issues: Sequence[str] | None,
+    *,
+    max_length: int = 500,
+) -> str:
+    """Merge auto-detected QC issues into a checker note while preserving manual QC notes."""
+    limit = max(48, int(max_length))
+    manual_part, _ = split_checker_issue_note(existing_note)
+    deduped_issues: list[str] = []
+    seen_keys: set[str] = set()
+    for raw_issue in auto_issues or []:
+        cleaned = " ".join(str(raw_issue or "").split()).strip(" ;|")
+        if not cleaned:
+            continue
+        balanced = _balance_issue_brackets(cleaned)
+        key = _normalize_auto_issue_key(balanced)
+        if key and key not in seen_keys:
+            seen_keys.add(key)
+            deduped_issues.append(balanced)
+
+    if not deduped_issues:
+        return manual_part
+
+    joined_issues = "; ".join(deduped_issues)
+    auto_block = f"[Auto QC: {joined_issues}]"
+    combined = f"{manual_part} | {auto_block}" if manual_part else auto_block
+    if len(combined) <= limit:
+        return combined
+
+    prefix_len = len("[Auto QC: ")
+    suffix = "...]"
+    count = len(deduped_issues)
+    min_inner_budget = max(20, 18 * count + 2 * max(0, count - 1))
+
+    if manual_part:
+        raw_avail = limit - len(manual_part) - 3 - prefix_len - len(suffix)
+        inner_budget = max(min_inner_budget, raw_avail)
+    else:
+        inner_budget = max(min_inner_budget, limit - prefix_len - len(suffix))
+
+    sep_cost = 2 * max(0, count - 1)
+    per_issue_budget = max(18, (inner_budget - sep_cost) // count)
+    truncated_parts = [
+        _truncate_single_issue_preserving_tag(issue, per_issue_budget)
+        for issue in deduped_issues
+    ]
+    truncated_inner = "; ".join(truncated_parts).rstrip(" ;|,[")
+    if manual_part:
+        return f"{manual_part} | [Auto QC: {truncated_inner}{suffix}"
+    return f"[Auto QC: {truncated_inner}{suffix}"
+
+
+def _normalize_bcnb_date_iso(raw_date: str) -> str:
+    cleaned = str(raw_date or "").strip()
+    if not cleaned:
+        return ""
+    iso_m = re.search(r"(\d{4})-(\d{1,2})-(\d{1,2})", cleaned)
+    if iso_m:
+        return f"{int(iso_m.group(1)):04d}-{int(iso_m.group(2)):02d}-{int(iso_m.group(3)):02d}"
+    dmy_m = re.search(r"(\d{1,2})[/.-](\d{1,2})[/.-](\d{4})", cleaned)
+    if dmy_m:
+        return f"{int(dmy_m.group(3)):04d}-{int(dmy_m.group(2)):02d}-{int(dmy_m.group(1)):02d}"
+    return cleaned
+
+
+async def verify_checker_note_persisted(
+    page,
+    *,
+    class_code: str,
+    week: int,
+    year: int,
+    expected_note: str,
+    lesson: str | None = None,
+    class_date_iso: str | None = None,
+    session_id: str | None = None,
+) -> tuple[bool, str]:
+    """Hard reload and verify that the BCNB checker note matches ``expected_note``."""
+    await page.reload(wait_until="domcontentloaded")
+    selected_week, selected_year = await select_week_checked(page, week, year)
+    if (selected_week, selected_year) != (week, year):
+        raise RuntimeError("BCNB reload trả về sai tuần/năm cần xác minh ghi chú.")
+
+    class_index, lesson_index = await resolve_class_lesson_columns(page)
+    ext_cols = await resolve_extended_bcnb_columns(page)
+    checker_index = ext_cols.get("checker_note_index")
+    if checker_index is None:
+        raise RuntimeError(
+            "Cấu trúc bảng BCNB đã thay đổi: thiếu cột Mô tả vấn đề (TE/TF/QC)."
+        )
+
+    header_cells = await page.locator("table tr").first.locator("th, td").all()
+    headers = [fold_text((await cell.inner_text()).strip()) for cell in header_cells]
+    date_indexes = [i for i, text in enumerate(headers) if "ngay hoc" in text]
+    date_index = date_indexes[0] if len(date_indexes) == 1 else None
+
+    target_code = _canonical_class_code(class_code)
+    target_lesson = str(lesson).strip() if lesson is not None else None
+    target_date_iso = _normalize_bcnb_date_iso(class_date_iso or "")
+    target_sid = str(session_id or "").strip()
+
+    if target_date_iso and date_index is None and not target_sid:
+        raise RuntimeError("BCNB reload thiếu cột Ngày học để xác minh duy nhất dòng ghi chú.")
+
+    matches = []
+    rows = await page.locator("table tr").all()
+    for row in rows:
+        cells = await row.locator("td").all()
+        required_index = max(
+            class_index,
+            lesson_index,
+            checker_index,
+            date_index if date_index is not None else 0,
+        )
+        if len(cells) <= required_index:
+            continue
+        observed_code = _canonical_class_code((await cells[class_index].inner_text()).strip())
+        if observed_code != target_code:
+            continue
+        if target_lesson is not None:
+            observed_lesson = (await cells[lesson_index].inner_text()).strip()
+            if observed_lesson != target_lesson:
+                continue
+        if target_sid:
+            row_sid = ""
+            if hasattr(row, "get_attribute"):
+                try:
+                    row_sid = str((await row.get_attribute("data-session-id")) or "").strip()
+                except Exception:
+                    row_sid = ""
+            if row_sid != target_sid:
+                continue
+        if target_date_iso and date_index is not None:
+            observed_date_iso = _normalize_bcnb_date_iso(
+                (await cells[date_index].inner_text()).strip()
+            )
+            if observed_date_iso != target_date_iso:
+                continue
+        matches.append(cells[checker_index])
+
+    if len(matches) != 1:
+        raise RuntimeError(
+            f"BCNB reload cần đúng một dòng ghi chú cho {class_code}, nhưng tìm thấy {len(matches)}."
+        )
+    observed_raw = await _read_optional_note_cell(matches[0], note_type="checker")
+    if observed_raw is None:
+        raise RuntimeError(f"BCNB reload không đọc được ô Mô tả vấn đề cho {class_code}.")
+    observed_clean = clean_bcnb_note_text(observed_raw)
+    expected_clean = clean_bcnb_note_text(expected_note)
+    return (observed_clean == expected_clean, observed_clean)

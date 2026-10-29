@@ -5,6 +5,7 @@ from collections.abc import Awaitable, Callable
 import contextlib
 from datetime import datetime
 import json
+import os
 import re
 from typing import Any
 
@@ -20,14 +21,21 @@ from repositories.zalo_batch_repository import canonical_target_key
 from services.bcnb_actions import (
     BcnbOutcomeUnknownError,
     execute_verified_checkbox_action,
+    execute_verified_checker_note_action,
 )
 from services.bcnb_safety import (
+    clean_bcnb_note_text,
+    extract_bcnb_extended_row_fields,
+    merge_checker_issue_note,
+    resolve_extended_bcnb_columns,
     resolve_report_columns,
     resolve_schedule_columns,
     select_week_checked,
+    split_checker_issue_note,
 )
 from services.browser_job_guard import exclusive_browser_job
 from services.external_gateways import ExternalGateways
+from services.lms_quality_service import inspect_and_attach_quality_issues
 from services.zalo_discovery_matching import find_bcnb_match
 from services.zalo_evidence import (
     LESSON_14_EXEMPTION,
@@ -89,6 +97,28 @@ def _result_target_week(result: dict[str, Any]) -> tuple[int, int] | None:
     return None
 
 
+def _result_period_pair(result: dict[str, Any]) -> tuple[int, int] | None:
+    pair = _result_target_week(result)
+    if pair is not None:
+        return pair
+    st = result.get("scan_target")
+    st_dict = st if isinstance(st, dict) else {}
+    for w_cand, y_cand in (
+        (st_dict.get("week"), st_dict.get("year")),
+        (result.get("week"), result.get("year")),
+    ):
+        try:
+            if w_cand is None or y_cand is None:
+                continue
+            week = int(str(w_cand))
+            year = int(str(y_cand))
+            if 1 <= week <= 53 and 2000 < year <= 2100:
+                return week, year
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
 def _result_lesson_date(result: dict[str, Any]) -> str | None:
     context = result.get("evidence", {}).get("date_context", {}) or {}
     value = str(
@@ -100,12 +130,24 @@ def _result_lesson_date(result: dict[str, Any]) -> str | None:
     return value or None
 
 
+def _result_session_id(result: dict[str, Any]) -> str:
+    st = result.get("scan_target")
+    st_dict = st if isinstance(st, dict) else {}
+    return str(
+        result.get("bcnb_session_id") or st_dict.get("bcnb_session_id") or ""
+    ).strip()
+
+
 def _result_matches_schedule_row(
     result: dict[str, Any],
     row: dict[str, Any],
     pair: tuple[int, int],
 ) -> bool:
     """Match a report to one week/date row; never match by class code alone."""
+    res_sid = _result_session_id(result)
+    row_sid = str(row.get("bcnb_session_id") or "").strip()
+    if res_sid and row_sid and res_sid != row_sid:
+        return False
     if not find_bcnb_match(result.get("group", ""), [row]):
         return False
     if _result_target_week(result) != pair:
@@ -122,6 +164,56 @@ def _result_matches_schedule_row(
     if target_lesson and target_lesson != str(row.get("buoi_so") or "").strip():
         return False
     return True
+
+
+def _result_matches_bcnb_row_for_metadata(
+    result: dict[str, Any],
+    row: dict[str, Any],
+    pair: tuple[int, int],
+) -> bool:
+    """Match a scan result to a BCNB row for read-only metadata sync using full target identity."""
+    if _result_matches_schedule_row(result, row, pair):
+        return True
+    st = result.get("scan_target")
+    if not isinstance(st, dict):
+        return False
+    res_sid = _result_session_id(result)
+    row_sid = str(row.get("bcnb_session_id") or "").strip()
+    if res_sid and row_sid and res_sid != row_sid:
+        return False
+    target_pair = _result_target_week(result)
+    if target_pair is None:
+        try:
+            w_val = int(str(st.get("week")))
+            y_val = int(str(st.get("year")))
+            if 1 <= w_val <= 53 and 2000 < y_val <= 2100:
+                target_pair = (w_val, y_val)
+        except (TypeError, ValueError):
+            target_pair = None
+    if target_pair != pair:
+        return False
+    row_code = str(row.get("ma_lop") or "").strip().upper()
+    st_code = str(st.get("class_code") or "").strip().upper()
+    if not row_code:
+        return False
+    if st_code:
+        if st_code != row_code:
+            return False
+    elif not find_bcnb_match(str(result.get("group") or ""), [row]):
+        return False
+    row_lesson = str(row.get("buoi_so") or "").strip()
+    st_lesson = str(st.get("lesson") or "").strip()
+    if not row_lesson or not st_lesson or st_lesson != row_lesson:
+        return False
+    row_date_iso = str(row.get("ngay_hoc_iso") or "").strip()
+    st_date_raw = str(st.get("class_date_iso") or st.get("class_date") or "").strip()
+    dm_match = re.fullmatch(r"(\d{1,2})/(\d{1,2})/(\d{4})", st_date_raw)
+    st_date_iso = (
+        f"{int(dm_match.group(3)):04d}-{int(dm_match.group(2)):02d}-{int(dm_match.group(1)):02d}"
+        if dm_match
+        else st_date_raw
+    )
+    return bool(row_date_iso and st_date_iso and st_date_iso == row_date_iso)
 
 
 def _apply_lesson_14_result(
@@ -244,6 +336,7 @@ async def _read_bcnb_schedule_rows(
     await job_repo.ensure_not_cancelled(job_id)
     await select_week_checked(page, week, year)
     class_index, lesson_index, date_index, deadline_index = await resolve_schedule_columns(page)
+    ext_cols = await resolve_extended_bcnb_columns(page)
     rows = await page.locator("table tr").all()
     snapshot: list[dict[str, Any]] = []
     for row in rows:
@@ -258,8 +351,15 @@ async def _read_bcnb_schedule_rows(
             continue
         parsed_class_date = _parse_bcnb_date(class_date, today=today)
         iso_date = parsed_class_date.date().isoformat() if parsed_class_date else None
+        ext_fields = await extract_bcnb_extended_row_fields(
+            row, cells, ext_cols, include_empty=False
+        )
+        checker_note_unreadable = "qc_issue_note" not in ext_fields or not isinstance(
+            ext_fields.get("qc_issue_note"), str
+        )
         snapshot.append(
             {
+                "row": row,
                 "cells": cells,
                 "week": week,
                 "year": year,
@@ -268,9 +368,79 @@ async def _read_bcnb_schedule_rows(
                 "ngay_hoc": class_date,
                 "ngay_hoc_iso": iso_date,
                 "zalo_deadline": (await cells[deadline_index].inner_text()).strip(),
+                "checker_note_unreadable": checker_note_unreadable,
+                **ext_fields,
             }
         )
     return snapshot
+
+
+def _attach_bcnb_row_metadata(
+    result: dict[str, Any],
+    bcnb_row: dict[str, Any],
+) -> None:
+    """Attach observed BCNB row metadata (LMS status, notes, session_id) to a scan result."""
+    st = result.get("scan_target")
+    st_dict = st if isinstance(st, dict) else None
+    for str_key in (
+        "bcnb_session_id",
+        "khoi",
+        "lms_deadline",
+        "evaluation_status",
+    ):
+        val = str(bcnb_row.get(str_key) or "").strip()
+        if val:
+            result[str_key] = val
+            if st_dict is not None:
+                st_dict[str_key] = val
+    for note_key in ("qc_issue_note", "instructor_note"):
+        if note_key in bcnb_row and bcnb_row.get(note_key) is not None:
+            note_val = str(bcnb_row.get(note_key) or "").strip()
+            result[note_key] = note_val
+            if st_dict is not None:
+                st_dict[note_key] = note_val
+    for bool_key in ("nx_zalo_checked", "nx_lms_checked"):
+        bool_val = bcnb_row.get(bool_key)
+        if isinstance(bool_val, bool):
+            result[bool_key] = bool(bool_val)
+            if st_dict is not None:
+                st_dict[bool_key] = bool(bool_val)
+
+
+def _collect_row_verifiable_auto_issues(
+    result: dict[str, Any],
+    *,
+    existing_note: str | None,
+    lms_slots_by_class: dict[str, list[dict[str, Any]]] | None,
+) -> tuple[list[str], bool]:
+    """Return ``(effective_auto_issues, should_sync_note)`` for one BCNB row."""
+    _, existing_auto = split_checker_issue_note(existing_note)
+    raw_zalo = [
+        str(x).strip()
+        for x in (result.get("zalo_content_issues") or [])
+        if str(x).strip()
+    ]
+    zalo_auto = [x for x in raw_zalo if "cần kiểm tra thủ công" not in x]
+
+    raw_lms = [
+        str(x).strip()
+        for x in (result.get("lms_quality_issues") or [])
+        if str(x).strip()
+    ]
+    lms_indeterminate = (lms_slots_by_class is None) or any(
+        "cần kiểm tra thủ công" in x for x in raw_lms
+    )
+    if lms_indeterminate:
+        lms_auto = [x for x in existing_auto if x.upper().startswith("[LMS]")]
+    else:
+        lms_auto = [x for x in raw_lms if "cần kiểm tra thủ công" not in x]
+
+    combined = [*zalo_auto, *lms_auto]
+    before_clean = clean_bcnb_note_text(existing_note)
+    merged = merge_checker_issue_note(before_clean, combined)
+    should_sync = bool(combined) or (bool(existing_auto) and merged != before_clean)
+    return combined, should_sync
+
 
 
 async def update_bcnb_reports(
@@ -287,6 +457,8 @@ async def update_bcnb_reports(
     period_filter: set[tuple[int, int]] | None = None,
     should_halt: Callable[[], bool] | None = None,
     on_target_outcome: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+    lms_quality_gateway: Any = None,
+    lms_slots_by_class: dict[str, list[dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
     """Update both bounded weeks with exact-row matching and server read-back."""
     await job_repo.ensure_not_cancelled(job_id)
@@ -357,6 +529,7 @@ async def update_bcnb_reports(
                     target_pairs.add(pair)
     failures: list[dict[str, Any]] = []
     target_outcomes: list[dict[str, Any]] = []
+    checker_note_outcomes: list[dict[str, Any]] = []
 
     async def emit_outcome(item: dict[str, Any]) -> None:
         target_outcomes.append(item)
@@ -364,6 +537,250 @@ async def update_bcnb_reports(
             await on_target_outcome(item)
 
     updated_count = 0
+    checker_note_updated_count = 0
+
+    scoped_results = [
+        r
+        for r in scan_results
+        if isinstance(r, dict)
+        and (
+            period_filter is None
+            or _result_period_pair(r) in active_pairs
+        )
+    ]
+    resolved_lms_slots: dict[str, list[dict[str, Any]]] | None = (
+        dict(lms_slots_by_class) if isinstance(lms_slots_by_class, dict) else None
+    )
+    active_lms_gateway = lms_quality_gateway
+    if (
+        active_lms_gateway is None
+        and resolved_lms_slots is None
+        and os.getenv("ZALO_QUALITY_ISOLATED") != "1"
+        and page is not None
+        and hasattr(page, "evaluate")
+    ):
+        try:
+            active_lms_gateway = getattr(
+                ExternalGateways.production(), "lms_quality", None
+            )
+        except Exception:
+            active_lms_gateway = None
+    if resolved_lms_slots is None and active_lms_gateway is not None:
+        candidate_codes = sorted(
+            {
+                str(
+                    (r.get("scan_target") or {}).get("class_code")
+                    if isinstance(r.get("scan_target"), dict)
+                    else r.get("class_code") or ""
+                )
+                .strip()
+                .upper()
+                for r in scoped_results
+            }
+            - {""}
+        )
+        if candidate_codes and hasattr(active_lms_gateway, "fetch_class_slots"):
+            try:
+                fetched = await active_lms_gateway.fetch_class_slots(
+                    page, candidate_codes
+                )
+                if isinstance(fetched, dict):
+                    resolved_lms_slots = fetched
+                else:
+                    resolved_lms_slots = {
+                        code: [{"fetch_error": True}] for code in candidate_codes
+                    }
+            except Exception:
+                resolved_lms_slots = {
+                    code: [{"fetch_error": True}] for code in candidate_codes
+                }
+        else:
+            resolved_lms_slots = {}
+    inspect_and_attach_quality_issues(
+        scoped_results,
+        lms_slots_by_class=resolved_lms_slots,
+    )
+
+    async def _maybe_update_row_checker_note(
+        target_result: dict[str, Any] | None,
+        bcnb_row: dict[str, Any],
+        *,
+        selected_week: int,
+        selected_year: int,
+    ) -> None:
+        nonlocal checker_note_updated_count
+        if (
+            target_result is None
+            or audit_repo is None
+            or not hasattr(audit_repo, "record_intent")
+        ):
+            return
+        row_lesson = str(bcnb_row.get("buoi_so") or "").strip()
+        if row_lesson == "14":
+            return
+        inspect_and_attach_quality_issues(
+            [target_result],
+            lms_slots_by_class=resolved_lms_slots,
+        )
+        has_readable_note = (
+            isinstance(bcnb_row.get("qc_issue_note"), str)
+            and not bool(bcnb_row.get("checker_note_unreadable"))
+        )
+        existing_note = (
+            str(bcnb_row["qc_issue_note"])
+            if has_readable_note
+            else str(target_result.get("qc_issue_note") or "")
+        )
+        effective_auto, should_sync = _collect_row_verifiable_auto_issues(
+            target_result,
+            existing_note=existing_note,
+            lms_slots_by_class=resolved_lms_slots,
+        )
+        if not should_sync:
+            return
+        row_code = str(bcnb_row.get("ma_lop") or "").strip().upper()
+        row_date_iso = str(bcnb_row.get("ngay_hoc_iso") or "").strip()
+        row_sid = str(
+            bcnb_row.get("bcnb_session_id")
+            or _result_session_id(target_result)
+            or ""
+        ).strip()
+        if not has_readable_note:
+            err_msg = (
+                "Không đọc được ô Mô tả vấn đề hiện tại trên BCNB; "
+                "dừng để bảo toàn ghi chú tay của QC."
+            )
+            failure = {
+                "class_code": row_code,
+                "lesson": row_lesson,
+                "week": selected_week,
+                "year": selected_year,
+                "action_type": "BCNB_UPDATE_CHECKER_NOTE",
+                "error": err_msg,
+            }
+            failures.append(failure)
+            unreadable_outcome = {
+                **failure,
+                "class_date_iso": row_date_iso or None,
+                "status": "FAILED_BEFORE_WRITE",
+            }
+            checker_note_outcomes.append(unreadable_outcome)
+            target_result["checker_note_outcome"] = "FAILED"
+            if on_target_outcome is not None:
+                await on_target_outcome(unreadable_outcome)
+            return
+        if should_halt is not None and should_halt():
+            halt_outcome = {
+                "class_code": row_code,
+                "lesson": row_lesson,
+                "week": selected_week,
+                "year": selected_year,
+                "class_date_iso": row_date_iso or None,
+                "action_type": "BCNB_UPDATE_CHECKER_NOTE",
+                "status": "BLOCKED_BATCH_HALT",
+                "error": "Batch đã halt trước khi cập nhật Mô tả vấn đề.",
+            }
+            checker_note_outcomes.append(halt_outcome)
+            target_result["checker_note_outcome"] = "BLOCKED_BATCH_HALT"
+            return
+
+        merged_note = merge_checker_issue_note(existing_note, effective_auto)
+        note_action_key = (
+            f"bcnb-checker-note:{job_id}:{selected_year}:W{selected_week}:"
+            f"{row_code}:{row_lesson}:{row_sid or row_date_iso or 'na'}"
+        )
+        try:
+            note_outcome = await execute_verified_checker_note_action(
+                page=page,
+                audit_repo=audit_repo,
+                job_repo=job_repo,
+                job_id=job_id,
+                action_key=note_action_key,
+                class_code=row_code,
+                week=selected_week,
+                year=selected_year,
+                lesson=row_lesson,
+                execution_mode=execution_mode,
+                existing_note=existing_note,
+                auto_issues=effective_auto,
+                session_id=row_sid or None,
+                class_date_iso=row_date_iso or None,
+                should_halt=should_halt,
+                reason={
+                    "week": selected_week,
+                    "year": selected_year,
+                    "lesson": row_lesson,
+                    "class_date": row_date_iso or None,
+                    "bcnb_session_id": row_sid or None,
+                    "auto_issues": effective_auto,
+                    "existing_note": clean_bcnb_note_text(existing_note),
+                    "merged_note": merged_note,
+                },
+            )
+        except JobCancelledError:
+            raise
+        except Exception as note_error:
+            unknown = isinstance(note_error, BcnbOutcomeUnknownError)
+            failure = {
+                "class_code": row_code,
+                "lesson": row_lesson,
+                "week": selected_week,
+                "year": selected_year,
+                "action_type": "BCNB_UPDATE_CHECKER_NOTE",
+                "error": str(note_error)[:500],
+            }
+            failures.append(failure)
+            err_outcome = {
+                **failure,
+                "class_date_iso": row_date_iso or None,
+                "status": (
+                    "OUTCOME_UNKNOWN"
+                    if execution_mode == "production" and unknown
+                    else "FAILED_BEFORE_WRITE"
+                ),
+            }
+            checker_note_outcomes.append(err_outcome)
+            target_result["checker_note_outcome"] = (
+                "OUTCOME_UNKNOWN"
+                if execution_mode == "production" and unknown
+                else "FAILED"
+            )
+            if on_target_outcome is not None:
+                await on_target_outcome(err_outcome)
+            log_message(
+                f"Bỏ qua lỗi cập nhật Mô tả vấn đề BCNB {row_code}/{row_lesson} "
+                f"W{selected_week}/{selected_year}: {note_error}",
+                level="ERROR",
+                event="bcnb.checker_note_failed",
+                class_code=row_code,
+                lesson=row_lesson,
+                week=selected_week,
+                year=selected_year,
+            )
+            return
+
+        if note_outcome == "NO_CHANGE":
+            return
+        checker_note_updated_count += 1
+        target_result["checker_note_outcome"] = note_outcome
+        if note_outcome == "VERIFIED":
+            target_result["qc_issue_note"] = merged_note
+            if isinstance(target_result.get("scan_target"), dict):
+                target_result["scan_target"]["qc_issue_note"] = merged_note
+        else:
+            target_result["planned_qc_issue_note"] = merged_note
+        checker_note_outcomes.append(
+            {
+                "class_code": row_code,
+                "lesson": row_lesson,
+                "week": selected_week,
+                "year": selected_year,
+                "class_date_iso": row_date_iso or None,
+                "action_type": "BCNB_UPDATE_CHECKER_NOTE",
+                "status": note_outcome,
+            }
+        )
+
     log_message(
         "Đối chiếu BCNB theo các tuần: "
         + ", ".join(f"W{week}/{year}" for week, year in active_pairs)
@@ -454,16 +871,24 @@ async def update_bcnb_reports(
                     job_repo=job_repo,
                 )
                 _, _, report_index = await resolve_report_columns(page)
-                refreshed = next(
-                    (
-                        item
-                        for item in refreshed_rows
-                        if item["ma_lop"].strip().upper()
-                        == bcnb_row["ma_lop"].strip().upper()
-                        and item["buoi_so"].strip() == bcnb_row["buoi_so"].strip()
-                        and item.get("ngay_hoc_iso") == bcnb_row.get("ngay_hoc_iso")
-                    ),
-                    None,
+                row_sid = str(bcnb_row.get("bcnb_session_id") or "").strip()
+                refreshed_candidates = [
+                    item
+                    for item in refreshed_rows
+                    if item["ma_lop"].strip().upper()
+                    == bcnb_row["ma_lop"].strip().upper()
+                    and item["buoi_so"].strip() == bcnb_row["buoi_so"].strip()
+                    and item.get("ngay_hoc_iso") == bcnb_row.get("ngay_hoc_iso")
+                    and (
+                        not row_sid
+                        or not str(item.get("bcnb_session_id") or "").strip()
+                        or str(item.get("bcnb_session_id") or "").strip() == row_sid
+                    )
+                ]
+                refreshed = (
+                    refreshed_candidates[0]
+                    if len(refreshed_candidates) == 1
+                    else None
                 )
                 if refreshed is None:
                     log_message(
@@ -478,7 +903,30 @@ async def update_bcnb_reports(
             class_code = bcnb_row["ma_lop"].strip().upper()
             lesson = bcnb_row["buoi_so"].strip()
             is_lesson_14 = lesson == "14"
-            result_matches = [
+            unique_meta_result: dict[str, Any] | None = None
+            meta_row_matches = [
+                result
+                for result in scan_results
+                if _result_matches_bcnb_row_for_metadata(
+                    result,
+                    bcnb_row,
+                    (selected_week, selected_year),
+                )
+            ]
+            if len(meta_row_matches) == 1:
+                matching_bcnb_rows = [
+                    candidate_row
+                    for candidate_row in bcnb_rows
+                    if _result_matches_bcnb_row_for_metadata(
+                        meta_row_matches[0],
+                        candidate_row,
+                        (selected_week, selected_year),
+                    )
+                ]
+                if len(matching_bcnb_rows) == 1:
+                    unique_meta_result = meta_row_matches[0]
+                    _attach_bcnb_row_metadata(unique_meta_result, bcnb_row)
+            all_row_matches = [
                 result
                 for result in scan_results
                 if _result_matches_schedule_row(
@@ -486,7 +934,11 @@ async def update_bcnb_reports(
                     bcnb_row,
                     (selected_week, selected_year),
                 )
-                and result.get("evidence_state")
+            ]
+            result_matches = [
+                result
+                for result in all_row_matches
+                if result.get("evidence_state")
                 in {"SUBMITTED_VERIFIED", "SUBMITTED_LATE_VERIFIED"}
             ]
             if len(result_matches) > 1:
@@ -500,6 +952,7 @@ async def update_bcnb_reports(
             if is_lesson_14:
                 is_submitted = True
                 matched_result = _apply_lesson_14_result(scan_results, bcnb_row)
+                _attach_bcnb_row_metadata(matched_result, bcnb_row)
                 log_message(
                     f"Lớp {class_code}: Buổi 14 được MIỄN BÁO CÁO. "
                     "Đã ghi LESSON_14_EXEMPTION."
@@ -518,12 +971,22 @@ async def update_bcnb_reports(
                     )
 
             if not is_submitted:
+                await _maybe_update_row_checker_note(
+                    matched_result or unique_meta_result,
+                    bcnb_row,
+                    selected_week=selected_week,
+                    selected_year=selected_year,
+                )
                 continue
             checkbox = cells[report_index].locator('input[type="checkbox"]').first
             if await checkbox.count() == 0:
                 raise RuntimeError(f"BCNB không có checkbox báo cáo cho {class_code}/{lesson}.")
             is_checked = await checkbox.is_checked()
             if is_checked and not is_lesson_14:
+                if matched_result is not None:
+                    matched_result["nx_zalo_checked"] = True
+                    if isinstance(matched_result.get("scan_target"), dict):
+                        matched_result["scan_target"]["nx_zalo_checked"] = True
                 await emit_outcome(
                     {
                         "class_code": class_code,
@@ -533,6 +996,12 @@ async def update_bcnb_reports(
                         "class_date_iso": bcnb_row.get("ngay_hoc_iso"),
                         "status": "ALREADY_DONE",
                     }
+                )
+                await _maybe_update_row_checker_note(
+                    matched_result or unique_meta_result,
+                    bcnb_row,
+                    selected_week=selected_week,
+                    selected_year=selected_year,
                 )
                 continue
 
@@ -650,6 +1119,10 @@ async def update_bcnb_reports(
                 )
                 continue
             updated_count += 1
+            if outcome == "VERIFIED" and matched_result is not None:
+                matched_result["nx_zalo_checked"] = True
+                if isinstance(matched_result.get("scan_target"), dict):
+                    matched_result["scan_target"]["nx_zalo_checked"] = True
             await emit_outcome(
                 {
                     "class_code": class_code,
@@ -671,6 +1144,18 @@ async def update_bcnb_reports(
                     f"Đã tick và kiểm chứng BCNB cho lớp: {class_code} "
                     f"W{selected_week}/{selected_year}"
                 )
+            if not is_lesson_14:
+                await _maybe_update_row_checker_note(
+                    matched_result or unique_meta_result,
+                    bcnb_row,
+                    selected_week=selected_week,
+                    selected_year=selected_year,
+                )
+
+    inspect_and_attach_quality_issues(
+        scoped_results,
+        lms_slots_by_class=resolved_lms_slots,
+    )
 
     if failures:
         log_message(
@@ -687,8 +1172,10 @@ async def update_bcnb_reports(
             {"week": week, "year": year} for week, year in active_pairs
         ],
         "updated_count": updated_count,
+        "checker_note_updated_count": checker_note_updated_count,
         "failed_targets": failures,
         "target_outcomes": target_outcomes,
+        "checker_note_outcomes": checker_note_outcomes,
     }
 
 

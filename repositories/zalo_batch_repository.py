@@ -286,6 +286,7 @@ class ZaloBatchRepository:
         target_id: int,
         *,
         status: str,
+        result: dict[str, Any] | None = None,
         error_code: str | None = None,
         error_message: str | None = None,
     ) -> None:
@@ -296,19 +297,44 @@ class ZaloBatchRepository:
             cursor = await db.execute(
                 """
                 UPDATE zalo_batch_targets
-                SET write_status = ?, error_code = ?, error_message = ?,
+                SET write_status = ?, result_json = COALESCE(?, result_json),
+                    error_code = ?, error_message = ?,
                     claim_phase = NULL, claim_owner = NULL,
                     claim_expires_at = NULL, updated_at = ?, finished_at = ?
                 WHERE id = ? AND write_status = 'RUNNING'
                 """,
                 (
-                    status, error_code, (error_message or "")[:500] or None,
-                    stamp, stamp, target_id,
+                    status,
+                    _json(result) if result is not None else None,
+                    error_code,
+                    (error_message or "")[:500] or None,
+                    stamp,
+                    stamp,
+                    target_id,
                 ),
             )
             await db.commit()
             if cursor.rowcount != 1:
                 raise RuntimeError("Target write không còn ở trạng thái RUNNING.")
+
+    async def update_target_result(
+        self,
+        target_id: int,
+        *,
+        result: dict[str, Any],
+    ) -> None:
+        """Persist enriched scan/quality metadata back to zalo_batch_targets.result_json."""
+        stamp = utc_iso()
+        async with get_db_connection() as db:
+            await db.execute(
+                """
+                UPDATE zalo_batch_targets
+                SET result_json = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (_json(result), stamp, target_id),
+            )
+            await db.commit()
 
     async def resolve_unknown(self, target_id: int, *, status: str) -> None:
         """Resolve an interrupted production write using fresh BCNB readback."""

@@ -1,109 +1,137 @@
             <!-- TAB 3: GROUPS CONFIG -->
-            <div id="tab-groups" class="tab-content flex-1 flex-col space-y-6">
-                <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 flex-1">
+            <div id="tab-groups" class="tab-content flex-1 flex-col space-y-5">
+                <div class="grid grid-cols-1 lg:grid-cols-2 gap-5 flex-1">
                     
                     <!-- LEFT COLUMN: ACTIVE GROUPS -->
-                    <div class="glass-panel p-6 flex flex-col">
-                        <div class="flex items-center justify-between mb-6 shrink-0">
-                            <div>
-                                <h2 class="text-lg font-bold text-white tracking-wide text-balance">Danh sách Lớp Đang hoạt động</h2>
+                    <div class="glass-panel flex flex-col overflow-hidden">
+                        <div class="bg-slate-900 text-white px-5 py-3 border-b-2 border-slate-950 flex flex-wrap items-center justify-between gap-3 shrink-0">
+                            <div class="flex items-center gap-2.5">
+                                <span class="w-7 h-7 rounded-lg bg-emerald-600 text-white border border-emerald-400 flex items-center justify-center text-xs shadow-sm">
+                                    <i class="fa-solid fa-users-viewfinder" aria-hidden="true"></i>
+                                </span>
+                                <div>
+                                    <h2 class="text-sm font-extrabold text-white uppercase tracking-wide text-balance">Danh sách Lớp Đang hoạt động</h2>
+                                    <p class="text-[11px] font-medium text-slate-300">Các nhóm Zalo đang được hệ thống theo dõi báo cáo.</p>
+                                </div>
                             </div>
-                            <div class="relative w-64 glass-panel rounded-lg overflow-hidden flex items-center">
-                                <i class="fa-solid fa-search text-gray-400 pl-3"></i>
+                            <div class="relative w-56 input-3d rounded-lg overflow-hidden flex items-center">
+                                <i class="fa-solid fa-magnifying-glass text-slate-500 pl-3 text-xs"></i>
                                 <input type="text" id="groupSearchInput" onkeyup="filterGroups()"
-                                    class="bg-transparent border-none text-gray-200 text-sm focus:ring-0 block w-full p-2 outline-none"
-                                    placeholder="Tìm kiếm...">
+                                    class="bg-transparent border-none text-slate-900 font-semibold text-xs focus:ring-0 block w-full py-1.5 px-2.5 outline-none"
+                                    placeholder="Tìm kiếm nhóm, GV...">
                             </div>
                         </div>
 
-                        <div class="overflow-y-auto flex-1 border border-glassborder rounded-xl bg-black/20 shadow-inner">
-                            <table class="w-full text-sm text-left text-gray-300 tabular-nums">
-                                <thead class="text-[10px] text-gray-400 uppercase bg-black/40 sticky top-0 z-10 border-b border-glassborder">
-                                    <tr>
-                                        <th class="px-4 py-3 w-10">#</th>
-                                        <th class="px-4 py-3">Tên Nhóm</th>
-                                        <th class="px-4 py-3">Người Phụ Trách</th>
-                                    </tr>
-                                </thead>
-                                <tbody id="groups-table-body" class="divide-y divide-glassborder">
-                                    <tr><td colspan="3" class="px-6 py-10 text-center text-gray-500 border-none">Đang tải dữ liệu...</td></tr>
-                                </tbody>
-                            </table>
+                        <div class="p-4 flex-1 flex flex-col">
+                            <div class="overflow-y-auto flex-1 border-2 border-slate-400 rounded-xl bg-white shadow-sm">
+                                <table class="w-full text-xs text-left text-slate-800 tabular-nums">
+                                    <thead class="text-[11px] font-extrabold text-slate-800 uppercase bg-slate-200/90 sticky top-0 z-10 border-b-2 border-slate-400">
+                                        <tr>
+                                            <th class="px-4 py-3 w-12">#</th>
+                                            <th class="px-4 py-3">Tên Nhóm</th>
+                                            <th class="px-4 py-3">Người Phụ Trách</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="groups-table-body" class="divide-y divide-slate-300">
+                                        <tr><td colspan="3" class="px-6 py-10 text-center text-slate-500 font-semibold border-none">Đang tải dữ liệu...</td></tr>
+                                    </tbody>
+                                </table>
+                            </div>
                         </div>
                     </div>
 
                     <!-- RIGHT COLUMN: INACTIVE CLASS LIFECYCLE -->
-                    <div class="glass-panel p-6 flex flex-col">
-                        <div class="flex items-center justify-between mb-6 shrink-0">
-                            <div>
-                                <h2 class="text-lg font-bold text-rose-300 tracking-wide flex items-center text-balance">
-                                    <i class="fa-solid fa-clock-rotate-left mr-2"></i> Lớp tạm nghỉ / đã kết thúc
-                                </h2>
-                                <p class="mt-1 text-xs text-gray-500">Vắng trên BCNB không tự động được xem là kết thúc.</p>
+                    <div class="glass-panel flex flex-col overflow-hidden">
+                        <div class="bg-slate-900 text-white px-5 py-3 border-b-2 border-slate-950 flex items-center justify-between gap-3 shrink-0">
+                            <div class="flex items-center gap-2.5">
+                                <span class="w-7 h-7 rounded-lg bg-rose-600 text-white border border-rose-400 flex items-center justify-center text-xs shadow-sm">
+                                    <i class="fa-solid fa-clock-rotate-left" aria-hidden="true"></i>
+                                </span>
+                                <div>
+                                    <h2 class="text-sm font-extrabold text-white uppercase tracking-wide flex items-center text-balance">
+                                        Lớp tạm nghỉ / đã kết thúc
+                                    </h2>
+                                    <p class="text-[11px] font-medium text-slate-300">Vắng trên BCNB không tự động được xem là kết thúc.</p>
+                                </div>
                             </div>
-                            <button type="button" aria-label="Làm mới danh sách lớp tạm ẩn" onclick="fetchIgnoredGroups()" class="text-gray-400 hover:text-white px-3 py-1 rounded-md glass-panel"><i class="fa-solid fa-rotate-right"></i></button>
+                            <button type="button" aria-label="Làm mới danh sách lớp tạm ẩn" onclick="fetchIgnoredGroups()" class="preflight-refresh px-2.5 py-1">
+                                <i class="fa-solid fa-rotate-right text-blue-600"></i>
+                            </button>
                         </div>
 
-                        <div class="overflow-y-auto flex-1 border border-rose-500/20 rounded-xl bg-black/20 shadow-inner">
-                            <table class="w-full text-sm text-left text-gray-300 tabular-nums">
-                                <thead class="text-[10px] text-rose-400/70 uppercase bg-black/40 sticky top-0 z-10 border-b border-rose-500/20">
-                                    <tr>
-                                        <th class="px-4 py-3 w-10">#</th>
-                                        <th class="px-4 py-3">Tên Nhóm</th>
-                                        <th class="px-4 py-3 w-36">Trạng thái</th>
-                                        <th class="px-4 py-3 text-center w-40">Thao tác</th>
-                                    </tr>
-                                </thead>
-                                <tbody id="ignored-groups-table-body" class="divide-y divide-glassborder">
-                                    <tr><td colspan="4" class="px-6 py-10 text-center text-gray-500 border-none">Chưa có lớp tạm nghỉ hoặc kết thúc.</td></tr>
-                                </tbody>
-                            </table>
+                        <div class="p-4 flex-1 flex flex-col">
+                            <div class="overflow-y-auto flex-1 border-2 border-rose-400 rounded-xl bg-white shadow-sm">
+                                <table class="w-full text-xs text-left text-slate-800 tabular-nums">
+                                    <thead class="text-[11px] font-extrabold text-rose-950 uppercase bg-rose-100/90 sticky top-0 z-10 border-b-2 border-rose-400">
+                                        <tr>
+                                            <th class="px-4 py-3 w-12">#</th>
+                                            <th class="px-4 py-3">Tên Nhóm</th>
+                                            <th class="px-4 py-3 w-36">Trạng thái</th>
+                                            <th class="px-4 py-3 text-center w-40">Thao tác</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="ignored-groups-table-body" class="divide-y divide-slate-300">
+                                        <tr><td colspan="4" class="px-6 py-10 text-center text-slate-500 font-semibold border-none">Chưa có lớp tạm nghỉ hoặc kết thúc.</td></tr>
+                                    </tbody>
+                                </table>
+                            </div>
                         </div>
                     </div>
                 </div>
 
-                <section class="glass-panel p-6 flex flex-col" aria-labelledby="bcnb-zalo-gaps-title">
-                    <div class="flex flex-wrap items-start justify-between gap-4 mb-5">
-                        <div>
-                            <h2 id="bcnb-zalo-gaps-title" class="text-lg font-bold text-amber-200 tracking-wide">
-                                Lớp có trên BCNB nhưng chưa xác định được nhóm Zalo
-                            </h2>
-                            <p class="mt-1 text-xs text-gray-400">
-                                Tự cập nhật sau mỗi lần Dò tìm. Lớp mơ hồ hoặc đang chuyển cấp chỉ được cảnh báo, không tự ghép nhóm.
-                            </p>
-                            <p id="bcnb-zalo-gaps-summary" class="mt-2 text-sm text-gray-300" aria-live="polite">
-                                Chưa có dữ liệu đối chiếu.
-                            </p>
+                <section class="glass-panel flex flex-col overflow-hidden" aria-labelledby="bcnb-zalo-gaps-title">
+                    <div class="bg-slate-900 text-white px-5 py-3 border-b-2 border-slate-950 flex flex-wrap items-center justify-between gap-4">
+                        <div class="flex items-center gap-2.5">
+                            <span class="w-7 h-7 rounded-lg bg-amber-500 text-white border border-amber-300 flex items-center justify-center text-xs shadow-sm shrink-0">
+                                <i class="fa-solid fa-link-slash" aria-hidden="true"></i>
+                            </span>
+                            <div>
+                                <h2 id="bcnb-zalo-gaps-title" class="text-sm font-extrabold text-white uppercase tracking-wide">
+                                    Lớp có trên BCNB nhưng chưa xác định được nhóm Zalo
+                                </h2>
+                                <p class="text-[11px] font-medium text-slate-300">
+                                    Tự cập nhật sau mỗi lần Dò kế hoạch. Lớp mơ hồ hoặc đang chuyển cấp chỉ được cảnh báo, không tự ghép nhóm.
+                                </p>
+                            </div>
                         </div>
                         <div class="flex items-center gap-2">
-                            <div class="relative w-60 glass-panel rounded-lg overflow-hidden flex items-center">
-                                <i class="fa-solid fa-search text-gray-400 pl-3"></i>
+                            <div class="relative w-56 input-3d rounded-lg overflow-hidden flex items-center">
+                                <i class="fa-solid fa-magnifying-glass text-slate-500 pl-3 text-xs"></i>
                                 <input type="text" id="bcnbZaloGapSearchInput" onkeyup="filterBcnbZaloGaps()"
-                                    class="bg-transparent border-none text-gray-200 text-sm focus:ring-0 block w-full p-2 outline-none"
+                                    class="bg-transparent border-none text-slate-900 font-semibold text-xs focus:ring-0 block w-full py-1.5 px-2.5 outline-none"
                                     placeholder="Tìm mã lớp, giáo viên...">
                             </div>
-                            <button type="button" aria-label="Làm mới đối chiếu BCNB và Zalo" onclick="fetchBcnbZaloGaps()" class="text-gray-400 hover:text-white px-3 py-2 rounded-md glass-panel">
-                                <i class="fa-solid fa-rotate-right"></i>
+                            <button type="button" aria-label="Làm mới đối chiếu BCNB và Zalo" onclick="fetchBcnbZaloGaps()" class="preflight-refresh px-2.5 py-1.5">
+                                <i class="fa-solid fa-rotate-right text-blue-600"></i>
                             </button>
                         </div>
                     </div>
-                    <p id="bcnb-zalo-gaps-stale" class="hidden mb-3 text-xs text-amber-300"></p>
-                    <div class="overflow-x-auto border border-amber-500/20 rounded-xl bg-black/20 shadow-inner">
-                        <table class="w-full text-sm text-left text-gray-300 tabular-nums">
-                            <thead class="text-[10px] text-amber-300/80 uppercase bg-black/40 border-b border-amber-500/20">
-                                <tr>
-                                    <th class="px-4 py-3 w-10">#</th>
-                                    <th class="px-4 py-3">Mã lớp</th>
-                                    <th class="px-4 py-3">Giáo viên</th>
-                                    <th class="px-4 py-3">Tuần / buổi</th>
-                                    <th class="px-4 py-3">Ngày học</th>
-                                    <th class="px-4 py-3">Trạng thái</th>
-                                </tr>
-                            </thead>
-                            <tbody id="bcnb-zalo-gaps-table-body" class="divide-y divide-glassborder">
-                                <tr><td colspan="6" class="px-6 py-8 text-center text-gray-500">Hãy bấm Dò tìm để tạo dữ liệu đối chiếu.</td></tr>
-                            </tbody>
-                        </table>
+
+                    <div class="p-4 space-y-3">
+                        <div class="well-inset px-3.5 py-2 flex flex-wrap items-center justify-between gap-2">
+                            <p id="bcnb-zalo-gaps-summary" class="text-xs font-extrabold text-slate-800" aria-live="polite">
+                                Chưa có dữ liệu đối chiếu.
+                            </p>
+                            <span class="rounded bg-amber-100 border border-amber-400 px-2 py-0.5 text-[10px] font-extrabold text-amber-900 uppercase">Chế độ Fail-Closed</span>
+                        </div>
+                        <p id="bcnb-zalo-gaps-stale" class="hidden text-xs font-bold text-amber-950 bg-amber-100 border-2 border-amber-400 border-l-8 border-l-amber-600 rounded-xl px-3.5 py-2"></p>
+                        <div class="overflow-x-auto border-2 border-amber-400 rounded-xl bg-white shadow-sm">
+                            <table class="w-full text-xs text-left text-slate-800 tabular-nums">
+                                <thead class="text-[11px] font-extrabold text-amber-950 uppercase bg-amber-100/90 border-b-2 border-amber-400">
+                                    <tr>
+                                        <th class="px-4 py-3 w-12">#</th>
+                                        <th class="px-4 py-3">Mã lớp</th>
+                                        <th class="px-4 py-3">Giáo viên</th>
+                                        <th class="px-4 py-3">Tuần / buổi</th>
+                                        <th class="px-4 py-3">Ngày học</th>
+                                        <th class="px-4 py-3">Trạng thái</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="bcnb-zalo-gaps-table-body" class="divide-y divide-slate-300">
+                                    <tr><td colspan="6" class="px-6 py-8 text-center text-slate-500 font-semibold">Hãy bấm Dò kế hoạch để tạo dữ liệu đối chiếu.</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
                     </div>
                 </section>
             </div>

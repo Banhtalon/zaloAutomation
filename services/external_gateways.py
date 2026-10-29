@@ -70,6 +70,14 @@ class ZaloAiReportClassifierGateway(Protocol):
     ) -> dict[str, Any]: ...
 
 
+class LmsQualityGateway(Protocol):
+    async def fetch_class_slots(
+        self,
+        page: Any,
+        class_codes: list[str],
+    ) -> dict[str, list[dict[str, Any]]]: ...
+
+
 class QualityIsolationViolation(RuntimeError):
     """Raised before a real production browser entry in isolated quality mode."""
 
@@ -3610,12 +3618,33 @@ class GeminiZaloReportClassifierGateway:
             }
 
 
+class PlaywrightLmsQualityGateway:
+    """Bounded GraphQL adapter for reading LMS lesson summaries and student comment slots."""
+
+    def __init__(self, *, timeout_ms: int = 12000) -> None:
+        self._timeout_ms = max(1000, int(timeout_ms))
+
+    async def fetch_class_slots(
+        self,
+        page: Any,
+        class_codes: list[str],
+    ) -> dict[str, list[dict[str, Any]]]:
+        from services.lms_quality_service import fetch_lms_class_slots_via_page
+
+        return await fetch_lms_class_slots_via_page(
+            page,
+            class_names=class_codes,
+            timeout_ms=self._timeout_ms,
+        )
+
+
 @dataclass(slots=True)
 class ExternalGateways:
     browser: BrowserGateway
     lms_ocr: LmsOcrGateway
     student_ocr_factory: Callable[[], StudentOcrGateway]
     zalo_ai_classifier: ZaloAiReportClassifierGateway | None = None
+    lms_quality: LmsQualityGateway | None = None
 
     @classmethod
     def production(cls, *, profile_path: str | None = None) -> ExternalGateways:
@@ -3632,4 +3661,5 @@ class ExternalGateways:
             lms_ocr=GeminiLmsOcrGateway(),
             student_ocr_factory=_default_student_ocr_factory,
             zalo_ai_classifier=GeminiZaloReportClassifierGateway(),
+            lms_quality=PlaywrightLmsQualityGateway(),
         )

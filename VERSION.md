@@ -32,6 +32,8 @@
 | Security + readiness | Phân quyền web, CSRF, backup, staging contract và production preflight |
 | Local parallel scan | Hai worker Zalo, BCNB write giới hạn, target repository và batch policy |
 | September 2026 fixes | Zalo sync gap, login/lock, Form dropdown và ảnh bằng chứng |
+| October 2026 Wave 1–3 | Quét trực tiếp Web LMS, Quét chọn lọc, Duyệt tay BCNB 1-Click, AI gợi ý ca mơ hồ, Tra cứu Lịch sử Tuần & Giao diện Tactile 3D |
+| October 2026 Wave 4 (`DEC-038`) | Đọc mở rộng bảng Teaching (`check_nhanxet.php`), Kiểm định chất lượng nội dung bài học & nhận xét học viên LMS (Buổi thường 3 ý vs Checkpoint Coding B5/B9, Robotics B4/B8), Tự động ghi `Mô tả vấn đề (TE/TF/QC)` có kiểm chứng đọc ngược, và Bảng Email Quản lý 9 cột (`HTML Table` + `Clipboard Rich Table` + `Unicode Table`) |
 
 ## Cách tạo phiên bản tiếp theo
 

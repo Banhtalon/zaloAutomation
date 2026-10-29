@@ -7,6 +7,8 @@ from typing import Any
 from db.database import get_db_connection
 from core.time_utils import utc_iso
 from repositories.zalo_batch_repository import canonical_target_key
+from services.bcnb_safety import split_checker_issue_note
+from services.lms_quality_service import evaluate_zalo_content_issues
 
 
 CSV_HEADERS: tuple[str, ...] = (
@@ -16,6 +18,8 @@ CSV_HEADERS: tuple[str, ...] = (
     "Ngày học",
     "Trạng thái Zalo",
     "Trạng thái LMS",
+    "Tình trạng đánh giá",
+    "Mô tả vấn đề (TE/TF/QC)",
     "Thời gian kiểm chứng",
 )
 
@@ -49,18 +53,62 @@ def build_weekly_summary_csv(rows: list[dict[str, Any]]) -> str:
     for row in rows:
         if not isinstance(row, dict):
             continue
+        raw_st = row.get("scan_target")
+        st: dict[str, Any] = raw_st if isinstance(raw_st, dict) else {}
+        zalo_status = str(row.get("zalo_status") or "").strip()
+        lms_status = str(row.get("lms_status") or "").strip()
+        eval_status = str(row.get("evaluation_status") or "").strip()
+        if not eval_status and (zalo_status or lms_status):
+            eval_status = _resolve_row_evaluation_status(
+                zalo_status=zalo_status,
+                lms_status=lms_status,
+                nx_zalo_checked=row.get("nx_zalo_checked"),
+                nx_lms_checked=row.get("nx_lms_checked"),
+            )
+        issue_desc = str(row.get("issue_description") or "").strip()
+        if not issue_desc:
+            issue_desc = _resolve_row_issue_description(row, st=st)
         writer.writerow(
             [
                 sanitize_csv_cell(row.get("class_code")),
                 sanitize_csv_cell(row.get("teacher")),
                 sanitize_csv_cell(row.get("lesson")),
                 sanitize_csv_cell(row.get("class_date")),
-                sanitize_csv_cell(row.get("zalo_status")),
-                sanitize_csv_cell(row.get("lms_status")),
+                sanitize_csv_cell(zalo_status),
+                sanitize_csv_cell(lms_status),
+                sanitize_csv_cell(eval_status),
+                sanitize_csv_cell(issue_desc),
                 sanitize_csv_cell(row.get("verified_at")),
             ]
         )
     return "\ufeff" + buffer.getvalue()
+
+
+def is_failed_weekly_summary_row(row: Any) -> bool:
+    """Return True when a weekly summary row has an unresolved Zalo, LMS, or quality issue."""
+    if not isinstance(row, dict):
+        return False
+    zalo_status = str(row.get("zalo_status") or "").strip()
+    lms_status = str(row.get("lms_status") or "").strip()
+    eval_status = str(row.get("evaluation_status") or "").strip()
+    raw_st = row.get("scan_target")
+    st: dict[str, Any] = raw_st if isinstance(raw_st, dict) else {}
+    issue_desc = str(
+        row.get("issue_description")
+        or _resolve_row_issue_description(row, st=st)
+        or ""
+    ).strip()
+    zalo_ok_or_exempt = ("✅" in zalo_status) or ("Miễn" in zalo_status)
+    lms_failed = lms_status.startswith(("❌", "⚠️"))
+    eval_failed = eval_status.startswith(("❌", "⚠️"))
+    return (not zalo_ok_or_exempt) or lms_failed or eval_failed or bool(issue_desc)
+
+
+def filter_failed_weekly_summary_rows(
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Filter weekly summary rows to only classes with Zalo or LMS errors."""
+    return [row for row in (rows or []) if is_failed_weekly_summary_row(row)]
 
 
 def _parse_json(raw: Any, fallback: Any = None) -> Any:
@@ -230,6 +278,20 @@ def _apply_verified_manual_approval(
     )
     st_raw = merged.get("scan_target")
     st_dict = dict(st_raw) if isinstance(st_raw, dict) else {}
+    approval_sid = str(approval_info.get("bcnb_session_id") or "").strip()
+    if not approval_sid and isinstance(approved_item, dict):
+        app_st = approved_item.get("scan_target")
+        app_ma = approved_item.get("manual_approval")
+        approval_sid = str(
+            approved_item.get("bcnb_session_id")
+            or (app_st.get("bcnb_session_id") if isinstance(app_st, dict) else "")
+            or (app_ma.get("bcnb_session_id") if isinstance(app_ma, dict) else "")
+            or ""
+        ).strip()
+    if approval_sid:
+        merged["bcnb_session_id"] = approval_sid
+        st_dict["bcnb_session_id"] = approval_sid
+        merged["scan_target"] = st_dict
     lesson = str(
         approval_info.get("lesson") or st_dict.get("lesson") or "?"
     ).strip()
@@ -275,6 +337,11 @@ def _apply_verified_manual_approval(
             "outcome": "VERIFIED",
             "dry_run": False,
             "target_key": approval_info.get("target_key"),
+            **(
+                {"bcnb_session_id": approval_sid}
+                if approval_sid
+                else {}
+            ),
         }
     )
     merged["manual_approval"] = ma_dict
@@ -291,6 +358,141 @@ def _is_halted_unscanned_item(item: dict[str, Any]) -> bool:
     return "BLOCKED_BATCH_HALT" in status
 
 
+def _first_defined_str(*sources: dict[str, Any], key: str) -> str:
+    """Return the first defined (non-None) string value for key, preserving explicit empty strings."""
+    for src in sources:
+        if isinstance(src, dict) and key in src and src.get(key) is not None:
+            return str(src.get(key) or "").strip()
+    return ""
+
+
+def _resolve_row_evaluation_status(
+    *,
+    zalo_status: str,
+    lms_status: str,
+    nx_zalo_checked: bool | None = None,
+    nx_lms_checked: bool | None = None,
+    raw_evaluation_status: str = "",
+) -> str:
+    """Resolve the unified Teaching evaluation status for a weekly summary row."""
+    clean_raw = str(raw_evaluation_status or "").strip()
+    zalo_failed_or_warn = zalo_status.startswith(("❌", "⚠️"))
+    lms_failed_or_warn = lms_status.startswith(("❌", "⚠️"))
+    zalo_done = not zalo_failed_or_warn and (
+        ("✅" in zalo_status)
+        or ("Miễn" in zalo_status)
+        or ("🟡" in zalo_status)
+        or (zalo_status in {"", "Chưa xác định", "Chưa quét Zalo"} and bool(nx_zalo_checked))
+    )
+    lms_done = not lms_failed_or_warn and (
+        lms_status.startswith("✅")
+        or ("Dry-run LMS" in lms_status)
+        or ("Chờ tích BCNB" in lms_status)
+        or (lms_status in {"", "Chưa quét LMS"} and bool(nx_lms_checked))
+    )
+    if lms_status.startswith("⚠️") or zalo_status.startswith("⚠️"):
+        if zalo_done and lms_status.startswith("⚠️"):
+            return "⚠️ Đã nhận xét Zalo, LMS cần kiểm tra"
+        if lms_done and zalo_status.startswith("⚠️"):
+            return "⚠️ Đã hoàn tất nhận xét LMS, Zalo cần kiểm tra"
+        return "⚠️ Cần kiểm tra nhận xét"
+    if clean_raw.startswith(("⚠️", "❌")) or "cần kiểm tra" in clean_raw.lower():
+        if zalo_done and lms_done:
+            return clean_raw
+    if zalo_done and lms_done:
+        return "✅ Đã hoàn thành nhận xét"
+    if lms_done and not zalo_done:
+        if clean_raw.startswith("⚠️") or (
+            clean_raw and "chưa nhận xét zalo" in clean_raw.lower()
+        ):
+            return clean_raw
+        return "⏳ Đã hoàn tất nhận xét LMS, chưa nhận xét Zalo"
+    if zalo_done and not lms_done:
+        if clean_raw.startswith("⚠️") or (
+            clean_raw and "chưa nhận xét lms" in clean_raw.lower()
+        ):
+            return clean_raw
+        return "⏳ Đã hoàn tất nhận xét Zalo, chưa nhận xét LMS"
+    if (
+        clean_raw
+        and "hoàn thành" not in clean_raw.lower()
+        and "hoàn tất" not in clean_raw.lower()
+    ):
+        return clean_raw
+    return "❌ Chưa hoàn thành nhận xét"
+
+
+def _resolve_row_issue_description(
+    item: dict[str, Any],
+    *,
+    st: dict[str, Any],
+    fb: dict[str, Any] | None = None,
+) -> str:
+    """Combine QC issue notes, LMS quality issues, and Zalo content warnings."""
+    parts: list[str] = []
+    seen_norm: set[str] = set()
+
+    def _norm_issue_key(text: str) -> str:
+        stripped = re.sub(r"^\[[^\]]+\]\s*", "", text.strip())
+        stripped = stripped.replace(" — ", "; ").strip(" .;").lower()
+        return " ".join(stripped.split())
+
+    def _add_one(raw_segment: str) -> None:
+        cleaned = " ".join(str(raw_segment or "").split()).strip(" ;")
+        if not cleaned:
+            return
+        key = _norm_issue_key(cleaned)
+        if key and key not in seen_norm:
+            seen_norm.add(key)
+            parts.append(cleaned)
+
+    def _add(val: Any, *, split_semicolon: bool = False) -> None:
+        if not val:
+            return
+        if isinstance(val, (list, tuple)):
+            for entry in val:
+                _add(entry, split_semicolon=False)
+            return
+        text = str(val).strip()
+        if not text:
+            return
+        # Unwrap [Auto QC: ...] blocks using balanced-bracket parsing so embedded issues deduplicate cleanly
+        if re.search(r"\[Auto\s+QC:\s*", text, flags=re.IGNORECASE):
+            manual_note, auto_segments = split_checker_issue_note(text)
+            if manual_note:
+                _add_one(manual_note)
+            for seg in auto_segments:
+                _add_one(seg)
+            return
+        if split_semicolon:
+            for segment in text.split(";"):
+                _add_one(segment)
+        else:
+            _add_one(text)
+
+    fb_dict = fb or {}
+    qc_note = _first_defined_str(item, st, fb_dict, key="qc_issue_note")
+    _add(qc_note, split_semicolon=False)
+    _add(item.get("quality_issues") or st.get("quality_issues"))
+    _add(
+        item.get("lms_quality_issues")
+        or st.get("lms_quality_issues")
+        or fb_dict.get("lms_quality_issues")
+    )
+    _add(
+        item.get("zalo_content_issues")
+        or st.get("zalo_content_issues")
+        or fb_dict.get("zalo_content_issues")
+    )
+    lms_summary = _first_defined_str(item, st, fb_dict, key="lms_lesson_summary")
+    for zalo_issue in evaluate_zalo_content_issues(
+        item,
+        lms_summary_text=lms_summary,
+    ):
+        _add_one(zalo_issue)
+    return "; ".join(parts)
+
+
 def _sanitize_dashboard_item(
     item: dict[str, Any],
     *,
@@ -300,9 +502,11 @@ def _sanitize_dashboard_item(
     lms_status: str,
     job_timestamp: str,
     snapshot_id: Any = None,
+    fallback_bcnb_meta: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     scan_target = item.get("scan_target")
     st = dict(scan_target) if isinstance(scan_target, dict) else {}
+    fb = fallback_bcnb_meta if isinstance(fallback_bcnb_meta, dict) else {}
     class_code = _extract_item_class_code(item)
     st.setdefault("week", week)
     st.setdefault("year", year)
@@ -324,6 +528,59 @@ def _sanitize_dashboard_item(
             )
         elif re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw_date):
             st["class_date_iso"] = raw_date
+
+    for ext_str_key in (
+        "bcnb_session_id",
+        "khoi",
+        "lms_deadline",
+        "evaluation_status",
+    ):
+        val = _first_defined_str(item, st, fb, key=ext_str_key)
+        if val:
+            st[ext_str_key] = val
+
+    for note_key in ("qc_issue_note", "instructor_note"):
+        defined_note = _first_defined_str(item, st, fb, key=note_key)
+        if any(note_key in src and src.get(note_key) is not None for src in (item, st, fb)):
+            st[note_key] = defined_note
+
+    nx_zalo_checked: bool | None = None
+    nx_lms_checked: bool | None = None
+    for candidate_src in (item, st, fb):
+        if nx_zalo_checked is None and isinstance(
+            candidate_src.get("nx_zalo_checked"), bool
+        ):
+            nx_zalo_checked = bool(candidate_src["nx_zalo_checked"])
+        if nx_lms_checked is None and isinstance(
+            candidate_src.get("nx_lms_checked"), bool
+        ):
+            nx_lms_checked = bool(candidate_src["nx_lms_checked"])
+    if isinstance(nx_zalo_checked, bool):
+        st["nx_zalo_checked"] = nx_zalo_checked
+    if isinstance(nx_lms_checked, bool):
+        st["nx_lms_checked"] = nx_lms_checked
+
+    resolved_lms_status = lms_status
+    if resolved_lms_status == "Chưa quét LMS":
+        if nx_lms_checked is True:
+            resolved_lms_status = "✅ Đã nộp LMS"
+        elif nx_lms_checked is False:
+            resolved_lms_status = "❌ Chưa nộp LMS"
+
+    zalo_status_str = str(item.get("status") or "Chưa xác định")
+    evaluation_status = _resolve_row_evaluation_status(
+        zalo_status=zalo_status_str,
+        lms_status=resolved_lms_status,
+        nx_zalo_checked=nx_zalo_checked,
+        nx_lms_checked=nx_lms_checked,
+        raw_evaluation_status=str(st.get("evaluation_status") or ""),
+    )
+    issue_description = _resolve_row_issue_description(
+        item,
+        st=st,
+        fb=fb,
+    )
+    instructor_note = _first_defined_str(item, st, fb, key="instructor_note")
 
     images_raw = ev.get("images")
     sanitized_images: dict[str, dict[str, Any]] = {}
@@ -349,6 +606,11 @@ def _sanitize_dashboard_item(
             "target_lesson": st.get("lesson"),
             "target_class_code": class_code,
             "target_class_date": st.get("class_date") or st.get("class_date_iso"),
+            **(
+                {"target_match_note": ctx.get("target_match_note")}
+                if ctx.get("target_match_note")
+                else {}
+            ),
         },
         "messages_checked": int(ev.get("messages_checked") or 0),
         "oldest_message_date": ev.get("oldest_message_date"),
@@ -376,9 +638,17 @@ def _sanitize_dashboard_item(
         "timestamp": str(
             ev.get("scanned_at") or item.get("timestamp") or job_timestamp or "—"
         ),
-        "status": str(item.get("status") or "Chưa xác định"),
+        "status": zalo_status_str,
         "status_detail": item.get("status_detail"),
-        "lms_status": lms_status,
+        "lms_status": resolved_lms_status,
+        "evaluation_status": evaluation_status,
+        "issue_description": issue_description,
+        "qc_issue_note": str(st.get("qc_issue_note") or ""),
+        "instructor_note": instructor_note,
+        "khoi": str(st.get("khoi") or ""),
+        "bcnb_session_id": str(st.get("bcnb_session_id") or ""),
+        "nx_zalo_checked": nx_zalo_checked,
+        "nx_lms_checked": nx_lms_checked,
         "submitted_for_bcnb": bool(item.get("submitted_for_bcnb")),
         "manual_approved": bool(item.get("manual_approved")),
         "evidence_state": item.get("evidence_state"),
@@ -776,6 +1046,199 @@ class ReportRepository:
                 }
             batch_targets_by_job.setdefault(bt_job_id, []).append(merged_item)
 
+        bcnb_meta_by_lesson_rows: dict[tuple[int, int, str, str], list[dict[str, Any]]] = {}
+        bcnb_meta_by_code_rows: dict[tuple[int, int, str], list[dict[str, Any]]] = {}
+
+        def _can_merge_bcnb_meta(
+            existing: dict[str, Any],
+            incoming: dict[str, Any],
+            *,
+            source_tag: str,
+        ) -> bool:
+            if existing.get("_lesson") != incoming.get("_lesson"):
+                return False
+            ex_date = str(existing.get("_class_date_iso") or "").strip()
+            in_date = str(incoming.get("_class_date_iso") or "").strip()
+            if not ex_date or ex_date != in_date:
+                return False
+            if source_tag and source_tag in existing.get("_sources", set()):
+                return False
+            ex_sid = str(existing.get("bcnb_session_id") or "").strip()
+            in_sid = str(incoming.get("bcnb_session_id") or "").strip()
+            if ex_sid != in_sid:
+                return False
+            for cmp_key in (
+                "nx_zalo_checked",
+                "nx_lms_checked",
+                "qc_issue_note",
+                "instructor_note",
+                "evaluation_status",
+                "khoi",
+                "lms_deadline",
+            ):
+                if (
+                    cmp_key in existing
+                    and cmp_key in incoming
+                    and existing[cmp_key] != incoming[cmp_key]
+                ):
+                    return False
+            return True
+
+        def _register_bcnb_row_meta(
+            raw_entry: dict[str, Any],
+            *,
+            default_week: int | None = None,
+            default_year: int | None = None,
+            source_tag: str = "",
+        ) -> None:
+            if not isinstance(raw_entry, dict):
+                return
+            pair = _valid_period_pair(
+                raw_entry.get("week", default_week),
+                raw_entry.get("year", default_year),
+            )
+            if pair is None:
+                return
+            c_code = str(
+                raw_entry.get("class_code") or raw_entry.get("ma_lop") or ""
+            ).strip().upper()
+            if not c_code:
+                return
+            lesson_str = str(
+                raw_entry.get("lesson") or raw_entry.get("buoi_so") or ""
+            ).strip()
+            if not lesson_str:
+                return
+            raw_date = (
+                raw_entry.get("class_date_iso")
+                or raw_entry.get("ngay_hoc_iso")
+                or raw_entry.get("class_date")
+                or raw_entry.get("ngay_hoc")
+                or ""
+            )
+            date_iso = _normalize_date_iso(raw_date)
+            meta: dict[str, Any] = {
+                "_lesson": lesson_str,
+                "_class_date_iso": date_iso,
+                "_sources": {source_tag} if source_tag else set(),
+            }
+            for k in (
+                "bcnb_session_id",
+                "khoi",
+                "lms_deadline",
+                "evaluation_status",
+            ):
+                v = str(raw_entry.get(k) or "").strip()
+                if v:
+                    meta[k] = v
+            for nk in ("qc_issue_note", "instructor_note"):
+                if nk in raw_entry and raw_entry.get(nk) is not None:
+                    meta[nk] = str(raw_entry.get(nk) or "").strip()
+            for bk in ("nx_zalo_checked", "nx_lms_checked"):
+                bv = raw_entry.get(bk)
+                if isinstance(bv, bool):
+                    meta[bk] = bv
+            lesson_list = bcnb_meta_by_lesson_rows.setdefault(
+                (pair[0], pair[1], c_code, lesson_str), []
+            )
+            matched_lesson_entry = next(
+                (
+                    m
+                    for m in lesson_list
+                    if _can_merge_bcnb_meta(m, meta, source_tag=source_tag)
+                ),
+                None,
+            )
+            if matched_lesson_entry is None:
+                lesson_copy = dict(meta)
+                lesson_copy["_sources"] = set(meta["_sources"])
+                lesson_list.append(lesson_copy)
+            else:
+                if source_tag:
+                    matched_lesson_entry.setdefault("_sources", set()).add(source_tag)
+                for mk, mv in meta.items():
+                    if mk != "_sources":
+                        matched_lesson_entry.setdefault(mk, mv)
+            code_list = bcnb_meta_by_code_rows.setdefault(
+                (pair[0], pair[1], c_code), []
+            )
+            matched_code_entry = next(
+                (
+                    m
+                    for m in code_list
+                    if _can_merge_bcnb_meta(m, meta, source_tag=source_tag)
+                ),
+                None,
+            )
+            if matched_code_entry is None:
+                code_copy = dict(meta)
+                code_copy["_sources"] = set(meta["_sources"])
+                code_list.append(code_copy)
+            else:
+                if source_tag:
+                    matched_code_entry.setdefault("_sources", set()).add(source_tag)
+                for mk, mv in meta.items():
+                    if mk != "_sources":
+                        matched_code_entry.setdefault(mk, mv)
+
+        def _resolve_bcnb_row_fallback(
+            *,
+            week_num: int,
+            year_num: int,
+            c_code: str,
+            lesson_str: str,
+            date_iso: str,
+            session_id: str = "",
+        ) -> dict[str, Any]:
+            if not lesson_str:
+                return {}
+            candidates = bcnb_meta_by_lesson_rows.get(
+                (week_num, year_num, c_code, lesson_str), []
+            )
+            if not candidates:
+                return {}
+            sid = str(session_id or "").strip()
+            if sid:
+                sid_matches = [
+                    c
+                    for c in candidates
+                    if str(c.get("bcnb_session_id") or "").strip() == sid
+                    and (
+                        not date_iso
+                        or not str(c.get("_class_date_iso") or "").strip()
+                        or str(c.get("_class_date_iso") or "").strip() == date_iso
+                    )
+                ]
+                if len(sid_matches) == 1:
+                    return sid_matches[0]
+                if len(sid_matches) > 1:
+                    return {}
+                if any(str(c.get("bcnb_session_id") or "").strip() for c in candidates):
+                    return {}
+            if date_iso:
+                date_matches = [
+                    c
+                    for c in candidates
+                    if str(c.get("_class_date_iso") or "").strip() == date_iso
+                ]
+                if len(date_matches) == 1:
+                    has_undated_other = any(
+                        not str(c.get("_class_date_iso") or "").strip()
+                        for c in candidates
+                    )
+                    if not has_undated_other:
+                        return date_matches[0]
+                    return {}
+                if len(date_matches) > 1:
+                    return {}
+            if len(candidates) != 1:
+                return {}
+            only = candidates[0]
+            cand_date = str(only.get("_class_date_iso") or "").strip()
+            if date_iso and cand_date and cand_date != date_iso:
+                return {}
+            return only
+
         available_weeks_set: set[tuple[int, int]] = set()
         for dt_week, dt_year in distinct_target_week_rows:
             dt_pair = _valid_period_pair(dt_week, dt_year)
@@ -784,6 +1247,13 @@ class ReportRepository:
         if latest_snapshot_row and latest_snapshot_row[0]:
             snap_plan = _parse_json(latest_snapshot_row[0], {})
             if isinstance(snap_plan, dict):
+                for tgt_list_key in ("scan_targets", "deferred_targets"):
+                    for tgt_entry in snap_plan.get(tgt_list_key) or []:
+                        if isinstance(tgt_entry, dict):
+                            _register_bcnb_row_meta(
+                                tgt_entry,
+                                source_tag=f"snap_{tgt_list_key}",
+                            )
                 bcnb_wp = snap_plan.get("bcnb_week_plan")
                 if isinstance(bcnb_wp, dict):
                     req_w = bcnb_wp.get("required_week")
@@ -791,6 +1261,26 @@ class ReportRepository:
                         pair = _valid_period_pair(req_w.get("week"), req_w.get("year"))
                         if pair is not None:
                             available_weeks_set.add(pair)
+                            for r_entry in bcnb_wp.get("required_data") or []:
+                                if isinstance(r_entry, dict):
+                                    _register_bcnb_row_meta(
+                                        r_entry,
+                                        default_week=pair[0],
+                                        default_year=pair[1],
+                                        source_tag="snap_required_data",
+                                    )
+                    lat_w = bcnb_wp.get("latest_week")
+                    if isinstance(lat_w, dict):
+                        l_pair = _valid_period_pair(lat_w.get("week"), lat_w.get("year"))
+                        if l_pair is not None:
+                            for r_entry in bcnb_wp.get("latest_data") or []:
+                                if isinstance(r_entry, dict):
+                                    _register_bcnb_row_meta(
+                                        r_entry,
+                                        default_week=l_pair[0],
+                                        default_year=l_pair[1],
+                                        source_tag="snap_latest_data",
+                                    )
 
         parsed_zalo_jobs: list[dict[str, Any]] = []
         for row in zalo_job_rows:
@@ -825,6 +1315,13 @@ class ReportRepository:
             scan_plan: dict[str, Any] = (
                 scan_plan_raw if isinstance(scan_plan_raw, dict) else {}
             )
+            for sp_list_key in ("targets", "deferred_targets"):
+                for sp_tgt in scan_plan.get(sp_list_key) or []:
+                    if isinstance(sp_tgt, dict):
+                        _register_bcnb_row_meta(
+                            sp_tgt,
+                            source_tag=f"job_{j_id}_{sp_list_key}",
+                        )
             selective_rescan = bool(
                 envelope.get("selective_rescan")
                 or scan_plan.get("selective_rescan")
@@ -1033,11 +1530,14 @@ class ReportRepository:
             if not r_key:
                 continue
             available_weeks_set.add(pair)
+            ma_sid = str(reason.get("bcnb_session_id") or "").strip()
+            ma_key = f"{r_key}|sid:{ma_sid}" if ma_sid else r_key
             period_ma = manual_approvals_by_period.setdefault(pair, {})
-            if r_key not in period_ma:
+            if ma_key not in period_ma:
                 src_j = reason.get("source_job_id")
-                period_ma[r_key] = {
+                period_ma[ma_key] = {
                     "target_key": r_key,
+                    "bcnb_session_id": ma_sid,
                     "class_code": class_code,
                     "group_name": str(reason.get("group_name") or "").strip(),
                     "week": pair[0],
@@ -1197,19 +1697,85 @@ class ReportRepository:
             )
             period_manual_approvals[k] = v_copy
 
+        def _item_session_id(candidate_item: dict[str, Any]) -> str:
+            st_cand = candidate_item.get("scan_target")
+            st_cand_dict = st_cand if isinstance(st_cand, dict) else {}
+            ma_cand = candidate_item.get("manual_approval")
+            ma_cand_dict = ma_cand if isinstance(ma_cand, dict) else {}
+            return _first_defined_str(
+                ma_cand_dict, candidate_item, st_cand_dict, key="bcnb_session_id"
+            )
+
+        def _approval_session_id(app_info: dict[str, Any]) -> str:
+            direct = str(app_info.get("bcnb_session_id") or "").strip()
+            if direct:
+                return direct
+            app_item = app_info.get("approved_item")
+            if isinstance(app_item, dict):
+                return _item_session_id(app_item)
+            return ""
+
+        def _manual_approval_matches_item(
+            app_info: dict[str, Any],
+            candidate_item: dict[str, Any],
+            *,
+            same_row_key_items: list[dict[str, Any]],
+        ) -> bool:
+            app_sid = _approval_session_id(app_info)
+            cand_sid = _item_session_id(candidate_item)
+            if app_sid and cand_sid:
+                if app_sid != cand_sid:
+                    return False
+                same_sid_count = sum(
+                    1 for it in same_row_key_items if _item_session_id(it) == app_sid
+                )
+                return same_sid_count == 1
+            if app_sid and not cand_sid:
+                return False
+            if not app_sid and cand_sid:
+                return False
+            return len(same_row_key_items) == 1
+
         for j in matching_jobs_chronological:
-            for item in j["items_by_period"].get(selected_period, []):
+            job_period_items = j["items_by_period"].get(selected_period, [])
+            for item in job_period_items:
                 r_key = _extract_item_row_key(item, sel_week, sel_year)
-                if r_key in period_manual_approvals and period_manual_approvals[r_key].get("approved_item") is None:
-                    src_candidate = period_manual_approvals[r_key].get("source_job_id")
-                    if src_candidate is None or int(src_candidate) == int(j["job_id"]):
-                        period_manual_approvals[r_key]["approved_item"] = item
-                        if (
-                            src_candidate is not None
-                            and int(src_candidate) == int(j["job_id"])
-                            and period_manual_approvals[r_key].get("snapshot_id") is None
+                item_sid = _item_session_id(item)
+                ma_lookup_key = f"{r_key}|sid:{item_sid}" if item_sid else r_key
+                for cand_ma_key in (ma_lookup_key, r_key):
+                    if (
+                        cand_ma_key in period_manual_approvals
+                        and period_manual_approvals[cand_ma_key].get("approved_item")
+                        is None
+                    ):
+                        existing_app = period_manual_approvals[cand_ma_key]
+                        ex_app_sid = str(
+                            existing_app.get("bcnb_session_id") or ""
+                        ).strip()
+                        if ex_app_sid and item_sid and ex_app_sid != item_sid:
+                            continue
+                        if ex_app_sid and not item_sid:
+                            continue
+                        same_key_in_job = [
+                            it
+                            for it in job_period_items
+                            if _extract_item_row_key(it, sel_week, sel_year) == r_key
+                        ]
+                        if not ex_app_sid and len(same_key_in_job) != 1:
+                            continue
+                        src_candidate = existing_app.get("source_job_id")
+                        if src_candidate is None or int(src_candidate) == int(
+                            j["job_id"]
                         ):
-                            period_manual_approvals[r_key]["snapshot_id"] = j["snapshot_id"]
+                            existing_app["approved_item"] = item
+                            if item_sid and not ex_app_sid:
+                                existing_app["bcnb_session_id"] = item_sid
+                            if (
+                                src_candidate is not None
+                                and int(src_candidate) == int(j["job_id"])
+                                and existing_app.get("snapshot_id") is None
+                            ):
+                                existing_app["snapshot_id"] = j["snapshot_id"]
                 if not _is_verified_manual_approved_item(item):
                     continue
                 ma_meta = (
@@ -1219,7 +1785,11 @@ class ReportRepository:
                 )
                 st_raw = item.get("scan_target")
                 st_dict = st_raw if isinstance(st_raw, dict) else {}
-                src_j = ma_meta.get("source_job_id") or item.get("source_job_id") or j["job_id"]
+                src_j = (
+                    ma_meta.get("source_job_id")
+                    or item.get("source_job_id")
+                    or j["job_id"]
+                )
                 resolved_src_j = (
                     int(src_j)
                     if isinstance(src_j, int)
@@ -1227,8 +1797,10 @@ class ReportRepository:
                     and int(src_j) > 0
                     else j["job_id"]
                 )
-                period_manual_approvals[r_key] = {
+                ma_store_key = f"{r_key}|sid:{item_sid}" if item_sid else r_key
+                period_manual_approvals[ma_store_key] = {
                     "target_key": r_key,
+                    "bcnb_session_id": item_sid,
                     "class_code": _extract_item_class_code(item),
                     "group_name": str(
                         item.get("group") or st_dict.get("group_name") or ""
@@ -1281,17 +1853,30 @@ class ReportRepository:
             is_selective_only = bool(target_job["selective_rescan"])
             for item in period_items:
                 r_key = _extract_item_row_key(item, sel_week, sel_year)
+                same_r_key_items = [
+                    it
+                    for it in period_items
+                    if _extract_item_row_key(it, sel_week, sel_year) == r_key
+                ]
                 item_with_snap = dict(item)
                 item_with_snap["_origin_snapshot_id"] = target_job["snapshot_id"]
                 entry = (target_job["job_id"], target_job["timestamp"], item_with_snap)
-                if r_key in period_manual_approvals:
-                    app_info = period_manual_approvals[r_key]
-                    if app_info.get("source_job_id") in {None, int(job_id)} and (
-                        "Miễn" not in str(item_with_snap.get("status") or "")
-                        and (
-                            "✅" not in str(item_with_snap.get("status") or "")
-                            or bool(item_with_snap.get("manual_approved"))
-                        )
+                matching_apps = [
+                    app_info
+                    for app_info in period_manual_approvals.values()
+                    if str(app_info.get("target_key") or "") == r_key
+                    and app_info.get("source_job_id") in {None, int(job_id)}
+                    and _manual_approval_matches_item(
+                        app_info,
+                        item_with_snap,
+                        same_row_key_items=same_r_key_items,
+                    )
+                ]
+                if len(matching_apps) == 1:
+                    app_info = matching_apps[0]
+                    if "Miễn" not in str(item_with_snap.get("status") or "") and (
+                        "✅" not in str(item_with_snap.get("status") or "")
+                        or bool(item_with_snap.get("manual_approved"))
                     ):
                         entry = _apply_verified_manual_approval(
                             entry[0],
@@ -1332,43 +1917,102 @@ class ReportRepository:
 
             merged_by_key: dict[str, tuple[int, str, dict[str, Any]]] = {}
             ordered_keys: list[str] = []
+            dup_counter = 0
             for j in jobs_to_merge:
                 selected_job_id = j["job_id"]
-                for item in j["items_by_period"].get(selected_period, []):
+                job_items = j["items_by_period"].get(selected_period, [])
+                r_key_counts_in_job: dict[str, int] = {}
+                for it in job_items:
+                    rk = _extract_item_row_key(it, sel_week, sel_year)
+                    r_key_counts_in_job[rk] = r_key_counts_in_job.get(rk, 0) + 1
+                for item in job_items:
                     r_key = _extract_item_row_key(item, sel_week, sel_year)
-                    if r_key in merged_by_key:
-                        _, _, prev_item = merged_by_key[r_key]
+                    item_sid = _item_session_id(item)
+                    merge_key = f"{r_key}|sid:{item_sid}" if item_sid else r_key
+                    if merge_key in merged_by_key:
+                        prev_job_id, _, prev_item = merged_by_key[merge_key]
+                        prev_sid = _item_session_id(prev_item)
+                        if (
+                            prev_job_id == j["job_id"]
+                            or item_sid != prev_sid
+                            or r_key_counts_in_job.get(r_key, 0) > 1
+                        ):
+                            dup_counter += 1
+                            merge_key = f"{merge_key}#dup{dup_counter}"
+                    elif r_key in merged_by_key:
+                        prev_job_id, _, prev_item = merged_by_key[r_key]
+                        prev_sid = _item_session_id(prev_item)
+                        if (
+                            prev_job_id != j["job_id"]
+                            and item_sid == prev_sid
+                            and r_key_counts_in_job.get(r_key, 0) == 1
+                        ):
+                            merge_key = r_key
+                    if merge_key in merged_by_key:
+                        _, _, prev_item = merged_by_key[merge_key]
                         if (
                             _is_halted_unscanned_item(item)
                             and not _is_halted_unscanned_item(prev_item)
                         ):
                             continue
                     else:
-                        ordered_keys.append(r_key)
+                        ordered_keys.append(merge_key)
                     item_with_snap = dict(item)
                     item_with_snap["_origin_snapshot_id"] = j["snapshot_id"]
-                    merged_by_key[r_key] = (j["job_id"], j["timestamp"], item_with_snap)
+                    merged_by_key[merge_key] = (
+                        j["job_id"],
+                        j["timestamp"],
+                        item_with_snap,
+                    )
 
             # Reconcile verified production manual approvals across all scans of the week
-            for r_key, app_info in period_manual_approvals.items():
-                if r_key in merged_by_key:
-                    cur_job_id, cur_ts, cur_item = merged_by_key[r_key]
-                    if "Miễn" not in str(cur_item.get("status") or "") and (
-                        "✅" not in str(cur_item.get("status") or "")
-                        or bool(cur_item.get("manual_approved"))
-                    ):
-                        merged_by_key[r_key] = _apply_verified_manual_approval(
-                            cur_job_id,
-                            cur_ts,
-                            cur_item,
+            for ma_key, app_info in period_manual_approvals.items():
+                r_key = str(app_info.get("target_key") or ma_key)
+                r_key_merge_keys = [
+                    mk
+                    for mk in ordered_keys
+                    if _extract_item_row_key(merged_by_key[mk][2], sel_week, sel_year)
+                    == r_key
+                ]
+                app_sid = _approval_session_id(app_info)
+                if r_key_merge_keys:
+                    same_r_key_items = [
+                        merged_by_key[mk][2] for mk in r_key_merge_keys
+                    ]
+                    compatible_mks = [
+                        mk
+                        for mk in r_key_merge_keys
+                        if _manual_approval_matches_item(
                             app_info,
-                            week=sel_week,
-                            year=sel_year,
+                            merged_by_key[mk][2],
+                            same_row_key_items=same_r_key_items,
                         )
+                    ]
+                    if len(compatible_mks) == 1:
+                        target_mk = compatible_mks[0]
+                        cur_job_id, cur_ts, cur_item = merged_by_key[target_mk]
+                        if "Miễn" not in str(cur_item.get("status") or "") and (
+                            "✅" not in str(cur_item.get("status") or "")
+                            or bool(cur_item.get("manual_approved"))
+                        ):
+                            merged_by_key[target_mk] = _apply_verified_manual_approval(
+                                cur_job_id,
+                                cur_ts,
+                                cur_item,
+                                app_info,
+                                week=sel_week,
+                                year=sel_year,
+                            )
                 else:
                     base_item_raw = app_info.get("approved_item")
                     if isinstance(base_item_raw, dict):
                         base_item = dict(base_item_raw)
+                        base_st_raw = base_item.get("scan_target")
+                        st_copy = dict(base_st_raw) if isinstance(base_st_raw, dict) else {}
+                        if app_sid:
+                            base_item.setdefault("bcnb_session_id", app_sid)
+                            st_copy.setdefault("bcnb_session_id", app_sid)
+                        base_item["scan_target"] = st_copy
                     else:
                         c_code = app_info.get("class_code") or "KHONG_RO_LOP"
                         g_name = app_info.get("group_name") or c_code
@@ -1378,6 +2022,11 @@ class ReportRepository:
                         base_item = {
                             "group": g_name,
                             "person": person_name,
+                            **(
+                                {"bcnb_session_id": app_sid}
+                                if app_sid
+                                else {}
+                            ),
                             "scan_target": {
                                 "group_name": g_name,
                                 "person": person_name,
@@ -1387,6 +2036,11 @@ class ReportRepository:
                                 "lesson": app_info.get("lesson") or "—",
                                 "class_date": app_info.get("class_date_iso") or "—",
                                 "class_date_iso": app_info.get("class_date_iso") or "",
+                                **(
+                                    {"bcnb_session_id": app_sid}
+                                    if app_sid
+                                    else {}
+                                ),
                             },
                         }
                     app_snapshot_id = app_info.get("snapshot_id")
@@ -1398,8 +2052,9 @@ class ReportRepository:
                         or selected_job_id
                         or 0
                     )
-                    ordered_keys.append(r_key)
-                    merged_by_key[r_key] = _apply_verified_manual_approval(
+                    synth_mk = ma_key if ma_key not in merged_by_key else f"{ma_key}#ma"
+                    ordered_keys.append(synth_mk)
+                    merged_by_key[synth_mk] = _apply_verified_manual_approval(
                         fallback_job_id,
                         str(app_info.get("approved_at") or ""),
                         base_item,
@@ -1411,24 +2066,46 @@ class ReportRepository:
             selected_raw_items = [merged_by_key[k] for k in ordered_keys]
         elif period_manual_approvals:
             for r_key, app_info in period_manual_approvals.items():
-                c_code = app_info.get("class_code") or "KHONG_RO_LOP"
-                g_name = app_info.get("group_name") or c_code
-                person_name = teacher_by_class_code.get(c_code, "Chưa phân công")
-                base_item = {
-                    "group": g_name,
-                    "person": person_name,
-                    "_origin_snapshot_id": app_info.get("snapshot_id"),
-                    "scan_target": {
-                        "group_name": g_name,
+                app_sid = _approval_session_id(app_info)
+                base_item_raw = app_info.get("approved_item")
+                if isinstance(base_item_raw, dict):
+                    base_item = dict(base_item_raw)
+                    base_st_raw = base_item.get("scan_target")
+                    st_copy = dict(base_st_raw) if isinstance(base_st_raw, dict) else {}
+                    if app_sid:
+                        base_item.setdefault("bcnb_session_id", app_sid)
+                        st_copy.setdefault("bcnb_session_id", app_sid)
+                    base_item["scan_target"] = st_copy
+                    base_item["_origin_snapshot_id"] = app_info.get("snapshot_id")
+                else:
+                    c_code = app_info.get("class_code") or "KHONG_RO_LOP"
+                    g_name = app_info.get("group_name") or c_code
+                    person_name = teacher_by_class_code.get(c_code, "Chưa phân công")
+                    base_item = {
+                        "group": g_name,
                         "person": person_name,
-                        "class_code": c_code,
-                        "week": sel_week,
-                        "year": sel_year,
-                        "lesson": app_info.get("lesson") or "—",
-                        "class_date": app_info.get("class_date_iso") or "—",
-                        "class_date_iso": app_info.get("class_date_iso") or "",
-                    },
-                }
+                        "_origin_snapshot_id": app_info.get("snapshot_id"),
+                        **(
+                            {"bcnb_session_id": app_sid}
+                            if app_sid
+                            else {}
+                        ),
+                        "scan_target": {
+                            "group_name": g_name,
+                            "person": person_name,
+                            "class_code": c_code,
+                            "week": sel_week,
+                            "year": sel_year,
+                            "lesson": app_info.get("lesson") or "—",
+                            "class_date": app_info.get("class_date_iso") or "—",
+                            "class_date_iso": app_info.get("class_date_iso") or "",
+                            **(
+                                {"bcnb_session_id": app_sid}
+                                if app_sid
+                                else {}
+                            ),
+                        },
+                    }
                 fallback_job_id = int(app_info.get("source_job_id") or 0)
                 if selected_job_id is None and fallback_job_id > 0:
                     selected_job_id = fallback_job_id
@@ -1569,6 +2246,42 @@ class ReportRepository:
         for src_job_id, job_ts, item in selected_raw_items:
             class_code = _extract_item_class_code(item)
             seen_class_codes.add(class_code)
+            raw_st_obj = item.get("scan_target")
+            raw_st: dict[str, Any] = (
+                raw_st_obj if isinstance(raw_st_obj, dict) else {}
+            )
+            raw_ev = item.get("evidence")
+            raw_ctx_obj = (
+                raw_ev.get("date_context") if isinstance(raw_ev, dict) else None
+            )
+            raw_ctx: dict[str, Any] = (
+                raw_ctx_obj if isinstance(raw_ctx_obj, dict) else {}
+            )
+            item_lesson = str(
+                raw_st.get("lesson")
+                or raw_ctx.get("target_lesson")
+                or item.get("lesson")
+                or ""
+            ).strip()
+            item_date_iso = _normalize_date_iso(
+                raw_st.get("class_date_iso")
+                or raw_st.get("class_date")
+                or raw_ctx.get("target_class_date")
+                or item.get("class_date_iso")
+                or item.get("class_date")
+                or ""
+            )
+            item_session_id = _first_defined_str(
+                item, raw_st, key="bcnb_session_id"
+            )
+            fallback_meta = _resolve_bcnb_row_fallback(
+                week_num=sel_week,
+                year_num=sel_year,
+                c_code=class_code,
+                lesson_str=item_lesson,
+                date_iso=item_date_iso,
+                session_id=item_session_id,
+            )
             lms_status = lms_status_by_class.get(class_code, "Chưa quét LMS")
             sanitized = _sanitize_dashboard_item(
                 item,
@@ -1577,7 +2290,9 @@ class ReportRepository:
                 source_job_id=src_job_id,
                 lms_status=lms_status,
                 job_timestamp=job_ts,
+                fallback_bcnb_meta=fallback_meta,
             )
+            resolved_lms_status = str(sanitized.get("lms_status") or lms_status)
             sanitized_items.append(sanitized)
             st = sanitized["scan_target"]
             manual_app = item.get("manual_approval")
@@ -1603,7 +2318,13 @@ class ReportRepository:
                     ).strip()
                     or "—",
                     "zalo_status": str(sanitized.get("status") or "Chưa xác định").strip(),
-                    "lms_status": lms_status,
+                    "lms_status": resolved_lms_status,
+                    "evaluation_status": str(sanitized.get("evaluation_status") or ""),
+                    "issue_description": str(sanitized.get("issue_description") or ""),
+                    "qc_issue_note": str(sanitized.get("qc_issue_note") or ""),
+                    "instructor_note": str(sanitized.get("instructor_note") or ""),
+                    "khoi": str(sanitized.get("khoi") or ""),
+                    "bcnb_session_id": str(sanitized.get("bcnb_session_id") or ""),
                     "verified_at": verified_at,
                 }
             )
@@ -1616,6 +2337,17 @@ class ReportRepository:
                 lms_status = lms_status_by_class.get(code, "Chưa quét LMS")
                 lms_ts = lms_verified_at_by_class.get(code) or "—"
                 teacher = teacher_by_class_code.get(code, "Chưa phân công")
+                code_candidates = bcnb_meta_by_code_rows.get(
+                    (sel_week, sel_year, code), []
+                )
+                fb_meta = code_candidates[0] if len(code_candidates) == 1 else {}
+                eval_status = _resolve_row_evaluation_status(
+                    zalo_status="Chưa quét Zalo",
+                    lms_status=lms_status,
+                    nx_zalo_checked=fb_meta.get("nx_zalo_checked"),
+                    nx_lms_checked=fb_meta.get("nx_lms_checked"),
+                    raw_evaluation_status=str(fb_meta.get("evaluation_status") or ""),
+                )
                 rows.append(
                     {
                         "class_code": code,
@@ -1624,6 +2356,14 @@ class ReportRepository:
                         "class_date": "—",
                         "zalo_status": "Chưa quét Zalo",
                         "lms_status": lms_status,
+                        "evaluation_status": eval_status,
+                        "issue_description": _resolve_row_issue_description(
+                            fb_meta, st=fb_meta, fb=fb_meta
+                        ),
+                        "qc_issue_note": str(fb_meta.get("qc_issue_note") or ""),
+                        "instructor_note": str(fb_meta.get("instructor_note") or ""),
+                        "khoi": str(fb_meta.get("khoi") or ""),
+                        "bcnb_session_id": str(fb_meta.get("bcnb_session_id") or ""),
                         "verified_at": lms_ts,
                     }
                 )
@@ -1655,7 +2395,11 @@ class ReportRepository:
             1
             for r in rows
             if str(r.get("lms_status") or "")
-            in {"✅ Đã nhận xét & Tích BCNB", "✅ Đã tích trên BCNB"}
+            in {
+                "✅ Đã nhận xét & Tích BCNB",
+                "✅ Đã tích trên BCNB",
+                "✅ Đã nộp LMS",
+            }
         )
         lms_dry_run = sum(
             1
@@ -1748,3 +2492,8 @@ class ReportRepository:
             "rows": rows,
             "items": sanitized_items,
         }
+
+    is_failed_weekly_summary_row = staticmethod(is_failed_weekly_summary_row)
+    filter_failed_weekly_summary_rows = staticmethod(
+        filter_failed_weekly_summary_rows
+    )

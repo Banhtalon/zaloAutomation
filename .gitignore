@@ -22,6 +22,8 @@ htmlcov/
 zalo_session/
 database.db
 database.db-*
+database.sqlite3
+database.sqlite3-*
 groups_dump.json
 jobs_dump.json
 static/screenshots/

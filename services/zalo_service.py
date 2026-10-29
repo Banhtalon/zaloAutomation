@@ -472,6 +472,11 @@ async def _run_zalo_automation(
                 scan_plan=scan_plan,
                 job_repo=job_repo,
                 audit_repo=audit_repo,
+                **(
+                    {"lms_quality_gateway": getattr(external, "lms_quality", None)}
+                    if getattr(external, "lms_quality", None) is not None
+                    else {}
+                ),
             )
         except Exception as e:
             log_message(f"Lỗi khi cập nhật BCNB: {e}")

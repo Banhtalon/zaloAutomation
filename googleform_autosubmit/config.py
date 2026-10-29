@@ -176,3 +176,12 @@ class Config:
     # value intentionally acknowledges that the current /run-scan endpoint is
     # a broad batch operation, not a single-target canary.
     LOCAL_PRODUCTION_ACK = os.getenv("LOCAL_PRODUCTION_ACK", "").strip()
+    REPORT_EMAIL_RECIPIENTS = _csv_env(
+        "REPORT_EMAIL_RECIPIENTS", "quangda@mindx.net.vn"
+    )
+    SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com").strip()
+    SMTP_PORT = max(1, min(65535, int(os.getenv("SMTP_PORT", 587))))
+    SMTP_USERNAME = os.getenv("SMTP_USERNAME", "").strip()
+    SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "").strip()
+    SMTP_FROM = os.getenv("SMTP_FROM", "").strip()
+    SMTP_USE_TLS = os.getenv("SMTP_USE_TLS", "true").strip().lower() != "false"

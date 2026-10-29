@@ -1,18 +1,31 @@
-            <!-- TAB 4: SYSTEM LOGS -->
-            <div id="tab-logs" class="tab-content flex-1 flex-col space-y-6">
-                <div class="glass-panel p-6 flex-1 flex flex-col relative">
-                    <button onclick="copyLogs()" class="absolute top-4 right-6 px-3 py-1.5 text-xs font-medium text-gray-300 glass-panel hover:bg-white/10 hover:text-white transition-all shadow-sm z-20">
-                        <i class="fa-regular fa-copy mr-1.5"></i> Copy Logs
-                    </button>
-                    
-                    <div class="mb-4 rounded-xl border border-glassborder bg-black/30 p-4">
-                        <p class="mb-2 text-[10px] font-bold uppercase tracking-widest text-gray-400">Vòng đời và audit của job đang xem</p>
-                        <div id="job-timeline" class="max-h-48 overflow-y-auto space-y-1 font-mono text-[11px] text-gray-300">
-                            <div class="text-gray-500">Chưa có job.</div>
+            <!-- TAB 4B: SYSTEM LOGS & AUDIT (UNIFIED WITH DIAGNOSTICS) -->
+            <div id="tab-logs" class="tab-content shrink-0 flex-col mt-5" hidden>
+                <section class="glass-panel flex flex-col overflow-hidden relative" aria-labelledby="logs-section-title">
+                    <div class="bg-slate-900 text-white px-5 py-3 border-b-2 border-slate-950 flex flex-wrap items-center justify-between gap-3">
+                        <div class="flex items-center gap-2.5">
+                            <span class="w-7 h-7 rounded-lg bg-emerald-600 text-white border border-emerald-400 flex items-center justify-center text-xs shadow-sm shrink-0">
+                                <i class="fa-solid fa-terminal" aria-hidden="true"></i>
+                            </span>
+                            <div>
+                                <p class="text-[10px] font-extrabold uppercase tracking-widest text-emerald-300">Nhật ký vận hành &amp; Audit</p>
+                                <h2 id="logs-section-title" class="text-sm font-extrabold text-white">Vòng đời Job &amp; Terminal Hệ thống</h2>
+                            </div>
+                        </div>
+                        <button type="button" onclick="copyLogs()" class="preflight-refresh">
+                            <i class="fa-regular fa-copy text-blue-600" aria-hidden="true"></i> Copy Logs
+                        </button>
+                    </div>
+
+                    <div class="p-4 space-y-3.5">
+                        <div class="well-inset p-3.5">
+                            <p class="mb-2 text-[10px] font-extrabold uppercase tracking-widest text-slate-700">Vòng đời và audit của job đang xem</p>
+                            <div id="job-timeline" class="max-h-40 overflow-y-auto space-y-1 font-mono text-[11px] font-bold text-slate-800">
+                                <div class="text-slate-500">Chưa có job.</div>
+                            </div>
+                        </div>
+                        <div class="min-h-[260px] max-h-[380px] bg-slate-950 border-2 border-slate-800 rounded-xl p-4 overflow-y-auto font-mono text-xs text-slate-200 shadow-inner" id="full-log-terminal">
+                            <!-- Terminal logs -->
                         </div>
                     </div>
-                    <div class="flex-1 bg-black border border-glassborder rounded-xl p-5 overflow-y-auto font-mono text-[13px] text-gray-300 shadow-[inset_0_0_20px_rgba(0,0,0,0.8)]" id="full-log-terminal">
-                        <!-- Terminal logs -->
-                    </div>
-                </div>
+                </section>
             </div>

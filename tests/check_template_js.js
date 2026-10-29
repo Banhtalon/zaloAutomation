@@ -130,15 +130,33 @@ function createFakeElement(id = '') {
       },
     },
     addEventListener: () => {},
+    get firstChild() {
+      return this.children[0] || null;
+    },
     appendChild(child) {
+      if (child && child.id === 'fragment' && Array.isArray(child.children)) {
+        this.children.push(...child.children);
+        child.children = [];
+        return child;
+      }
       this.children.push(child);
       return child;
     },
     append(...children) {
-      this.children.push(...children);
+      for (const child of children) {
+        this.appendChild(child);
+      }
     },
     replaceChildren(...children) {
-      this.children = [...children];
+      this.children = [];
+      for (const child of children) {
+        this.appendChild(child);
+      }
+    },
+    removeChild(child) {
+      const idx = this.children.indexOf(child);
+      if (idx >= 0) this.children.splice(idx, 1);
+      return child;
     },
     setAttribute: () => {},
   };
@@ -308,8 +326,28 @@ async function checkJobPollingAndTerminalDetails() {
 
 async function checkGoogleFormHistoryAndHttpError() {
   const requests = [];
+  let mappingsOk = true;
   const harness = createFrontendHarness(async (url) => {
     requests.push(url);
+    if (url === '/api/googleform/mappings') {
+      if (!mappingsOk) {
+        return {
+          ok: false,
+          status: 503,
+          json: async () => ({ detail: 'Service unavailable' }),
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          mappings: [
+            { id: 1, question_keyword: 'CS', answer_value: 'TK_NguyenThiThuyLinh' },
+            { id: 2, question_keyword: 'Khu vực', answer_value: 'Vũng Tàu' },
+          ],
+        }),
+      };
+    }
     if (url === '/api/googleform/history') {
       return {
         ok: true,
@@ -336,6 +374,17 @@ async function checkGoogleFormHistoryAndHttpError() {
   });
   vm.runInContext(scriptSourceByPath.get('/static/js/state.js'), harness.context);
   vm.runInContext(googleformSource, harness.context);
+  await vm.runInContext('fetchMappings()', harness.context);
+  assertFrontend(
+    harness.elements.get('mapping-count-badge').textContent.includes('2 quy tắc'),
+    'fetchMappings must update mapping-count-badge with rule count',
+  );
+  mappingsOk = false;
+  await vm.runInContext('fetchMappings()', harness.context);
+  assertFrontend(
+    harness.elements.get('mapping-count-badge').textContent === 'Không tải được cấu hình',
+    'fetchMappings must report load failure in mapping-count-badge instead of stale or empty rule count',
+  );
   await vm.runInContext('fetchGoogleFormHistory()', harness.context);
 
   const historyTable = harness.elements.get('form-history-table');
@@ -366,12 +415,33 @@ async function checkLazyIncrementalLogs() {
     if (url === '/api/jobs/latest') {
       return { ok: true, status: 200, json: async () => null };
     }
+    if (url.startsWith('/api/zalo-scan-preflight')) {
+      return { ok: true, status: 200, json: async () => ({ status: 'GREEN', checks: [] }) };
+    }
     if (url === '/api/logs?after=0&limit=100') {
       return {
         ok: true,
         status: 200,
         json: async () => ({
-          records: [{ timestamp: '2026-08-14T10:00:00Z', message: 'first' }],
+          records: [
+            { timestamp: '2026-08-14T10:00:00Z', message: 'first' },
+            {
+              timestamp: '2026-08-14T10:00:00Z',
+              event: 'http.completed',
+              status_code: 200,
+              method: 'GET',
+              path: '/api/groups',
+              message: 'HTTP request hoàn tất.',
+            },
+            {
+              timestamp: '2026-08-14T10:00:01Z',
+              event: 'http.completed',
+              status_code: 503,
+              method: 'POST',
+              path: '/run-scan',
+              message: 'HTTP request hoàn tất.',
+            },
+          ],
           cursor: 1,
         }),
       };
@@ -381,32 +451,93 @@ async function checkLazyIncrementalLogs() {
         ok: true,
         status: 200,
         json: async () => ({
-          records: [{ timestamp: '2026-08-14T10:00:01Z', message: 'second' }],
+          records: [
+            {
+              timestamp: '2026-08-14T10:00:02Z',
+              event: 'http.completed',
+              status_code: 200,
+              method: 'GET',
+              path: '/api/zalo-scan-plan',
+              message: 'HTTP request hoàn tất.',
+            },
+          ],
           cursor: 2,
+        }),
+      };
+    }
+    if (url === '/api/logs?after=2&limit=100') {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          records: [{ timestamp: '2026-08-14T10:00:03Z', message: 'second' }],
+          cursor: 3,
         }),
       };
     }
     throw new Error(`Unexpected request in incremental log harness: ${url}`);
   });
-  harness.context.document.getElementById('tab-logs').classList.add('active');
+  const tabDashboard = harness.context.document.getElementById('tab-dashboard');
+  const tabSpecs = harness.context.document.getElementById('tab-specs');
+  const tabLogs = harness.context.document.getElementById('tab-logs');
+  const btnDashboard = harness.context.document.getElementById('btn-dashboard');
+  const btnSpecs = harness.context.document.getElementById('btn-specs');
+  let logsScrolled = false;
+  tabLogs.scrollIntoView = () => {
+    logsScrolled = true;
+  };
+  harness.context.document.querySelectorAll = (selector) => {
+    if (selector === '.tab-content') return [tabDashboard, tabSpecs, tabLogs];
+    if (selector === '.tab-btn') return [btnDashboard, btnSpecs];
+    return [];
+  };
+  tabLogs.classList.add('active');
   vm.runInContext(scriptSourceByPath.get('/static/js/state.js'), harness.context);
   vm.runInContext(jobsSource, harness.context);
+  await flushAsyncWork();
+  await vm.runInContext('refreshLogs()', harness.context);
   await flushAsyncWork();
   await vm.runInContext('refreshLogs()', harness.context);
   await flushAsyncWork();
 
   assertFrontend(
     requests.includes('/api/logs?after=0&limit=100')
-      && requests.includes('/api/logs?after=1&limit=100'),
-    'Visible log tab must request only incremental records using a cursor',
+      && requests.includes('/api/logs?after=1&limit=100')
+      && requests.includes('/api/logs?after=2&limit=100'),
+    'Visible log tab must advance cursor even when an entire batch of HTTP 200 logs is filtered out',
   );
   const terminal = harness.elements.get('full-log-terminal');
-  assertFrontend(terminal.children.length === 2, 'Incremental logs must append instead of rebuilding duplicates');
+  const renderedLines = terminal.children.map(el => el.textContent || '');
+  assertFrontend(
+    terminal.children.length === 3
+      && renderedLines[0].includes('first')
+      && renderedLines[1].includes('HTTP 503 POST /run-scan')
+      && terminal.children[1].className.includes('log-error')
+      && renderedLines[2].includes('second')
+      && !renderedLines.some(line => line.includes('/api/groups') || line.includes('/api/zalo-scan-plan')),
+    'Incremental logs must filter out 2xx HTTP noise while keeping HTTP >= 400 errors with status and path',
+  );
 
-  harness.context.document.getElementById('tab-logs').classList.remove('active');
+  tabLogs.classList.remove('active');
   const requestCount = requests.length;
   await vm.runInContext('refreshLogs()', harness.context);
   assertFrontend(requests.length === requestCount, 'Hidden log tab must not poll the log endpoint');
+
+  vm.runInContext("switchTab('specs')", harness.context);
+  await flushAsyncWork();
+  assertFrontend(
+    tabSpecs.classList.contains('active')
+      && tabLogs.classList.contains('active')
+      && btnSpecs.classList.contains('active')
+      && harness.elements.get('header-title').innerText === 'Chẩn đoán & Nhật ký',
+    'Unified diagnostics tab must activate both #tab-specs and #tab-logs',
+  );
+  vm.runInContext("switchTab('logs')", harness.context);
+  await flushAsyncWork();
+  assertFrontend(
+    logsScrolled && tabSpecs.classList.contains('active') && tabLogs.classList.contains('active'),
+    "switchTab('logs') must activate unified diagnostics view and scroll #tab-logs into view",
+  );
 }
 
 async function checkRequiredWeekDashboardView() {
@@ -1597,8 +1728,55 @@ async function checkWeeklyHistoryAndCsvExport() {
   let pendingW40Resolver = null;
   let pendingW41ExportRejecter = null;
   let pendingW42LiveResolver = null;
-  const harness = createFrontendHarness(async url => {
+  let rejectNextEmailRequest = false;
+  let forceSmtpNotConfigured = false;
+  const emailPayloads = [];
+  const harness = createFrontendHarness(async (url, options = {}) => {
     requestedUrls.push(url);
+    if (url === '/api/reports/send-failed-csv-email') {
+      const parsedBody = options && options.body ? JSON.parse(options.body) : {};
+      emailPayloads.push(parsedBody);
+      if (rejectNextEmailRequest) {
+        rejectNextEmailRequest = false;
+        throw new Error('network dropped after POST /api/reports/send-failed-csv-email');
+      }
+      if (Number(parsedBody.week) === 42) {
+        return {
+          ok: false,
+          status: 409,
+          json: async () => ({
+            detail: {
+              code: 'NO_FAILED_CLASSES',
+              message: 'Không có lớp lỗi nào trong tuần đã chọn cần xuất CSV hoặc gửi mail.',
+            },
+          }),
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          ok: true,
+          delivery_status: forceSmtpNotConfigured ? 'SMTP_NOT_CONFIGURED' : 'SENT',
+          recipients: parsedBody.recipients || ['quangda@mindx.net.vn'],
+          accepted_recipients: parsedBody.recipients || ['quangda@mindx.net.vn'],
+          refused_recipients: [],
+          available_managers: ['quangda@mindx.net.vn', 'tuanpa@mindx.com.vn'],
+          failed_count: 1,
+          total_count: 2,
+          filename: `Bao_Cao_Lop_Loi_Tuan_W${String(parsedBody.week || 41).padStart(2, '0')}_${parsedBody.year || 2026}.csv`,
+          csv_text:
+            '\uFEFFMã lớp,Giáo viên,Buổi học,Ngày học,Trạng thái Zalo,Trạng thái LMS,Tình trạng đánh giá,Mô tả vấn đề (TE/TF/QC),Thời gian kiểm chứng\r\n' +
+            'VT-C4K-GI35,Nguyễn Văn A,1,10/10/2026,❌ Chưa tìm thấy báo cáo,❌ Chưa nhận xét (Trễ 3 ngày),⏳ Chưa nhận xét Zalo & LMS,[Zalo] Chưa gửi báo cáo nhận xét trên nhóm Zalo,2026-10-11T14:02:00Z\r\n',
+          html_table: '<table><tr><td>VT-C4K-GI35</td></tr></table>',
+          text_table: '┌──────────┐\n│ VT-C4K   │\n└──────────┘',
+          text_body: 'BẢNG ĐẦY ĐỦ 10 LỚP: VT-C4K-GI35',
+          gmail_compose_url: 'https://mail.google.com/mail/?view=cm&fs=1',
+          gmail_body_truncated: true,
+          message: 'Đã xuất CSV 1 lớp lỗi và gửi email tự động thành công tới quangda@mindx.net.vn.',
+        }),
+      };
+    }
     if (url === '/api/jobs/latest') {
       return { ok: true, status: 200, json: async () => null };
     }
@@ -1715,16 +1893,99 @@ async function checkWeeklyHistoryAndCsvExport() {
     'Selective rescan must block when historical week view is active',
   );
 
-  // 3. Export CSV produces UTF-8 with BOM, 7 management columns, formula sanitization, and no raw chat leak
+  // 3. Export CSV produces UTF-8 with BOM, 9 management columns, formula sanitization, and no raw chat leak
   const csvOutput = await vm.runInContext('exportWeeklySummaryCsv()', harness.context);
   assertFrontend(
-    csvOutput.startsWith('\uFEFFMã lớp,Giáo viên,Buổi học,Ngày học,Trạng thái Zalo,Trạng thái LMS,Thời gian kiểm chứng\r\n'),
-    'Exported CSV must start with UTF-8 BOM and exact 7 management headers',
+    csvOutput.startsWith(
+      '\uFEFFMã lớp,Giáo viên,Buổi học,Ngày học,Trạng thái Zalo,Trạng thái LMS,Tình trạng đánh giá,Mô tả vấn đề (TE/TF/QC),Thời gian kiểm chứng\r\n',
+    ),
+    'Exported CSV must start with UTF-8 BOM and exact 9 management headers',
   );
   assertFrontend(
     csvOutput.includes("VT-JSB16,'=Trần Thị B,4,11/10/2026") &&
       !csvOutput.includes('TIN_NHAN_RIENG_TU_KHONG_XUAT'),
     'Exported CSV must sanitize formula prefixes and exclude raw chat fields',
+  );
+  assertFrontend(
+    vm.runInContext(
+      `isFailedWeeklySummaryRow({
+        class_code: 'VT-C4K-PTB16',
+        zalo_status: '✅ Đã nộp – Có minh chứng',
+        lms_status: '✅ Đã nộp LMS',
+        evaluation_status: '⚠️ Đã nộp nhận xét nhưng còn lỗi chất lượng nội dung',
+        issue_description: '[LMS] Chưa ghi nội dung bài học'
+      })`,
+      harness.context,
+    ) === true,
+    'isFailedWeeklySummaryRow must flag rows with quality issue_description even when Zalo and LMS are submitted',
+  );
+  const clipboardCopied = await vm.runInContext(
+    `copyFailedEmailReportToClipboard({
+      html_table: '<table><tr><td>VT-C4K-PTB16</td></tr></table>',
+      text_table: '┌──────────────┐\\n│ VT-C4K-PTB16 │\\n└──────────────┘'
+    })`,
+    harness.context,
+  );
+  assertFrontend(
+    clipboardCopied === true && harness.clipboardWrites.at(-1).includes('VT-C4K-PTB16'),
+    'copyFailedEmailReportToClipboard must copy email report table to clipboard',
+  );
+
+  // 3b. exportAndEmailFailedClassesCsv exports ONLY failed classes (VT-C4K-GI35) and emails quangda@mindx.net.vn
+  const failedCsvOutput = await vm.runInContext('exportAndEmailFailedClassesCsv()', harness.context);
+  assertFrontend(
+    failedCsvOutput.includes('VT-C4K-GI35,Nguyễn Văn A,1,10/10/2026') &&
+      !failedCsvOutput.includes('VT-JSB16'),
+    'exportAndEmailFailedClassesCsv must include only failed classes and exclude passing classes',
+  );
+  assertFrontend(
+    emailPayloads.length === 1 &&
+      emailPayloads[0].week === 41 &&
+      emailPayloads[0].year === 2026 &&
+      harness.alerts.at(-1).includes('quangda@mindx.net.vn'),
+    'exportAndEmailFailedClassesCsv must dispatch /api/reports/send-failed-csv-email and notify owner recipient',
+  );
+
+  // 3c. exportAndEmailFailedClassesCsv on a week with 0 failed classes (W42) must alert and skip download
+  harness.elements.get('history-week-select').value = '2026-W42';
+  const noFailedCsv = await vm.runInContext('exportAndEmailFailedClassesCsv()', harness.context);
+  assertFrontend(
+    noFailedCsv === '' &&
+      emailPayloads.length === 2 &&
+      emailPayloads[1].week === 42 &&
+      harness.alerts.at(-1).includes('Không có lớp lỗi nào trong tuần đã chọn'),
+    'exportAndEmailFailedClassesCsv must alert and skip download when server reports NO_FAILED_CLASSES',
+  );
+  harness.elements.get('history-week-select').value = '2026-W41';
+
+  // 3d. Dropped response during sendEmail must NOT synthesize local CSV from stale client snapshot or retry
+  rejectNextEmailRequest = true;
+  const droppedEmailCsv = await vm.runInContext('exportAndEmailFailedClassesCsv()', harness.context);
+  assertFrontend(
+    droppedEmailCsv === '' &&
+      emailPayloads.length === 3 &&
+      harness.alerts.at(-1).includes('Chưa xác định trạng thái gửi email'),
+    'Dropped response during exportAndEmailFailedClassesCsv must alert unknown delivery state and never download stale local CSV',
+  );
+
+  // 3e. When SMTP_NOT_CONFIGURED and clipboard copy fails, warn operator and offer window.prompt fallback with full report text
+  forceSmtpNotConfigured = true;
+  const origWriteText = harness.context.navigator.clipboard.writeText;
+  let promptedDefaultText = '';
+  harness.context.navigator.clipboard.writeText = async () => {
+    throw new Error('Clipboard permission denied');
+  };
+  harness.context.prompt = (_msg, defaultText) => {
+    promptedDefaultText = String(defaultText || '');
+    return defaultText;
+  };
+  await vm.runInContext('exportAndEmailFailedClassesCsv()', harness.context);
+  harness.context.navigator.clipboard.writeText = origWriteText;
+  forceSmtpNotConfigured = false;
+  assertFrontend(
+    harness.alerts.at(-1).includes('Không thể tự động sao chép bảng báo cáo vào Clipboard') &&
+      promptedDefaultText.includes('BẢNG ĐẦY ĐỦ 10 LỚP: VT-C4K-GI35'),
+    'Failed clipboard copy on SMTP_NOT_CONFIGURED must warn operator and surface full report text via window.prompt',
   );
 
   // 4. Exporting an empty week (W40) while viewing W41 must NOT leak W41 rows into W40 CSV
@@ -1805,18 +2066,32 @@ async function checkWeeklyHistoryAndCsvExport() {
     'Weekly-summary rows without matching snapshot_id must be blocked from selective rescan baseline',
   );
 
-  // 8. Row-level null/mismatched snapshot_id must block rememberSelectiveScanBaseline even if top-level snapshot matches
+  // 8. Row-level null/mismatched snapshot_id must block rememberSelectiveScanBaseline even if top-level snapshot matches,
+  // and renderZaloResults must render LMS, Đánh giá, Vấn đề, and Giải trình GV inside status cell (children[3]).
   vm.runInContext(
     `renderZaloResults([
       {
         group: 'VT-LIVE-99',
         person: 'GV 99',
         status: '❌ Chưa tìm thấy báo cáo',
+        lms_status: '✅ Đã nộp LMS',
+        evaluation_status: '⏳ Đã hoàn tất nhận xét LMS, chưa nhận xét Zalo',
+        issue_description: '[LMS] Chưa ghi nội dung bài học; [Zalo] Chưa gửi báo cáo nhận xét trên nhóm Zalo',
+        instructor_note: 'Chưa nội dung bài học',
         snapshot_id: null,
         scan_target: { week: 42, year: 2026, class_code: 'VT-LIVE-99', lesson: '1', class_date: '15/10/2026', class_date_iso: '2026-10-15' }
       }
     ], true, { snapshotId: 99, periodKey: '2026-W42' })`,
     harness.context,
+  );
+  const liveRowStatusCell = harness.elements.get('results-table').children[0].children[3];
+  const liveRowStatusTexts = liveRowStatusCell.children.map(ch => ch.textContent || ch.innerText || '').join(' | ');
+  assertFrontend(
+    liveRowStatusTexts.includes('LMS: ✅ Đã nộp LMS') &&
+      liveRowStatusTexts.includes('Đánh giá: ⏳ Đã hoàn tất nhận xét LMS, chưa nhận xét Zalo') &&
+      liveRowStatusTexts.includes('Vấn đề: [LMS] Chưa ghi nội dung bài học') &&
+      liveRowStatusTexts.includes('Giải trình GV: Chưa nội dung bài học'),
+    'Dashboard status cell must display LMS status, evaluation_status, issue_description, and instructor_note',
   );
   assertFrontend(
     vm.runInContext('rememberSelectiveScanBaseline()', harness.context) === false,

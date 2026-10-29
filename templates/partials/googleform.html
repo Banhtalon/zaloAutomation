@@ -1,147 +1,196 @@
             <!-- TAB 2: GOOGLE FORM AUTOSUBMIT -->
-            <div id="tab-googleform" class="tab-content flex-1 flex-col space-y-6">
-                <!-- GRID 2x2 -->
-                <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 flex-1 min-h-[500px]">
-                    
-                    <!-- TOP LEFT: UPLOAD -->
-                    <div class="glass-panel p-6 flex flex-col relative overflow-hidden group">
-                        <div class="mb-4 pb-4 border-b border-glassborder">
-                            <label for="lms-student-class-codes" class="text-xs font-bold text-purple-300 uppercase tracking-wide mb-2 block">
-                                <i class="fa-solid fa-graduation-cap mr-1.5"></i>Lấy nhanh học viên từ LMS theo Mã lớp
-                            </label>
-                            <div class="flex flex-col sm:flex-row gap-2">
-                                <input
-                                    type="text"
-                                    id="lms-student-class-codes"
-                                    placeholder="Nhập mã lớp (VD: VT-C4K-GA41, VT-C4K-GI35)"
-                                    class="flex-1 bg-black/30 border border-glassborder rounded-lg px-3 py-2 text-sm text-white focus:border-purple-400 outline-none shadow-inner font-mono"
-                                    onkeydown="if(event.key === 'Enter') fetchLmsStudentsForGoogleForm()"
-                                >
-                                <button
-                                    type="button"
-                                    id="btnFetchLmsStudents"
-                                    onclick="fetchLmsStudentsForGoogleForm()"
-                                    class="px-4 py-2 bg-purple-500/20 hover:bg-purple-500/30 border border-purple-400/40 rounded-lg text-xs font-bold text-purple-200 transition-all whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed"
-                                >
-                                    <i class="fa-solid fa-cloud-bolt mr-1.5"></i>Lấy từ LMS
-                                </button>
+            <div id="tab-googleform" class="tab-content flex-1 flex-col space-y-4">
+                <!-- COLLAPSIBLE Q&A MAPPING BAR (CONFIGURE ONCE) -->
+                <details id="googleform-mapping-panel" class="glass-panel px-5 py-3.5 shrink-0 group">
+                    <summary class="flex flex-wrap items-center justify-between gap-2 cursor-pointer list-none select-none">
+                        <div class="flex items-center gap-3">
+                            <span class="w-8 h-8 rounded-lg bg-indigo-600 text-white border-2 border-indigo-800 border-b-4 flex items-center justify-center text-xs shadow-sm shrink-0">
+                                <i class="fa-solid fa-list-check" aria-hidden="true"></i>
+                            </span>
+                            <div>
+                                <h3 class="text-sm font-extrabold text-slate-900 tracking-wide inline">Cấu hình Mẫu Form (Q&amp;A Mapping)</h3>
+                                <span id="mapping-count-badge" class="ml-2 rounded-md bg-slate-900 text-white border border-slate-950 px-2.5 py-0.5 text-[11px] font-bold shadow-sm">Chưa xác minh cấu hình</span>
                             </div>
                         </div>
+                        <span class="preflight-refresh text-xs font-extrabold text-slate-800 flex items-center gap-1.5">
+                            <span>Mở / Đóng cấu hình câu hỏi</span>
+                            <i class="fa-solid fa-chevron-down text-[10px] transition-transform group-open:rotate-180 text-blue-600" aria-hidden="true"></i>
+                        </span>
+                    </summary>
 
-                        <h3 class="text-sm font-bold text-white mb-4 tracking-wide text-balance">Kéo & Thả / Dán Ảnh chụp màn hình (Ctrl+V)</h3>
-                        
-                        <div id="paste-area" aria-label="Dán hoặc chọn ảnh chụp màn hình" class="paste-zone flex-1 border-2 border-dashed border-gray-500/50 rounded-xl flex flex-col items-center justify-center text-gray-400 bg-black/20 transition-all relative outline-none cursor-pointer overflow-hidden shadow-inner focus-visible:ring-2 focus-visible:ring-blue-500" tabindex="0">
-                            <div id="upload-placeholder" class="flex flex-col items-center pointer-events-none transition-opacity duration-200">
-                                <i class="fa-solid fa-cloud-arrow-down text-5xl mb-4 text-gray-500"></i>
-                                <p class="text-sm font-medium tracking-wide text-pretty">Thả ảnh chụp màn hình vào đây hoặc bấm để chọn</p>
+                    <div class="mt-4 pt-3.5 border-t-2 border-slate-300 space-y-3">
+                        <div class="well-inset p-3 flex flex-wrap md:flex-nowrap items-end gap-3">
+                            <div class="flex-1 min-w-[200px]">
+                                <label for="map-question" class="text-[10px] font-extrabold text-slate-700 uppercase mb-1 block">Tiêu đề câu hỏi...</label>
+                                <input type="text" id="map-question" placeholder="VD: Cơ sở trường MindX mà em đang học" class="w-full input-3d rounded-lg px-3 py-1.5 text-xs font-semibold text-slate-900 outline-none">
                             </div>
-                            <img id="image-preview" class="absolute inset-0 w-full h-full object-contain bg-black/40 hidden opacity-0 transition-opacity duration-200" src="" alt="Xem trước ảnh đã chọn">
-                            <div id="preview-overlay" class="absolute inset-0 bg-black/60 hidden flex-col items-center justify-center opacity-0 hover:opacity-100 transition-opacity duration-200">
-                                <i class="fa-solid fa-pen-to-square text-2xl text-white mb-2"></i>
-                                <span class="text-xs text-white font-medium">Click/Paste lại để đổi ảnh</span>
-                            </div>
-                            <input type="file" id="file-upload" class="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10" accept="image/png,image/jpeg,image/webp" onchange="handleFileUpload(event)">
-                        </div>
-
-                        <div class="mt-4 flex justify-center">
-                            <button id="btnRunOcr" onclick="runOCR()" disabled class="px-6 py-2 bg-white/5 hover:bg-white/10 border border-glassborder rounded-full text-sm font-medium text-gray-300 transition-all shadow-sm disabled:opacity-50 disabled:cursor-not-allowed">
-                                Quét AI (Gemini Vision)
-                            </button>
-                        </div>
-                    </div>
-                    
-                    <!-- TOP RIGHT: OCR RESULTS -->
-                    <div class="flex flex-col gap-4">
-                        <div class="glass-panel p-6 flex-1 flex flex-col relative overflow-hidden">
-                            <h3 class="text-sm font-bold text-white mb-4 tracking-wide text-balance">Kết quả OCR (Học viên / Mã lớp)</h3>
-                            <div class="flex-1 bg-black/20 border border-glassborder rounded-xl overflow-y-auto shadow-inner">
-                                <table class="w-full text-sm text-left text-gray-300 tabular-nums">
-                                    <thead class="text-[10px] text-gray-400 uppercase bg-black/40 border-b border-glassborder sticky top-0 z-10">
-                                        <tr>
-                                            <th class="px-5 py-3">Tên Học viên</th>
-                                            <th class="px-5 py-3">Mã Lớp</th>
-                                            <th class="px-5 py-3 text-center w-12"></th>
-                                        </tr>
-                                    </thead>
-                                    <tbody id="ocr-results-table" class="divide-y divide-glassborder bg-transparent">
-                                        <tr><td colspan="3" class="px-5 py-8 text-center text-gray-500 border-none">Trống</td></tr>
-                                    </tbody>
-                                </table>
-                            </div>
-                        </div>
-                        <button id="btnSubmitGoogleForm" onclick="submitGoogleForm()" disabled class="w-full py-4 bg-gradient-to-r from-blue-500 to-indigo-500 text-white rounded-xl text-lg font-bold hover:from-blue-400 hover:to-indigo-400 shadow-[0_0_20px_rgba(59,130,246,0.5)] active:scale-[0.98] transition-all border border-blue-400/50 disabled:opacity-50 disabled:cursor-not-allowed">
-                            Bắt đầu Nộp Form
-                        </button>
-                    </div>
-
-                    <!-- BOTTOM LEFT: MAPPING -->
-                    <div class="glass-panel p-6 flex flex-col">
-                        <h3 class="text-sm font-bold text-white tracking-wide mb-4 text-balance">Cấu hình Mẫu Form (Q&A Mapping)</h3>
-                        
-                        <div class="flex flex-wrap md:flex-nowrap gap-3 mb-4">
-                            <div class="flex-1">
-                                <label class="text-[10px] text-gray-400 uppercase mb-1 block">Tiêu đề câu hỏi...</label>
-                                <input type="text" id="map-question" class="w-full bg-black/30 border border-glassborder rounded-lg px-3 py-2 text-sm text-white focus:border-blue-400 outline-none shadow-inner">
-                            </div>
-                            <div class="w-28">
-                                <label class="text-[10px] text-gray-400 uppercase mb-1 block">Loại</label>
-                                <select id="map-type" class="w-full bg-black/30 border border-glassborder rounded-lg px-2 py-2 text-sm text-gray-300 outline-none">
+                            <div class="w-40">
+                                <label for="map-type" class="text-[10px] font-extrabold text-slate-700 uppercase mb-1 block">Loại</label>
+                                <select id="map-type" class="w-full input-3d rounded-lg px-2.5 py-1.5 text-xs font-bold text-slate-800 outline-none">
                                     <option value="text">Văn bản</option>
                                     <option value="radio">Trắc nghiệm</option>
                                     <option value="select">Hộp chọn (Dropdown)</option>
                                 </select>
                             </div>
-                            <div class="flex-1">
-                                <label class="text-[10px] text-gray-400 uppercase mb-1 block">Giá trị cần điền...</label>
-                                <input type="text" id="map-value" class="w-full bg-black/30 border border-glassborder rounded-lg px-3 py-2 text-sm text-white focus:border-blue-400 outline-none shadow-inner" onkeydown="if(event.key === 'Enter') addMapping()">
+                            <div class="flex-1 min-w-[200px]">
+                                <label for="map-value" class="text-[10px] font-extrabold text-slate-700 uppercase mb-1 block">Giá trị cần điền...</label>
+                                <input type="text" id="map-value" placeholder="VD: {student_name} hoặc Hoàn thành tốt" class="w-full input-3d rounded-lg px-3 py-1.5 text-xs font-semibold text-slate-900 outline-none" onkeydown="if(event.key === 'Enter') addMapping()">
                             </div>
+                            <button type="button" onclick="addMapping()" class="action-button action-button--scan px-4 py-1.5 text-xs font-extrabold whitespace-nowrap">
+                                <i class="fa-solid fa-plus" aria-hidden="true"></i>Thêm quy tắc
+                            </button>
                         </div>
-                        
-                        <div class="flex-1 bg-black/20 border border-glassborder rounded-xl overflow-y-auto shadow-inner">
-                            <table class="w-full text-sm text-left text-gray-300 tabular-nums">
-                                <thead class="text-[10px] text-gray-400 uppercase bg-black/40 border-b border-glassborder sticky top-0 z-10">
+
+                        <div class="max-h-44 bg-white border-2 border-slate-400 rounded-xl overflow-y-auto shadow-sm">
+                            <table class="w-full text-xs text-left text-slate-800 tabular-nums">
+                                <thead class="text-[11px] font-extrabold text-slate-800 uppercase bg-slate-200/90 border-b-2 border-slate-400 sticky top-0 z-10">
                                     <tr>
-                                        <th class="px-4 py-3">Câu hỏi phụ</th>
-                                        <th class="px-4 py-3">Loại</th>
-                                        <th class="px-4 py-3">Giá trị điền</th>
-                                        <th class="px-4 py-3 text-center"></th>
+                                        <th class="px-4 py-2.5">Câu hỏi phụ</th>
+                                        <th class="px-4 py-2.5">Loại</th>
+                                        <th class="px-4 py-2.5">Giá trị điền</th>
+                                        <th class="px-4 py-2.5 text-center w-16">Thao tác</th>
                                     </tr>
                                 </thead>
-                                <tbody id="mapping-table" class="divide-y divide-glassborder bg-transparent">
-                                    <tr><td colspan="4" class="px-4 py-6 text-center text-gray-500 border-none">Đang tải...</td></tr>
+                                <tbody id="mapping-table" class="divide-y divide-slate-300 bg-white">
+                                    <tr><td colspan="4" class="px-4 py-4 text-center text-slate-500 font-semibold border-none">Đang tải...</td></tr>
                                 </tbody>
                             </table>
                         </div>
                     </div>
-                    
-                    <!-- BOTTOM RIGHT: HISTORY -->
-                    <div class="glass-panel p-6 flex flex-col relative">
-                        <div class="flex items-center justify-between mb-4">
-                            <h3 class="text-sm font-bold text-white tracking-wide text-balance">Lịch sử Nộp Form</h3>
+                </details>
+
+                <!-- 3-STEP OPERATIONAL PIPELINE -->
+                <div class="grid grid-cols-1 lg:grid-cols-12 gap-5 flex-1 min-h-[460px]">
+
+                    <!-- STEP 1 (4 COLS): STUDENT SOURCE (LMS PRIMARY + OCR SECONDARY) -->
+                    <div class="lg:col-span-4 glass-panel flex flex-col relative overflow-hidden">
+                        <div class="bg-slate-900 text-white px-5 py-3 border-b-2 border-slate-950 flex items-center justify-between shrink-0">
                             <div class="flex items-center gap-2">
-                                <button type="button" aria-label="Xóa toàn bộ lịch sử nộp Form" onclick="clearGoogleFormHistory()" title="Xóa toàn bộ lịch sử" class="text-xs text-rose-400 hover:text-rose-300 hover:bg-rose-500/10 px-2.5 py-1 rounded transition border border-rose-500/20">
-                                    <i class="fa-solid fa-trash-can mr-1"></i>Xóa lịch sử
+                                <span class="step-pill step-pill--light">1</span>
+                                <span class="text-xs font-extrabold uppercase tracking-wider">Nguồn Học viên (LMS / AI)</span>
+                            </div>
+                            <span class="rounded bg-purple-500/25 border border-purple-400/50 px-2 py-0.5 text-[10px] font-extrabold text-purple-200 uppercase">Bước khởi tạo</span>
+                        </div>
+
+                        <div class="p-4 flex-1 flex flex-col space-y-4">
+                            <div class="rounded-xl border-2 border-purple-400 border-l-8 border-l-purple-600 bg-purple-50/90 p-3.5 space-y-2.5 shadow-sm">
+                                <div class="flex items-center justify-between">
+                                    <label for="lms-student-class-codes" class="text-xs font-extrabold text-purple-950 uppercase tracking-wide flex items-center">
+                                        <i class="fa-solid fa-graduation-cap mr-1.5 text-purple-700"></i>Lấy học viên từ LMS
+                                    </label>
+                                    <span class="rounded-md bg-purple-700 text-white px-2 py-0.5 text-[10px] font-extrabold uppercase shadow-sm">Khuyên dùng</span>
+                                </div>
+                                <p class="text-[11px] font-semibold text-slate-700 leading-relaxed">Nhập 1 hoặc nhiều mã lớp cách nhau bởi dấu phẩy để lấy danh sách học viên trực tiếp từ LMS.</p>
+                                <div class="flex flex-col sm:flex-row gap-2">
+                                    <input
+                                        type="text"
+                                        id="lms-student-class-codes"
+                                        placeholder="VD: VT-C4K-GA41, VT-JSB16"
+                                        class="flex-1 input-3d rounded-lg px-3 py-2 text-xs font-bold text-slate-900 outline-none font-mono"
+                                        onkeydown="if(event.key === 'Enter') fetchLmsStudentsForGoogleForm()"
+                                    >
+                                    <button
+                                        type="button"
+                                        id="btnFetchLmsStudents"
+                                        onclick="fetchLmsStudentsForGoogleForm()"
+                                        class="action-button action-button--purple px-3.5 py-2 text-xs font-extrabold whitespace-nowrap"
+                                    >
+                                        <i class="fa-solid fa-cloud-bolt"></i>Lấy từ LMS
+                                    </button>
+                                </div>
+                            </div>
+
+                            <div class="flex-1 flex flex-col pt-1">
+                                <div class="flex items-center justify-between mb-2">
+                                    <h3 class="text-xs font-extrabold text-slate-800 uppercase tracking-wide">Hoặc Quét ảnh chụp (Ctrl+V)</h3>
+                                    <button id="btnRunOcr" onclick="runOCR()" disabled class="action-button action-button--dark px-3 py-1.5 min-h-[34px] text-xs font-extrabold">
+                                        <i class="fa-solid fa-wand-magic-sparkles text-amber-400"></i>Quét AI (Vision)
+                                    </button>
+                                </div>
+
+                                <div id="paste-area" aria-label="Dán hoặc chọn ảnh chụp màn hình" class="paste-zone flex-1 min-h-[170px] border-2 border-dashed border-slate-400 rounded-xl flex flex-col items-center justify-center text-slate-700 bg-slate-100/90 transition-all relative outline-none cursor-pointer overflow-hidden focus-visible:ring-2 focus-visible:ring-blue-600 shadow-inner" tabindex="0">
+                                    <div id="upload-placeholder" class="flex flex-col items-center px-4 text-center pointer-events-none transition-opacity duration-200">
+                                        <div class="w-11 h-11 rounded-xl bg-white border-2 border-slate-300 border-b-4 flex items-center justify-center mb-2.5 shadow-sm">
+                                            <i class="fa-solid fa-cloud-arrow-up text-xl text-blue-600"></i>
+                                        </div>
+                                        <p class="text-xs font-bold text-slate-700 text-pretty">Thả ảnh chụp danh sách lớp vào đây, dán (Ctrl+V) hoặc bấm để chọn</p>
+                                    </div>
+                                    <img id="image-preview" class="absolute inset-0 w-full h-full object-contain bg-slate-900/10 hidden opacity-0 transition-opacity duration-200" src="" alt="Xem trước ảnh đã chọn">
+                                    <div id="preview-overlay" class="absolute inset-0 bg-slate-900/70 hidden flex-col items-center justify-center opacity-0 hover:opacity-100 transition-opacity duration-200">
+                                        <i class="fa-solid fa-pen-to-square text-xl text-white mb-1.5"></i>
+                                        <span class="text-xs text-white font-bold">Click/Paste lại để đổi ảnh</span>
+                                    </div>
+                                    <input type="file" id="file-upload" class="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10" accept="image/png,image/jpeg,image/webp" onchange="handleFileUpload(event)">
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- STEP 2 (4 COLS): STUDENT ROSTER & SUBMIT CTA -->
+                    <div class="lg:col-span-4 glass-panel flex flex-col relative overflow-hidden">
+                        <div class="bg-slate-900 text-white px-5 py-3 border-b-2 border-slate-950 flex flex-wrap items-center justify-between gap-2 shrink-0">
+                            <div class="flex items-center gap-2">
+                                <span class="step-pill step-pill--light">2</span>
+                                <h3 class="text-xs font-extrabold uppercase tracking-wider text-white">Danh sách Học viên chờ nộp</h3>
+                            </div>
+                            <button id="btnSubmitGoogleForm" onclick="submitGoogleForm()" disabled class="action-button action-button--lms px-3.5 py-1.5 min-h-[34px] text-xs font-extrabold rounded-lg">
+                                <i class="fa-solid fa-paper-plane" aria-hidden="true"></i> Bắt đầu Nộp Form
+                            </button>
+                        </div>
+
+                        <div class="p-4 flex-1 flex flex-col space-y-2.5">
+                            <p class="text-[11px] font-bold text-slate-600">Kiểm tra hoặc chỉnh sửa tên/mã lớp trước khi gửi tự động lên Google Form.</p>
+                            <div class="flex-1 bg-white border-2 border-slate-400 rounded-xl overflow-y-auto shadow-sm">
+                                <table class="w-full text-xs text-left text-slate-800 tabular-nums">
+                                    <thead class="text-[11px] font-extrabold text-slate-800 uppercase bg-slate-200/90 border-b-2 border-slate-400 sticky top-0 z-10">
+                                        <tr>
+                                            <th class="px-4 py-2.5">Tên Học viên</th>
+                                            <th class="px-4 py-2.5">Mã Lớp</th>
+                                            <th class="px-3 py-2.5 text-center w-10"></th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="ocr-results-table" class="divide-y divide-slate-300 bg-white">
+                                        <tr><td colspan="3" class="px-5 py-8 text-center text-slate-500 font-semibold border-none">Trống — Hãy lấy từ LMS hoặc quét ảnh ở Bước 1</td></tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- STEP 3 (4 COLS): SUBMISSION HISTORY -->
+                    <div class="lg:col-span-4 glass-panel flex flex-col relative overflow-hidden">
+                        <div class="bg-slate-900 text-white px-5 py-3 border-b-2 border-slate-950 flex flex-wrap items-center justify-between gap-2 shrink-0">
+                            <div class="flex items-center gap-2">
+                                <span class="step-pill step-pill--light">3</span>
+                                <h3 class="text-xs font-extrabold uppercase tracking-wider text-white">Lịch sử Nộp Form</h3>
+                            </div>
+                            <div class="flex items-center gap-1.5">
+                                <button type="button" aria-label="Xóa toàn bộ lịch sử nộp Form" onclick="clearGoogleFormHistory()" title="Xóa toàn bộ lịch sử" class="action-button action-button--danger px-2.5 py-1 min-h-[30px] text-[11px] font-extrabold rounded-lg">
+                                    <i class="fa-solid fa-trash-can"></i>Xóa lịch sử
                                 </button>
-                                <button type="button" aria-label="Làm mới lịch sử nộp Form" onclick="fetchGoogleFormHistory()" class="text-gray-400 hover:text-white p-1">
-                                    <i class="fa-solid fa-rotate-right"></i>
+                                <button type="button" aria-label="Làm mới lịch sử nộp Form" onclick="fetchGoogleFormHistory()" class="preflight-refresh px-2.5 py-1 min-h-[30px]" title="Làm mới lịch sử">
+                                    <i class="fa-solid fa-rotate-right text-blue-600"></i>
                                 </button>
                             </div>
                         </div>
-                        
-                        <div class="flex-1 bg-black/20 border border-glassborder rounded-xl overflow-y-auto shadow-inner">
-                            <table class="w-full text-sm text-left text-gray-300 tabular-nums">
-                                <thead class="text-[10px] text-gray-400 uppercase bg-black/40 border-b border-glassborder sticky top-0 z-10">
-                                    <tr>
-                                        <th class="px-4 py-3">Thời gian</th>
-                                        <th class="px-4 py-3">Học viên</th>
-                                        <th class="px-4 py-3">Trạng thái</th>
-                                        <th class="px-4 py-3 text-center">Bằng chứng</th>
-                                    </tr>
-                                </thead>
-                                <tbody id="form-history-table" class="divide-y divide-glassborder bg-transparent">
-                                    <tr><td colspan="4" class="px-4 py-6 text-center text-gray-500 border-none">Đang tải lịch sử...</td></tr>
-                                </tbody>
-                            </table>
+
+                        <div class="p-4 flex-1 flex flex-col space-y-2.5">
+                            <p class="text-[11px] font-bold text-slate-600">Trạng thái nộp và ảnh chụp bằng chứng xác thực từng học viên.</p>
+                            <div class="flex-1 bg-white border-2 border-slate-400 rounded-xl overflow-y-auto shadow-sm">
+                                <table class="w-full text-xs text-left text-slate-800 tabular-nums">
+                                    <thead class="text-[11px] font-extrabold text-slate-800 uppercase bg-slate-200/90 border-b-2 border-slate-400 sticky top-0 z-10">
+                                        <tr>
+                                            <th class="px-3.5 py-2.5">Thời gian</th>
+                                            <th class="px-3.5 py-2.5">Học viên</th>
+                                            <th class="px-3.5 py-2.5">Trạng thái</th>
+                                            <th class="px-3.5 py-2.5 text-center">Bằng chứng</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="form-history-table" class="divide-y divide-slate-300 bg-white">
+                                        <tr><td colspan="4" class="px-4 py-8 text-center text-slate-500 font-semibold border-none">Đang tải lịch sử...</td></tr>
+                                    </tbody>
+                                </table>
+                            </div>
                         </div>
                     </div>
 

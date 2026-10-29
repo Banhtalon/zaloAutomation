@@ -1,77 +1,91 @@
     <!-- LMS MODAL -->
-    <div id="lmsModal" class="safe-area-modal fixed inset-0 z-50 hidden flex items-center justify-center bg-black/60 backdrop-blur-sm transition-opacity" role="dialog" aria-modal="true" aria-labelledby="lmsModalTitle">
-        <div class="modal-card bg-gray-900 border border-gray-700 rounded-2xl p-6 w-full max-w-lg shadow-2xl mx-4 transform scale-95 transition-transform duration-200 relative">
-            <button type="button" aria-label="Đóng cửa sổ LMS" onclick="closeLmsModal()" class="absolute top-4 right-4 text-gray-400 hover:text-white">
-                <i class="fa-solid fa-xmark text-xl"></i>
-            </button>
-            <h3 id="lmsModalTitle" class="text-xl font-bold text-white mb-2 flex items-center text-balance">
-                <i class="fa-solid fa-robot text-purple-400 mr-2"></i> Tự động Tick LMS
-            </h3>
-            <p class="text-gray-400 text-sm mb-6 text-pretty">Worker sẽ tự động quét trang <span class="text-purple-300 font-semibold">LMS MindX</span>, xác định những lớp có hiện buổi tại cột <span class="text-rose-400 font-bold">Buổi học gần nhất quá hạn nhận xét</span> là chưa nhận xét, sau đó đối chiếu với bảng <span class="text-emerald-300 font-semibold">BCNB</span> để lập kế hoạch xem trước.</p>
-            
-            <!-- Step 1: Direct LMS Web Scan -->
-            <div id="lmsUploadStep" class="space-y-3">
-                <div class="rounded-xl border border-purple-500/25 bg-purple-500/10 p-4 text-xs text-gray-300 space-y-2">
-                    <div class="flex items-start gap-2.5">
-                        <i class="fa-solid fa-magnifying-glass-chart text-purple-400 mt-0.5"></i>
-                        <span><strong>Bước 1 — Quét LMS:</strong> Kiểm tra toàn bộ các trang <code class="text-purple-200">admin/class-sessions</code> và lọc các lớp có số buổi tại cột <em>"Buổi học gần nhất quá hạn nhận xét"</em>.</span>
-                    </div>
-                    <div class="flex items-start gap-2.5">
-                        <i class="fa-solid fa-table-list text-emerald-400 mt-0.5"></i>
-                        <span><strong>Bước 2 — Đối chiếu BCNB:</strong> Loại trừ các lớp quá hạn nhận xét trên LMS và lập danh sách lớp đủ điều kiện tick trong tuần kiểm tra BCNB.</span>
-                    </div>
-                    <div class="flex items-start gap-2.5">
-                        <i class="fa-solid fa-key text-amber-400 mt-0.5"></i>
-                        <span><strong>Tự động đăng nhập:</strong> Tự động đăng nhập lại LMS và BCNB nếu phiên bị thoát theo tài khoản trong <code class="text-amber-200">.env</code>.</span>
+    <div id="lmsModal" class="safe-area-modal fixed inset-0 z-50 hidden flex items-center justify-center bg-slate-950/60 backdrop-blur-sm transition-opacity" role="dialog" aria-modal="true" aria-labelledby="lmsModalTitle">
+        <div class="modal-card glass-panel w-full max-w-xl mx-4 transform scale-95 transition-transform duration-200 relative overflow-hidden">
+            <!-- Dark Navy Header Bar -->
+            <div class="bg-slate-900 text-white px-6 py-4 border-b-2 border-slate-950 flex items-center justify-between">
+                <div class="flex items-center gap-3">
+                    <span class="w-9 h-9 rounded-xl bg-emerald-600 text-white border-2 border-emerald-400 border-b-4 flex items-center justify-center text-base shadow-sm shrink-0">
+                        <i class="fa-solid fa-check-double" aria-hidden="true"></i>
+                    </span>
+                    <div>
+                        <p class="text-[10px] font-extrabold uppercase tracking-widest text-emerald-300">Bước 3 · Đồng bộ LMS &amp; BCNB</p>
+                        <h3 id="lmsModalTitle" class="text-base font-extrabold text-white flex items-center text-balance">
+                            Tự động Tick LMS
+                        </h3>
                     </div>
                 </div>
-                <div id="lmsDropzone" class="hidden">
-                    <input type="file" id="lmsFileInput" class="hidden" accept="image/png,image/jpeg,image/webp" onclick="event.stopPropagation()" onchange="if(this.files && this.files.length > 0) handleLmsFile(this.files[0])">
-                    <div id="lmsDropzoneText" class="pointer-events-none"></div>
-                    <img id="lmsImagePreview" class="hidden" src="">
-                </div>
+                <button type="button" aria-label="Đóng cửa sổ LMS" onclick="closeLmsModal()" class="w-8 h-8 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 flex items-center justify-center transition-colors">
+                    <i class="fa-solid fa-xmark text-base"></i>
+                </button>
             </div>
 
-            <div id="lmsReviewStep" class="hidden space-y-4">
-                <div class="flex items-center justify-between rounded-xl border border-purple-500/30 bg-purple-500/10 px-4 py-3">
-                    <span class="text-sm text-gray-300">Tuần kiểm tra</span>
-                    <span id="lmsReviewWeek" class="font-mono font-bold text-purple-300"></span>
-                </div>
-                <div id="lmsDryRunNotice" class="hidden rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-xs text-amber-200">
-                    Chế độ DRY-RUN đang bật: hệ thống chỉ mô phỏng, không thay đổi BCNB.
-                </div>
-                <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 max-h-60 overflow-y-auto">
-                    <div class="rounded-xl border border-rose-500/20 bg-rose-500/5 p-3">
-                        <div class="flex items-center justify-between gap-2 mb-2">
-                            <p class="text-xs font-bold uppercase tracking-wide text-rose-300">Không tick (Quá hạn LMS)</p>
-                            <button type="button" id="btnCopyLmsMissing" onclick="copyLmsMissingClasses()" class="px-2 py-0.5 text-[11px] font-semibold text-rose-200 border border-rose-400/30 rounded-lg hover:bg-rose-500/20 transition-colors" title="Copy danh sách lớp quá hạn nhận xét LMS">
-                                <i class="fa-regular fa-copy mr-1" aria-hidden="true"></i>Copy
-                            </button>
+            <div class="p-6 space-y-4">
+                <p class="text-slate-700 text-xs font-semibold leading-relaxed text-pretty">Worker sẽ tự động quét trang <span class="text-purple-800 font-extrabold">LMS MindX</span>, xác định những lớp có hiện buổi tại cột <span class="text-rose-700 font-extrabold">Buổi học gần nhất quá hạn nhận xét</span> là chưa nhận xét, sau đó đối chiếu với bảng <span class="text-emerald-800 font-extrabold">BCNB</span> để lập kế hoạch xem trước.</p>
+
+                <!-- Step 1: Direct LMS Web Scan -->
+                <div id="lmsUploadStep" class="space-y-3">
+                    <div class="rounded-xl border-2 border-purple-400 border-l-8 border-l-purple-600 bg-purple-50/90 p-4 text-xs text-slate-800 space-y-2.5 shadow-sm">
+                        <div class="flex items-start gap-2.5">
+                            <i class="fa-solid fa-magnifying-glass-chart text-purple-700 mt-0.5"></i>
+                            <span><strong>Bước 1 — Quét LMS:</strong> Kiểm tra toàn bộ các trang <code class="rounded bg-purple-200/80 border border-purple-300 px-1.5 py-0.5 font-mono font-bold text-purple-950">admin/class-sessions</code> và lọc các lớp có số buổi tại cột <em>"Buổi học gần nhất quá hạn nhận xét"</em>.</span>
                         </div>
-                        <div id="lmsMissingClasses" class="space-y-1 text-xs font-mono text-gray-300"></div>
+                        <div class="flex items-start gap-2.5">
+                            <i class="fa-solid fa-table-list text-emerald-700 mt-0.5"></i>
+                            <span><strong>Bước 2 — Đối chiếu BCNB:</strong> Loại trừ các lớp quá hạn nhận xét trên LMS và lập danh sách lớp đủ điều kiện tick trong tuần kiểm tra BCNB.</span>
+                        </div>
+                        <div class="flex items-start gap-2.5">
+                            <i class="fa-solid fa-key text-amber-700 mt-0.5"></i>
+                            <span><strong>Tự động đăng nhập:</strong> Tự động đăng nhập lại LMS và BCNB nếu phiên bị thoát theo tài khoản trong <code class="rounded bg-amber-200/80 border border-amber-300 px-1.5 py-0.5 font-mono font-bold text-amber-950">.env</code>.</span>
+                        </div>
                     </div>
-                    <div class="rounded-xl border border-emerald-500/20 bg-emerald-500/5 p-3">
-                        <div class="flex items-center justify-between gap-2 mb-2">
-                            <p class="text-xs font-bold uppercase tracking-wide text-emerald-300">Dự kiến tick (<span id="lmsSelectedTickCount">0/0</span>)</p>
-                            <button type="button" id="btnToggleAllLmsTick" onclick="toggleAllLmsTickSelection()" class="px-2 py-0.5 text-[11px] font-semibold text-emerald-200 border border-emerald-400/30 rounded-lg hover:bg-emerald-500/20 transition-colors" title="Chọn hoặc bỏ chọn tất cả lớp dự kiến tick">
-                                Bỏ chọn hết
-                            </button>
-                        </div>
-                        <div id="lmsTickClasses" class="space-y-1.5 text-xs font-mono text-gray-300"></div>
+                    <div id="lmsDropzone" class="hidden">
+                        <input type="file" id="lmsFileInput" class="hidden" accept="image/png,image/jpeg,image/webp" onclick="event.stopPropagation()" onchange="if(this.files && this.files.length > 0) handleLmsFile(this.files[0])">
+                        <div id="lmsDropzoneText" class="pointer-events-none"></div>
+                        <img id="lmsImagePreview" class="hidden" src="">
                     </div>
                 </div>
-                <div id="lmsReviewWarning" class="hidden rounded-lg border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-xs text-rose-200"></div>
-            </div>
-            
-            <div class="mt-6 flex justify-end space-x-3">
-                <button onclick="closeLmsModal()" class="px-5 py-2.5 text-sm font-medium text-gray-300 hover:bg-white/10 rounded-xl transition-all">Hủy</button>
-                <button id="btnBackLms" onclick="resetLmsModal()" class="hidden px-5 py-2.5 text-sm font-medium text-gray-300 hover:bg-white/10 rounded-xl transition-all">Quét lại</button>
-                <button id="btnStartLms" onclick="startLmsAnalysis()" class="px-5 py-2.5 text-sm font-bold text-white bg-purple-600 rounded-xl hover:bg-purple-500 disabled:opacity-50 disabled:cursor-not-allowed transition-all">
-                    Quét LMS &amp; Lập kế hoạch
-                </button>
-                <button id="btnConfirmLms" onclick="confirmLmsTick()" class="hidden px-5 py-2.5 text-sm font-bold text-white bg-emerald-600 rounded-xl hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed transition-all">
-                    Xác nhận kế hoạch
-                </button>
+
+                <div id="lmsReviewStep" class="hidden space-y-3.5">
+                    <div class="well-inset flex items-center justify-between px-4 py-2.5">
+                        <span class="text-xs font-extrabold uppercase tracking-wider text-slate-700">Tuần kiểm tra BCNB</span>
+                        <span id="lmsReviewWeek" class="font-mono font-extrabold text-xs bg-slate-900 text-white px-3 py-1 rounded-md border border-slate-950"></span>
+                    </div>
+                    <div id="lmsDryRunNotice" class="hidden rounded-xl border-2 border-amber-400 border-l-8 border-l-amber-600 bg-amber-50 px-4 py-2.5 text-xs font-extrabold text-amber-950">
+                        Chế độ DRY-RUN đang bật: hệ thống chỉ mô phỏng, không thay đổi BCNB.
+                    </div>
+                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-3.5 max-h-64 overflow-y-auto">
+                        <div class="rounded-xl border-2 border-rose-400 border-t-4 border-t-rose-600 bg-rose-50/80 p-3 shadow-sm">
+                            <div class="flex items-center justify-between gap-2 mb-2.5">
+                                <p class="text-xs font-extrabold uppercase tracking-wide text-rose-950">Không tick (Quá hạn LMS)</p>
+                                <button type="button" id="btnCopyLmsMissing" onclick="copyLmsMissingClasses()" class="preflight-refresh px-2.5 py-1 min-h-[28px] text-[11px] font-extrabold text-rose-900" title="Copy danh sách lớp quá hạn nhận xét LMS">
+                                    <i class="fa-regular fa-copy text-rose-600" aria-hidden="true"></i>Copy
+                                </button>
+                            </div>
+                            <div id="lmsMissingClasses" class="space-y-1.5 text-xs font-mono font-bold text-slate-800"></div>
+                        </div>
+                        <div class="rounded-xl border-2 border-emerald-400 border-t-4 border-t-emerald-600 bg-emerald-50/80 p-3 shadow-sm">
+                            <div class="flex items-center justify-between gap-2 mb-2.5">
+                                <p class="text-xs font-extrabold uppercase tracking-wide text-emerald-950">Dự kiến tick (<span id="lmsSelectedTickCount">0/0</span>)</p>
+                                <button type="button" id="btnToggleAllLmsTick" onclick="toggleAllLmsTickSelection()" class="preflight-refresh px-2.5 py-1 min-h-[28px] text-[11px] font-extrabold text-emerald-900" title="Chọn hoặc bỏ chọn tất cả lớp dự kiến tick">
+                                    Bỏ chọn hết
+                                </button>
+                            </div>
+                            <div id="lmsTickClasses" class="space-y-1.5 text-xs font-mono font-bold text-slate-800"></div>
+                        </div>
+                    </div>
+                    <div id="lmsReviewWarning" class="hidden rounded-xl border-2 border-rose-400 border-l-8 border-l-rose-600 bg-rose-50 px-4 py-2.5 text-xs font-bold text-rose-950"></div>
+                </div>
+
+                <div class="pt-3 border-t-2 border-slate-200 flex flex-wrap justify-end gap-2.5">
+                    <button type="button" onclick="closeLmsModal()" class="preflight-refresh px-4 py-2 text-xs font-extrabold">Hủy</button>
+                    <button type="button" id="btnBackLms" onclick="resetLmsModal()" class="hidden preflight-refresh px-4 py-2 text-xs font-extrabold">Quét lại</button>
+                    <button type="button" id="btnStartLms" onclick="startLmsAnalysis()" class="action-button action-button--scan px-5 py-2 text-xs font-extrabold">
+                        <i class="fa-solid fa-magnifying-glass-chart" aria-hidden="true"></i>Quét LMS &amp; Lập kế hoạch
+                    </button>
+                    <button type="button" id="btnConfirmLms" onclick="confirmLmsTick()" class="hidden action-button action-button--lms px-5 py-2 text-xs font-extrabold">
+                        <i class="fa-solid fa-check-double" aria-hidden="true"></i>Xác nhận kế hoạch
+                    </button>
+                </div>
             </div>
         </div>
     </div>

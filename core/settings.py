@@ -62,6 +62,13 @@ class AppSettings:
     batch_systemic_failure_limit: int = 3
     batch_abnormal_percent_limit: int = 20
     class_ended_archive_days: int = 7
+    report_email_recipients: tuple[str, ...] = ("quangda@mindx.net.vn",)
+    smtp_host: str = "smtp.gmail.com"
+    smtp_port: int = 587
+    smtp_username: str = ""
+    smtp_password: str = ""
+    smtp_from: str = ""
+    smtp_use_tls: bool = True
 
     def __post_init__(self):
         if not self.database_path or not self.upload_root or not self.log_dir:
@@ -197,6 +204,13 @@ class AppSettings:
             batch_systemic_failure_limit=Config.BATCH_SYSTEMIC_FAILURE_LIMIT,
             batch_abnormal_percent_limit=Config.BATCH_ABNORMAL_PERCENT_LIMIT,
             class_ended_archive_days=Config.CLASS_ENDED_ARCHIVE_DAYS,
+            report_email_recipients=Config.REPORT_EMAIL_RECIPIENTS,
+            smtp_host=Config.SMTP_HOST,
+            smtp_port=Config.SMTP_PORT,
+            smtp_username=Config.SMTP_USERNAME,
+            smtp_password=Config.SMTP_PASSWORD,
+            smtp_from=Config.SMTP_FROM,
+            smtp_use_tls=Config.SMTP_USE_TLS,
         )
 
     def with_overrides(self, **values) -> "AppSettings":

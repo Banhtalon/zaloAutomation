@@ -35,6 +35,7 @@ from services.zalo_safety import (
     parse_class_date,
     report_delay_days,
 )
+from services.lms_quality_service import extract_report_lesson_title
 from services.zalo_target_matching import (
     BcnbScanTarget,
     TARGET_SESSION_AMBIGUOUS,
@@ -990,8 +991,11 @@ async def scan_open_zalo_chat(
         date_reference = "no_class_date"
         reported_lesson = extract_report_lesson_number(raw_content)
         content_lesson = extract_report_content_lesson_number(raw_content)
+        reported_lesson_title = extract_report_lesson_title(raw_content)
         if content_lesson is not None:
             candidate["content_lesson"] = content_lesson
+        if reported_lesson_title:
+            candidate["reported_lesson_title"] = reported_lesson_title
         claimed_lesson_date: datetime | None = None
         inferred_lesson_date = infer_report_lesson_date(
             classification["content_dates"],
@@ -1136,6 +1140,10 @@ async def scan_open_zalo_chat(
                 claimed_lesson_date=claimed_lesson_date,
                 claimed_lesson=reported_lesson,
             )
+            if content_lesson is not None:
+                date_context["content_lesson"] = content_lesson
+            if reported_lesson_title:
+                date_context["reported_lesson_title"] = reported_lesson_title
             delay = (ui_sent_at.date() - target.class_date.date()).days
             date_reference = "bcnb_target_date"
 

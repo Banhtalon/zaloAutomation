@@ -13,9 +13,14 @@ from core.time_utils import now_utc, parse_timestamp, utc_iso
 from repositories.report_repository import (
     WeeklySummaryError,
     build_weekly_summary_csv,
+    filter_failed_weekly_summary_rows,
 )
 from repositories.zalo_batch_repository import canonical_target_key
 from repositories.job_repository import JobStateError, TERMINAL_STATUSES
+from services.report_email_service import (
+    ReportEmailError,
+    send_failed_classes_report_email,
+)
 from services.zalo_bcnb_service import (
     collect_result_item_evidence_paths,
     find_manual_approve_target_matches,
@@ -751,14 +756,11 @@ async def get_class_lifecycles(
         raise internal_error(exc, event="api.class_lifecycles.read_failed") from exc
 
 
-@router.get("/api/reports/weekly-summary", dependencies=[Depends(require_viewer)])
-async def get_weekly_summary(
-    week: int | None = Query(default=None, ge=1, le=53),
-    year: int | None = Query(default=None, ge=2000, le=2100),
-    job_id: int | None = Query(default=None, ge=1),
-    format: str | None = Query(default=None),
-    container: AppContainer = Depends(get_container),
-):
+def _normalize_weekly_summary_params(
+    week: int | None,
+    year: int | None,
+    job_id: int | None,
+) -> tuple[int | None, int | None, int | None]:
     if hasattr(week, "default"):
         week = None
     elif week is not None and (
@@ -798,6 +800,19 @@ async def get_weekly_summary(
             "INVALID_JOB_ID",
             "Mã job quét không hợp lệ.",
         )
+    return week, year, job_id
+
+
+@router.get("/api/reports/weekly-summary", dependencies=[Depends(require_viewer)])
+async def get_weekly_summary(
+    week: int | None = Query(default=None, ge=1, le=53),
+    year: int | None = Query(default=None, ge=2000, le=2100),
+    job_id: int | None = Query(default=None, ge=1),
+    format: str | None = Query(default=None),
+    failed_only: bool = Query(default=False),
+    container: AppContainer = Depends(get_container),
+):
+    week, year, job_id = _normalize_weekly_summary_params(week, year, job_id)
 
     if hasattr(format, "default"):
         format = None
@@ -808,6 +823,7 @@ async def get_weekly_summary(
             "INVALID_REPORT_FORMAT",
             "Định dạng báo cáo không hợp lệ (chỉ hỗ trợ json hoặc csv).",
         )
+    failed_only_flag = False if hasattr(failed_only, "default") else bool(failed_only)
 
     try:
         payload = await container.report_repo.get_weekly_summary(
@@ -820,14 +836,19 @@ async def get_weekly_summary(
     except Exception as exc:
         raise internal_error(exc, event="api.reports.weekly_summary_failed") from exc
 
+    rows_for_output = payload.get("rows") or []
+    if failed_only_flag:
+        rows_for_output = filter_failed_weekly_summary_rows(rows_for_output)
+
     if fmt == "csv":
-        csv_text = build_weekly_summary_csv(payload.get("rows") or [])
+        csv_text = build_weekly_summary_csv(rows_for_output)
         sel_w = payload.get("week")
         sel_y = payload.get("year")
+        prefix = "Bao_Cao_Lop_Loi_Tuan" if failed_only_flag else "Bao_Cao_Tuan"
         filename = (
-            f"Bao_Cao_Tuan_W{int(sel_w):02d}_{int(sel_y)}.csv"
+            f"{prefix}_W{int(sel_w):02d}_{int(sel_y)}.csv"
             if sel_w is not None and sel_y is not None
-            else "Bao_Cao_Tuan.csv"
+            else f"{prefix}.csv"
         )
         return Response(
             content=csv_text.encode("utf-8"),
@@ -836,4 +857,66 @@ async def get_weekly_summary(
                 "Content-Disposition": f'attachment; filename="{filename}"',
             },
         )
+    if failed_only_flag:
+        return {
+            **payload,
+            "rows": rows_for_output,
+            "failed_only": True,
+        }
     return payload
+
+
+@router.post(
+    "/api/reports/send-failed-csv-email",
+    dependencies=[Depends(require_operator)],
+)
+async def send_failed_csv_email_report(
+    week: int | None = Body(default=None, embed=True),
+    year: int | None = Body(default=None, embed=True),
+    job_id: int | None = Body(default=None, embed=True),
+    recipients: list[str] | None = Body(default=None, embed=True),
+    container: AppContainer = Depends(get_container),
+):
+    week, year, job_id = _normalize_weekly_summary_params(week, year, job_id)
+    if hasattr(recipients, "default"):
+        recipients = None
+
+    try:
+        payload = await container.report_repo.get_weekly_summary(
+            week=week,
+            year=year,
+            job_id=job_id,
+        )
+    except WeeklySummaryError as exc:
+        raise public_error(exc.status_code, exc.code, str(exc)) from exc
+    except Exception as exc:
+        raise internal_error(exc, event="api.reports.weekly_summary_failed") from exc
+
+    all_rows = payload.get("rows") or []
+    failed_rows = filter_failed_weekly_summary_rows(all_rows)
+    sel_w = payload.get("week") or week
+    sel_y = payload.get("year") or year
+    if sel_w is None or sel_y is None:
+        raise public_error(
+            409,
+            "EMPTY_WEEKLY_SUMMARY",
+            "Chưa có dữ liệu báo cáo trong tuần đã chọn để xuất CSV và gửi mail.",
+        )
+
+    try:
+        return await send_failed_classes_report_email(
+            settings=getattr(container, "settings", None),
+            week=int(sel_w),
+            year=int(sel_y),
+            all_rows=all_rows,
+            failed_rows=failed_rows,
+            selected_job_id=payload.get("selected_job_id"),
+            requested_recipients=recipients,
+        )
+    except ReportEmailError as exc:
+        err = public_error(exc.status_code, exc.code, str(exc))
+        if getattr(exc, "extra", None) and isinstance(err.detail, dict):
+            err.detail.update(exc.extra)
+        raise err from exc
+    except Exception as exc:
+        raise internal_error(exc, event="api.reports.send_failed_csv_email_failed") from exc

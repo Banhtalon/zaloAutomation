@@ -40,13 +40,13 @@
             tbody.replaceChildren();
             groups.forEach((g, idx) => {
                 const tr = document.createElement('tr');
-                tr.className = 'hover:bg-white/5 transition-colors';
+                tr.className = 'hover:bg-slate-50 transition-colors';
                 const values = [idx + 1, safeGroupLabel(g.TenNhom, 'Chưa có tên nhóm'), safeGroupLabel(g.NguoiPhuTrach, 'Trống')];
                 values.forEach((value, valueIndex) => {
                     const td = document.createElement('td');
                     td.className = valueIndex === 0
-                        ? 'px-6 py-3.5 text-xs font-mono text-gray-500'
-                        : 'px-6 py-3.5 font-medium text-gray-200';
+                        ? 'px-4 py-3 text-xs font-mono text-slate-400'
+                        : 'px-4 py-3 font-medium text-slate-700';
                     td.textContent = String(value);
                     tr.appendChild(td);
                 });
@@ -87,7 +87,7 @@
             items.forEach((item, index) => {
                 const periods = Array.isArray(item.periods) ? item.periods : [];
                 const tr = document.createElement('tr');
-                tr.className = 'hover:bg-amber-500/5 transition-colors';
+                tr.className = 'hover:bg-amber-50/50 transition-colors';
                 const values = [
                     index + 1,
                     item.class_code || '',
@@ -101,10 +101,10 @@
                 values.forEach((value, valueIndex) => {
                     const td = document.createElement('td');
                     td.className = valueIndex === 0
-                        ? 'px-4 py-3 text-xs font-mono text-gray-500'
+                        ? 'px-4 py-3 text-xs font-mono text-slate-400'
                         : (valueIndex === 5
-                            ? 'px-4 py-3 text-xs font-semibold text-amber-300'
-                            : 'px-4 py-3 text-gray-200');
+                            ? 'px-4 py-3 text-xs font-bold text-amber-800'
+                            : 'px-4 py-3 text-slate-700');
                     td.textContent = String(value);
                     tr.appendChild(td);
                 });
@@ -183,25 +183,25 @@
                         const groupName = String(item.group_name || '');
                         const isEnded = item.status === 'ENDED_CONFIRMED';
                         const tr = document.createElement('tr');
-                        tr.className = 'hover:bg-rose-500/10 transition-colors';
+                        tr.className = 'hover:bg-rose-50/40 transition-colors';
                         const indexCell = document.createElement('td');
-                        indexCell.className = 'px-4 py-3 text-xs font-mono text-gray-500';
+                        indexCell.className = 'px-4 py-3 text-xs font-mono text-slate-400';
                         indexCell.textContent = String(idx + 1);
                         const nameCell = document.createElement('td');
-                        nameCell.className = 'px-4 py-3 font-medium text-gray-300';
+                        nameCell.className = 'px-4 py-3 font-medium text-slate-700';
                         nameCell.textContent = groupName;
                         const statusCell = document.createElement('td');
                         statusCell.className = isEnded
-                            ? 'px-4 py-3 text-xs font-semibold text-rose-300'
-                            : 'px-4 py-3 text-xs font-semibold text-amber-300';
+                            ? 'px-4 py-3 text-xs font-bold text-rose-700'
+                            : 'px-4 py-3 text-xs font-bold text-amber-700';
                         statusCell.textContent = isEnded
                             ? 'Đã xác nhận kết thúc'
                             : 'Tạm nghỉ / chờ chuyển cấp';
                         const actionCell = document.createElement('td');
-                        actionCell.className = 'px-4 py-3 text-center space-x-3';
+                        actionCell.className = 'px-4 py-3 text-center space-x-2 whitespace-nowrap';
                         if (!isEnded) {
                             const confirmEnded = document.createElement('button');
-                            confirmEnded.className = 'text-amber-300 hover:text-rose-300 transition-colors';
+                            confirmEnded.className = 'px-2 py-1 rounded border border-amber-300 bg-amber-50 text-amber-800 hover:bg-amber-100 text-xs font-semibold transition-colors';
                             confirmEnded.title = 'Xác nhận lớp đã thực sự kết thúc';
                             confirmEnded.textContent = 'Kết thúc';
                             confirmEnded.addEventListener(
@@ -211,7 +211,7 @@
                             actionCell.appendChild(confirmEnded);
                         }
                         const restore = document.createElement('button');
-                        restore.className = 'text-rose-400 hover:text-emerald-400 transition-colors';
+                        restore.className = 'px-2 py-1 rounded border border-emerald-300 bg-emerald-50 text-emerald-800 hover:bg-emerald-100 text-xs font-semibold transition-colors';
                         restore.title = 'Phục hồi lớp này';
                         restore.textContent = 'Khôi phục';
                         restore.addEventListener('click', () => restoreIgnoredGroup(groupName));

@@ -1792,7 +1792,10 @@ class ApiRoutesUnitTests(unittest.IsolatedAsyncioTestCase):
                 )
                 csv_decoded = csv_resp.body.decode("utf-8")
                 self.assertTrue(csv_decoded.startswith("\ufeff"))
-                self.assertIn("Mã lớp,Giáo viên,Buổi học,Ngày học,Trạng thái Zalo,Trạng thái LMS,Thời gian kiểm chứng", csv_decoded)
+                self.assertIn(
+                    "Mã lớp,Giáo viên,Buổi học,Ngày học,Trạng thái Zalo,Trạng thái LMS,Tình trạng đánh giá,Mô tả vấn đề (TE/TF/QC),Thời gian kiểm chứng",
+                    csv_decoded,
+                )
                 self.assertIn("VT-JSB16,Trần Thị B,5,18/10/2026", csv_decoded)
 
                 # 4. Validation errors
@@ -2154,6 +2157,879 @@ class ApiRoutesUnitTests(unittest.IsolatedAsyncioTestCase):
                 }
                 self.assertEqual(by_group["VT-C4K-MA01"]["snapshot_id"], 40)
                 self.assertIsNone(by_group["VT-C4K-EXTRA"]["snapshot_id"])
+
+                # 8. failed_only=True filters weekly summary JSON and CSV to only failed classes
+                from api.zalo_routes import send_failed_csv_email_report
+
+                w42_failed_json = await get_weekly_summary(
+                    week=42,
+                    year=2026,
+                    failed_only=True,
+                    container=container,
+                )
+                self.assertTrue(w42_failed_json["failed_only"])
+                self.assertEqual(
+                    [r["class_code"] for r in w42_failed_json["rows"]],
+                    ["VT-C4K-GI35", "VT-LMS-ONLY"],
+                )
+                w42_failed_csv_resp = await get_weekly_summary(
+                    week=42,
+                    year=2026,
+                    format="csv",
+                    failed_only=True,
+                    container=container,
+                )
+                self.assertIn(
+                    "Bao_Cao_Lop_Loi_Tuan_W42_2026.csv",
+                    w42_failed_csv_resp.headers.get("Content-Disposition", ""),
+                )
+                failed_csv_decoded = w42_failed_csv_resp.body.decode("utf-8")
+                self.assertIn("VT-C4K-GI35", failed_csv_decoded)
+                self.assertIn("VT-LMS-ONLY", failed_csv_decoded)
+                self.assertNotIn("VT-JSB16", failed_csv_decoded)
+
+                # 9. POST /api/reports/send-failed-csv-email defaults to Owner trial email (quangda@mindx.net.vn)
+                container.settings = SimpleNamespace(
+                    report_email_recipients=("quangda@mindx.net.vn",),
+                    smtp_host="smtp.gmail.com",
+                    smtp_port=587,
+                    smtp_username="",
+                    smtp_password="",
+                    smtp_from="",
+                    smtp_use_tls=True,
+                )
+                email_trial_resp = await send_failed_csv_email_report(
+                    week=42,
+                    year=2026,
+                    container=container,
+                )
+                self.assertTrue(email_trial_resp["ok"])
+                self.assertEqual(
+                    email_trial_resp["delivery_status"], "SMTP_NOT_CONFIGURED"
+                )
+                self.assertEqual(
+                    email_trial_resp["recipients"], ["quangda@mindx.net.vn"]
+                )
+                self.assertEqual(
+                    email_trial_resp["available_managers"],
+                    ["quangda@mindx.net.vn", "tuanpa@mindx.com.vn"],
+                )
+                self.assertEqual(email_trial_resp["failed_count"], 2)
+                self.assertEqual(email_trial_resp["total_count"], 3)
+                self.assertEqual(
+                    email_trial_resp["filename"],
+                    "Bao_Cao_Lop_Loi_Tuan_W42_2026.csv",
+                )
+                self.assertIn("quangda%40mindx.net.vn", email_trial_resp["gmail_compose_url"])
+
+                # 10. Both managers (quangda@mindx.net.vn and tuanpa@mindx.com.vn) + SMTP delivery
+                container.settings = SimpleNamespace(
+                    report_email_recipients=(
+                        "quangda@mindx.net.vn",
+                        "tuanpa@mindx.com.vn",
+                    ),
+                    smtp_host="smtp.gmail.com",
+                    smtp_port=587,
+                    smtp_username="sender@mindx.net.vn",
+                    smtp_password="app-password-placeholder",
+                    smtp_from="sender@mindx.net.vn",
+                    smtp_use_tls=True,
+                )
+                import ssl
+
+                sent_messages = []
+                observed_tls_contexts = []
+                refused_to_return = {}
+
+                class FakeSmtpClient:
+                    def __init__(self, host, port, timeout=15.0, context=None):
+                        self.host = host
+                        self.port = port
+                        if context is not None:
+                            observed_tls_contexts.append(context)
+
+                    def __enter__(self):
+                        return self
+
+                    def __exit__(self, exc_type, exc, tb):
+                        return False
+
+                    def ehlo(self):
+                        pass
+
+                    def starttls(self, context=None):
+                        observed_tls_contexts.append(context)
+
+                    def login(self, username, password):
+                        pass
+
+                    def send_message(self, msg):
+                        sent_messages.append(msg)
+                        return dict(refused_to_return)
+
+                with (
+                    patch("services.report_email_service.os.getenv", return_value="0"),
+                    patch("services.report_email_service.smtplib.SMTP", FakeSmtpClient),
+                ):
+                    smtp_sent_resp = await send_failed_csv_email_report(
+                        week=42,
+                        year=2026,
+                        recipients=["quangda@mindx.net.vn", "tuanpa@mindx.com.vn"],
+                        container=container,
+                    )
+                self.assertEqual(smtp_sent_resp["delivery_status"], "SENT")
+                self.assertEqual(
+                    smtp_sent_resp["recipients"],
+                    ["quangda@mindx.net.vn", "tuanpa@mindx.com.vn"],
+                )
+                self.assertEqual(
+                    smtp_sent_resp["accepted_recipients"],
+                    ["quangda@mindx.net.vn", "tuanpa@mindx.com.vn"],
+                )
+                self.assertEqual(smtp_sent_resp["refused_recipients"], [])
+                self.assertIn("VT-C4K-GI35", smtp_sent_resp["csv_text"])
+                self.assertNotIn("VT-JSB16", smtp_sent_resp["csv_text"])
+                self.assertIn("<table", smtp_sent_resp["html_table"])
+                self.assertIn("Mô tả vấn đề (TE/TF/QC)", smtp_sent_resp["html_table"])
+                self.assertIn("Tình trạng đánh giá", smtp_sent_resp["html_table"])
+                self.assertIn("┌", smtp_sent_resp["text_table"])
+                self.assertIn("VT-C4K-GI35", smtp_sent_resp["text_table"])
+                self.assertTrue(
+                    ReportRepository.is_failed_weekly_summary_row(
+                        {
+                            "class_code": "VT-QUAL-ERR",
+                            "zalo_status": "✅ Đã nộp – Có minh chứng",
+                            "lms_status": "✅ Đã nộp LMS",
+                            "evaluation_status": "⚠️ Đã nộp nhận xét nhưng còn lỗi chất lượng nội dung",
+                            "issue_description": "[LMS] Chưa ghi nội dung bài học",
+                        }
+                    )
+                )
+                self.assertEqual(len(sent_messages), 1)
+                self.assertEqual(
+                    sent_messages[0]["To"],
+                    "quangda@mindx.net.vn, tuanpa@mindx.com.vn",
+                )
+                self.assertIsInstance(observed_tls_contexts[-1], ssl.SSLContext)
+                self.assertEqual(
+                    observed_tls_contexts[-1].verify_mode, ssl.CERT_REQUIRED
+                )
+                self.assertTrue(observed_tls_contexts[-1].check_hostname)
+
+                # Partial recipient rejection (550 for tuanpa@mindx.com.vn) must fail closed with 502 SMTP_RECIPIENT_REFUSED
+                refused_to_return = {"tuanpa@mindx.com.vn": (550, b"User unknown")}
+                with (
+                    patch("services.report_email_service.os.getenv", return_value="0"),
+                    patch("services.report_email_service.smtplib.SMTP", FakeSmtpClient),
+                ):
+                    with self.assertRaises(HTTPException) as partial_refused:
+                        await send_failed_csv_email_report(
+                            week=42,
+                            year=2026,
+                            recipients=[
+                                "quangda@mindx.net.vn",
+                                "tuanpa@mindx.com.vn",
+                            ],
+                            container=container,
+                        )
+                self.assertEqual(partial_refused.exception.status_code, 502)
+                self.assertEqual(
+                    partial_refused.exception.detail["code"],
+                    "SMTP_RECIPIENT_REFUSED",
+                )
+                self.assertEqual(
+                    partial_refused.exception.detail["accepted_recipients"],
+                    ["quangda@mindx.net.vn"],
+                )
+                self.assertEqual(
+                    partial_refused.exception.detail["refused_recipients"],
+                    ["tuanpa@mindx.com.vn"],
+                )
+                self.assertIn(
+                    "VT-C4K-GI35", partial_refused.exception.detail["csv_text"]
+                )
+                refused_to_return = {}
+
+                # Port 465 SSL path and SMTP failure path
+                container.settings.smtp_port = 465
+                with (
+                    patch("services.report_email_service.os.getenv", return_value="0"),
+                    patch("services.report_email_service.smtplib.SMTP_SSL", FakeSmtpClient),
+                ):
+                    ssl_resp = await send_failed_csv_email_report(
+                        week=42,
+                        year=2026,
+                        container=container,
+                    )
+                self.assertEqual(ssl_resp["delivery_status"], "SENT")
+                self.assertIsInstance(observed_tls_contexts[-1], ssl.SSLContext)
+                self.assertEqual(
+                    observed_tls_contexts[-1].verify_mode, ssl.CERT_REQUIRED
+                )
+                self.assertTrue(observed_tls_contexts[-1].check_hostname)
+
+                with (
+                    patch("services.report_email_service.os.getenv", return_value="0"),
+                    patch(
+                        "services.report_email_service.smtplib.SMTP_SSL",
+                        side_effect=RuntimeError("smtp connection refused"),
+                    ),
+                ):
+                    with self.assertRaises(HTTPException) as smtp_err:
+                        await send_failed_csv_email_report(
+                            week=42,
+                            year=2026,
+                            container=container,
+                        )
+                self.assertEqual(smtp_err.exception.status_code, 502)
+                self.assertEqual(smtp_err.exception.detail["code"], "SMTP_SEND_FAILED")
+
+                # 11. Reject unauthorized external recipient, malformed email, no failed classes (W40), and empty week (W43)
+                with self.assertRaises(HTTPException) as unauth_rec:
+                    await send_failed_csv_email_report(
+                        week=42,
+                        year=2026,
+                        recipients=["external@evil.example.com"],
+                        container=container,
+                    )
+                self.assertEqual(
+                    unauth_rec.exception.detail["code"],
+                    "UNAUTHORIZED_EMAIL_RECIPIENT",
+                )
+
+                with self.assertRaises(HTTPException) as bad_rec:
+                    await send_failed_csv_email_report(
+                        week=42,
+                        year=2026,
+                        recipients=["not-an-email"],
+                        container=container,
+                    )
+                self.assertEqual(
+                    bad_rec.exception.detail["code"],
+                    "INVALID_EMAIL_RECIPIENTS",
+                )
+
+                # W40 has only manually-approved passing classes -> NO_FAILED_CLASSES
+                with self.assertRaises(HTTPException) as no_failed:
+                    await send_failed_csv_email_report(
+                        week=40,
+                        year=2026,
+                        container=container,
+                    )
+                self.assertEqual(no_failed.exception.status_code, 409)
+                self.assertEqual(
+                    no_failed.exception.detail["code"], "NO_FAILED_CLASSES"
+                )
+
+                # W43 has 0 rows -> EMPTY_WEEKLY_SUMMARY
+                with self.assertRaises(HTTPException) as empty_week:
+                    await send_failed_csv_email_report(
+                        week=43,
+                        year=2026,
+                        container=container,
+                    )
+                self.assertEqual(empty_week.exception.status_code, 409)
+                self.assertEqual(
+                    empty_week.exception.detail["code"], "EMPTY_WEEKLY_SUMMARY"
+                )
+
+    async def test_weekly_summary_resolves_lms_status_and_evaluation_status_from_bcnb_meta(self):
+        import json
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+
+        from db import database
+        from repositories.report_repository import ReportRepository
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            db_file = str(Path(tmp_dir) / "weekly_summary_bcnb_meta.db")
+            with patch.object(database, "DB_PATH", db_file):
+                database.init_db()
+                async with database.get_db_connection() as db:
+                    scan_results = {
+                        "snapshot_id": 25,
+                        "required_week": {"week": 43, "year": 2026},
+                        "selected_weeks": [
+                            {"week": 43, "year": 2026},
+                            {"week": 44, "year": 2026},
+                        ],
+                        "items": [
+                            {
+                                "group": "MindX - VT-C4K-PTB16",
+                                "person": "Đỗ Thị Thùy Trang",
+                                "status": "❌ Chưa tìm thấy trong khoảng đã kiểm chứng – Có minh chứng",
+                                "timestamp": "2026-10-29T01:00:00Z",
+                                "scan_target": {
+                                    "week": 43,
+                                    "year": 2026,
+                                    "class_code": "VT-C4K-PTB16",
+                                    "lesson": "1",
+                                    "class_date": "24/10/2026",
+                                    "class_date_iso": "2026-10-24",
+                                    "bcnb_session_id": "6274",
+                                    "khoi": "Coding",
+                                    "nx_zalo_checked": False,
+                                    "nx_lms_checked": True,
+                                    "instructor_note": "Chưa nội dung bài học",
+                                    "evaluation_status": "⏳ Đã hoàn tất nhận xét LMS, chưa nhận xét Zalo",
+                                },
+                                "evidence": {
+                                    "scanned_at": "2026-10-29T01:00:00Z",
+                                    "date_context": {
+                                        "target_week": 43,
+                                        "target_year": 2026,
+                                        "target_lesson": "1",
+                                        "target_class_code": "VT-C4K-PTB16",
+                                        "target_class_date": "24/10/2026",
+                                    },
+                                },
+                            },
+                            {
+                                "group": "MindX - VT-C4K-PTB16",
+                                "person": "Đỗ Thị Thùy Trang",
+                                "status": "❌ Chưa tìm thấy trong khoảng đã kiểm chứng – Có minh chứng",
+                                "timestamp": "2026-10-29T01:02:00Z",
+                                "scan_target": {
+                                    "week": 43,
+                                    "year": 2026,
+                                    "class_code": "VT-C4K-PTB16",
+                                    "lesson": "2",
+                                    "class_date": "25/10/2026",
+                                    "class_date_iso": "2026-10-25",
+                                },
+                                "evidence": {
+                                    "scanned_at": "2026-10-29T01:02:00Z",
+                                    "date_context": {
+                                        "target_week": 43,
+                                        "target_year": 2026,
+                                        "target_lesson": "2",
+                                        "target_class_code": "VT-C4K-PTB16",
+                                        "target_class_date": "25/10/2026",
+                                    },
+                                },
+                            },
+                        ],
+                    }
+                    await db.execute(
+                        """
+                        INSERT INTO scan_jobs (
+                            id, job_type, status, created_at, started_at, finished_at,
+                            results, request_payload, mutates_external
+                        ) VALUES (?, 'ZALO_SCAN', 'PARTIAL_SUCCESS', ?, ?, ?, ?, '{}', 0)
+                        """,
+                        (
+                            397,
+                            "2026-10-29T00:55:00Z",
+                            "2026-10-29T00:56:00Z",
+                            "2026-10-29T01:05:00Z",
+                            json.dumps(scan_results, ensure_ascii=False),
+                        ),
+                    )
+                    await db.commit()
+
+                summary = await ReportRepository().get_weekly_summary(week=43, year=2026)
+                self.assertEqual(summary["summary"]["total"], 2)
+                self.assertEqual(summary["summary"]["lms_completed"], 1)
+                row = summary["rows"][0]
+                self.assertEqual(row["class_code"], "VT-C4K-PTB16")
+                self.assertEqual(row["lesson"], "1")
+                self.assertEqual(row["lms_status"], "✅ Đã nộp LMS")
+                self.assertEqual(
+                    row["evaluation_status"],
+                    "⏳ Đã hoàn tất nhận xét LMS, chưa nhận xét Zalo",
+                )
+                self.assertEqual(row["instructor_note"], "Chưa nội dung bài học")
+                self.assertEqual(row["khoi"], "Coding")
+                self.assertEqual(row["bcnb_session_id"], "6274")
+                row2 = summary["rows"][1]
+                self.assertEqual(row2["lesson"], "2")
+                self.assertEqual(row2["lms_status"], "Chưa quét LMS")
+                self.assertEqual(row2["bcnb_session_id"], "")
+                self.assertEqual(row2["instructor_note"], "")
+
+                # Ambiguous same-lesson rows (date 24 has meta, date 25 has no meta):
+                # date-missing scan item and LMS-only row must NOT inherit date 24's meta.
+                async with database.get_db_connection() as db:
+                    snap_plan = {
+                        "bcnb_week_plan": {
+                            "required_week": {"week": 43, "year": 2026},
+                            "required_data": [
+                                {
+                                    "ma_lop": "VT-AMB01",
+                                    "buoi_so": "1",
+                                    "ngay_hoc": "24/10/2026",
+                                    "ngay_hoc_iso": "2026-10-24",
+                                    "qc_issue_note": "Ghi chú ngày 24",
+                                    "nx_lms_checked": True,
+                                },
+                                {
+                                    "ma_lop": "VT-AMB01",
+                                    "buoi_so": "1",
+                                    "ngay_hoc": "25/10/2026",
+                                    "ngay_hoc_iso": "2026-10-25",
+                                },
+                                {
+                                    "ma_lop": "VT-LMS-MULTI",
+                                    "buoi_so": "1",
+                                    "ngay_hoc": "24/10/2026",
+                                    "ngay_hoc_iso": "2026-10-24",
+                                    "qc_issue_note": "Ghi chú buổi 1",
+                                },
+                                {
+                                    "ma_lop": "VT-LMS-MULTI",
+                                    "buoi_so": "2",
+                                    "ngay_hoc": "25/10/2026",
+                                    "ngay_hoc_iso": "2026-10-25",
+                                },
+                                {
+                                    "ma_lop": "VT-DUP-SID",
+                                    "buoi_so": "1",
+                                    "ngay_hoc": "24/10/2026",
+                                    "ngay_hoc_iso": "2026-10-24",
+                                    "bcnb_session_id": "session-A",
+                                    "nx_lms_checked": True,
+                                    "qc_issue_note": "QC FOR SESSION A",
+                                },
+                                {
+                                    "ma_lop": "VT-DUP-SID",
+                                    "buoi_so": "1",
+                                    "ngay_hoc": "24/10/2026",
+                                    "ngay_hoc_iso": "2026-10-24",
+                                    "bcnb_session_id": "session-B",
+                                },
+                            ],
+                        }
+                    }
+                    await db.execute(
+                        """
+                        INSERT INTO discovery_snapshots (
+                            id, observed_at, fingerprint_sha256,
+                            source_count, recognized_count, expected_count, delta_count,
+                            coverage, status, plan_json
+                        ) VALUES (25, '2026-10-29T00:50:00Z', 'abc', 2, 2, 2, 0, 1.0, 'PROMOTED', ?)
+                        """,
+                        (json.dumps(snap_plan, ensure_ascii=False),),
+                    )
+                    amb_scan_results = {
+                        "snapshot_id": 25,
+                        "required_week": {"week": 43, "year": 2026},
+                        "selected_weeks": [{"week": 43, "year": 2026}],
+                        "items": [
+                            {
+                                "group": "MindX - VT-AMB01",
+                                "person": "GV Amb",
+                                "status": "❌ Chưa tìm thấy báo cáo",
+                                "scan_target": {
+                                    "week": 43,
+                                    "year": 2026,
+                                    "class_code": "VT-AMB01",
+                                    "lesson": "1",
+                                },
+                            },
+                            {
+                                "group": "MindX - VT-DUP-SID",
+                                "person": "GV Dup",
+                                "status": "❌ Chưa tìm thấy báo cáo",
+                                "scan_target": {
+                                    "week": 43,
+                                    "year": 2026,
+                                    "class_code": "VT-DUP-SID",
+                                    "lesson": "1",
+                                    "class_date_iso": "2026-10-24",
+                                    "bcnb_session_id": "session-B",
+                                },
+                            },
+                        ],
+                    }
+                    await db.execute(
+                        "UPDATE scan_jobs SET results = ? WHERE id = 397",
+                        (json.dumps(amb_scan_results, ensure_ascii=False),),
+                    )
+                    await db.execute(
+                        """
+                        INSERT INTO scan_jobs (
+                            id, job_type, status, created_at, finished_at, results, request_payload, mutates_external
+                        ) VALUES (398, 'LMS_ANALYSIS', 'SUCCESS', '2026-10-29T01:10:00Z', '2026-10-29T01:11:00Z', ?, '{}', 0)
+                        """,
+                        (
+                            json.dumps(
+                                {
+                                    "week": 43,
+                                    "year": 2026,
+                                    "already_checked_classes": ["VT-LMS-MULTI"],
+                                },
+                                ensure_ascii=False,
+                            ),
+                        ),
+                    )
+                    await db.commit()
+
+                amb_summary = await ReportRepository().get_weekly_summary(week=43, year=2026)
+                by_code = {r["class_code"]: r for r in amb_summary["rows"]}
+                self.assertEqual(by_code["VT-AMB01"]["qc_issue_note"], "")
+                self.assertEqual(by_code["VT-AMB01"]["lms_status"], "Chưa quét LMS")
+                self.assertEqual(by_code["VT-LMS-MULTI"]["qc_issue_note"], "")
+                self.assertEqual(by_code["VT-DUP-SID"]["bcnb_session_id"], "session-B")
+                self.assertEqual(by_code["VT-DUP-SID"]["qc_issue_note"], "")
+                self.assertEqual(by_code["VT-DUP-SID"]["lms_status"], "Chưa quét LMS")
+
+    async def test_bcnb_meta_isolation_warning_override_and_cleared_notes(self):
+        from datetime import datetime
+        from unittest.mock import AsyncMock, patch
+        from repositories.report_repository import (
+            _resolve_row_evaluation_status,
+            _sanitize_dashboard_item,
+        )
+        from services.zalo_bcnb_service import (
+            _attach_bcnb_row_metadata,
+            _result_matches_schedule_row,
+            update_bcnb_reports,
+        )
+        from services.zalo_parallel_service import _empty_result
+
+        # 1. Contradictory LMS warning or raw BCNB warning must not be masked
+        eval_warn = _resolve_row_evaluation_status(
+            zalo_status="✅ Đã nộp – Có minh chứng",
+            lms_status="⚠️ Chưa nhận xét - BCNB đã tích",
+            nx_zalo_checked=True,
+            nx_lms_checked=True,
+        )
+        self.assertEqual(eval_warn, "⚠️ Đã nhận xét Zalo, LMS cần kiểm tra")
+        eval_raw_warn = _resolve_row_evaluation_status(
+            zalo_status="✅ Đã nộp",
+            lms_status="✅ Đã nộp LMS",
+            raw_evaluation_status="⚠️ Cần kiểm tra nhận xét",
+        )
+        self.assertEqual(eval_raw_warn, "⚠️ Cần kiểm tra nhận xét")
+
+        # 2. Early-stopped Zalo scan result updates BCNB metadata without weakening checkbox safety gate
+        early_target = {
+            "week": 43,
+            "year": 2026,
+            "class_code": "VT-TEST01",
+            "group_name": "MindX - VT-TEST01",
+            "lesson": "1",
+            "class_date": "24/10/2026",
+            "class_date_iso": "2026-10-24",
+            "qc_issue_note": "stale QC note",
+            "nx_lms_checked": False,
+        }
+        early_item = _empty_result(
+            dict(early_target),
+            today=datetime(2026, 10, 29),
+            reason="synthetic sync failure",
+            decision="ZALO_SYNC_INCOMPLETE",
+        )
+        bcnb_row = {
+            "week": 43,
+            "year": 2026,
+            "ma_lop": "VT-TEST01",
+            "buoi_so": "1",
+            "ngay_hoc_iso": "2026-10-24",
+            "qc_issue_note": "",
+            "nx_lms_checked": True,
+            "cells": [],
+        }
+        self.assertFalse(_result_matches_schedule_row(early_item, bcnb_row, (43, 2026)))
+        plan = {
+            "selected_weeks": [{"week": 43, "year": 2026}, {"week": 44, "year": 2026}],
+            "latest_week": {"week": 44, "year": 2026},
+            "targets": [early_target],
+        }
+        with (
+            patch(
+                "services.zalo_bcnb_service._read_bcnb_schedule_rows",
+                new=AsyncMock(return_value=[bcnb_row]),
+            ),
+            patch(
+                "services.zalo_bcnb_service.resolve_report_columns",
+                new=AsyncMock(return_value=(0, 1, 2)),
+            ),
+            patch("services.zalo_bcnb_service.log_message"),
+        ):
+            await update_bcnb_reports(
+                object(),
+                job_id=1,
+                execution_mode="dry-run",
+                scan_results=[early_item],
+                today=datetime(2026, 10, 29),
+                scan_plan=plan,
+                job_repo=type("Jobs", (), {"ensure_not_cancelled": AsyncMock()})(),
+                audit_repo=object(),
+                period_filter={(43, 2026)},
+            )
+        sanitized_early = _sanitize_dashboard_item(
+            early_item,
+            week=43,
+            year=2026,
+            source_job_id=1,
+            lms_status="Chưa quét LMS",
+            job_timestamp="2026-10-29",
+        )
+        self.assertEqual(sanitized_early["qc_issue_note"], "")
+        self.assertIs(sanitized_early["nx_lms_checked"], True)
+        self.assertEqual(sanitized_early["lms_status"], "✅ Đã nộp LMS")
+
+        # 3. Cleared note on BCNB must overwrite stale scan_target / fallback note
+        stale_item = {
+            "group": "MindX - VT-C4K-PTB16",
+            "person": "GV A",
+            "status": "❌ Chưa tìm thấy báo cáo",
+            "scan_target": {
+                "week": 43,
+                "year": 2026,
+                "class_code": "VT-C4K-PTB16",
+                "lesson": "1",
+                "class_date": "24/10/2026",
+                "qc_issue_note": "Ghi chú QC cũ",
+                "instructor_note": "Giải trình cũ",
+            },
+        }
+        _attach_bcnb_row_metadata(
+            stale_item,
+            {
+                "qc_issue_note": "",
+                "instructor_note": "",
+                "nx_lms_checked": True,
+            },
+        )
+        self.assertEqual(stale_item["qc_issue_note"], "")
+        self.assertEqual(stale_item["instructor_note"], "")
+        sanitized = _sanitize_dashboard_item(
+            stale_item,
+            week=43,
+            year=2026,
+            source_job_id=1,
+            lms_status="Chưa quét LMS",
+            job_timestamp="2026-10-29T01:00:00Z",
+            fallback_bcnb_meta={
+                "qc_issue_note": "Ghi chú snapshot cũ",
+                "instructor_note": "Giải trình snapshot cũ",
+            },
+        )
+        self.assertEqual(sanitized["qc_issue_note"], "")
+        self.assertEqual(sanitized["issue_description"], "")
+        self.assertEqual(sanitized["instructor_note"], "")
+
+        # 4. Same-source duplicate rows and cross-session manual approvals stay isolated
+        import json
+        import os
+        import tempfile
+        from db import database
+        from repositories.report_repository import ReportRepository
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            db_path = os.path.join(tmp_dir, "dup_session.sqlite3")
+            with patch.object(database, "DB_PATH", db_path):
+                database.init_db()
+                async with database.get_db_connection() as db:
+                    old_approved_b = {
+                        "group": "MindX - VT-SYNTH01",
+                        "person": "GV Synth",
+                        "status": "✅ Đã duyệt tay & Tích BCNB",
+                        "manual_approved": True,
+                        "manual_approval": {
+                            "outcome": "VERIFIED",
+                            "dry_run": False,
+                            "source_job_id": 1,
+                            "approved_by": "Reviewer B",
+                        },
+                        "scan_target": {
+                            "week": 43,
+                            "year": 2026,
+                            "class_code": "VT-SYNTH01",
+                            "lesson": "1",
+                            "class_date_iso": "2026-10-24",
+                            "bcnb_session_id": "B",
+                        },
+                    }
+                    await db.execute(
+                        """
+                        INSERT INTO scan_jobs (
+                            id, job_type, status, created_at, finished_at, results, request_payload, mutates_external
+                        ) VALUES (1, 'ZALO_SCAN', 'SUCCESS', '2026-10-28', '2026-10-28', ?, '{}', 0)
+                        """,
+                        (
+                            json.dumps(
+                                {
+                                    "snapshot_id": 24,
+                                    "required_week": {"week": 43, "year": 2026},
+                                    "items": [old_approved_b],
+                                }
+                            ),
+                        ),
+                    )
+                    current_items = [
+                        {
+                            "group": "MindX - VT-SYNTH01",
+                            "person": "GV Synth",
+                            "status": "❌ Chưa tìm thấy",
+                            "qc_issue_note": "FIRST QC ISSUE",
+                            "nx_lms_checked": False,
+                            "scan_target": {
+                                "week": 43,
+                                "year": 2026,
+                                "class_code": "VT-SYNTH01",
+                                "lesson": "1",
+                                "class_date_iso": "2026-10-24",
+                                "bcnb_session_id": "A",
+                            },
+                        },
+                        {
+                            "group": "MindX - VT-SYNTH01",
+                            "person": "GV Synth",
+                            "status": "❌ Chưa tìm thấy",
+                            "qc_issue_note": "",
+                            "nx_lms_checked": True,
+                            "scan_target": {
+                                "week": 43,
+                                "year": 2026,
+                                "class_code": "VT-SYNTH01",
+                                "lesson": "1",
+                                "class_date_iso": "2026-10-24",
+                                "bcnb_session_id": "A",
+                            },
+                        },
+                    ]
+                    await db.execute(
+                        """
+                        INSERT INTO scan_jobs (
+                            id, job_type, status, created_at, finished_at, results, request_payload, mutates_external
+                        ) VALUES (2, 'ZALO_SCAN', 'SUCCESS', '2026-10-29', '2026-10-29', ?, '{}', 0)
+                        """,
+                        (
+                            json.dumps(
+                                {
+                                    "snapshot_id": 25,
+                                    "required_week": {"week": 43, "year": 2026},
+                                    "items": current_items,
+                                }
+                            ),
+                        ),
+                    )
+                    await db.commit()
+                dup_summary = await ReportRepository().get_weekly_summary(
+                    week=43, year=2026
+                )
+                self.assertEqual(len(dup_summary["rows"]), 2)
+                self.assertEqual(dup_summary["rows"][0]["qc_issue_note"], "FIRST QC ISSUE")
+                self.assertEqual(dup_summary["rows"][0]["zalo_status"], "❌ Chưa tìm thấy")
+                self.assertEqual(dup_summary["rows"][1]["qc_issue_note"], "")
+                self.assertEqual(dup_summary["rows"][1]["zalo_status"], "❌ Chưa tìm thấy")
+
+        with tempfile.TemporaryDirectory() as tmp_dir2:
+            db_path2 = os.path.join(tmp_dir2, "synth_ma_session.sqlite3")
+            with patch.object(database, "DB_PATH", db_path2):
+                database.init_db()
+                async with database.get_db_connection() as db:
+                    await db.execute(
+                        """
+                        INSERT INTO discovery_snapshots (
+                            id, observed_at, fingerprint_sha256,
+                            source_count, recognized_count, expected_count, delta_count,
+                            coverage, status, plan_json
+                        ) VALUES (1, '2026-10-29T00:00:00Z', 'abc', 1, 1, 1, 0, 1.0, 'PROMOTED', ?)
+                        """,
+                        (
+                            json.dumps(
+                                {
+                                    "scan_targets": [
+                                        {
+                                            "week": 43,
+                                            "year": 2026,
+                                            "class_code": "VT-SYNTH02",
+                                            "lesson": "1",
+                                            "class_date_iso": "2026-10-24",
+                                            "bcnb_session_id": "A",
+                                            "qc_issue_note": "SESSION A ISSUE",
+                                            "nx_lms_checked": True,
+                                        }
+                                    ]
+                                }
+                            ),
+                        ),
+                    )
+                    await db.execute(
+                        """
+                        INSERT INTO scan_jobs (
+                            id, job_type, status, created_at, finished_at, results, request_payload, mutates_external
+                        ) VALUES (99, 'ZALO_MANUAL_APPROVE', 'SUCCESS', '2026-10-29', '2026-10-29', '{}', '{}', 1)
+                        """
+                    )
+                    await db.execute(
+                        """
+                        INSERT INTO external_action_audit (
+                            job_id, action_key, action_type, target_type, target_id, mode, reason_json, outcome, completed_at, created_at
+                        ) VALUES (99, 'ma-b-1', 'BCNB_MANUAL_APPROVE_TICK', 'bcnb_row', 'VT-SYNTH02', 'production', ?, 'VERIFIED', '2026-10-29T01:00:00Z', '2026-10-29T01:00:00Z')
+                        """,
+                        (
+                            json.dumps(
+                                {
+                                    "week": 43,
+                                    "year": 2026,
+                                    "class_code": "VT-SYNTH02",
+                                    "lesson": "1",
+                                    "class_date_iso": "2026-10-24",
+                                    "bcnb_session_id": "B",
+                                    "approved_by": "Approver B",
+                                }
+                            ),
+                        ),
+                    )
+                    await db.commit()
+                # Branch 2: no ZALO_SCAN jobs for the week -> elif period_manual_approvals
+                no_job_summary = await ReportRepository().get_weekly_summary(
+                    week=43, year=2026
+                )
+                self.assertEqual(len(no_job_summary["rows"]), 1)
+                self.assertEqual(no_job_summary["rows"][0]["bcnb_session_id"], "B")
+                self.assertEqual(no_job_summary["rows"][0]["qc_issue_note"], "")
+                self.assertEqual(no_job_summary["rows"][0]["lms_status"], "Chưa quét LMS")
+
+                # Branch 1: ZALO_SCAN job exists for the week (for another class), so VT-SYNTH02 hits the else/should_synthesize_missing_row branch
+                async with database.get_db_connection() as db:
+                    await db.execute(
+                        """
+                        INSERT INTO scan_jobs (
+                            id, job_type, status, created_at, finished_at, results, request_payload, mutates_external
+                        ) VALUES (10, 'ZALO_SCAN', 'SUCCESS', '2026-10-29', '2026-10-29', ?, '{}', 0)
+                        """,
+                        (
+                            json.dumps(
+                                {
+                                    "snapshot_id": 1,
+                                    "required_week": {"week": 43, "year": 2026},
+                                    "items": [
+                                        {
+                                            "group": "MindX - VT-OTHER01",
+                                            "person": "GV Other",
+                                            "status": "✅ Đã nộp bài",
+                                            "scan_target": {
+                                                "week": 43,
+                                                "year": 2026,
+                                                "class_code": "VT-OTHER01",
+                                                "lesson": "1",
+                                                "class_date_iso": "2026-10-24",
+                                                "bcnb_session_id": "OTHER",
+                                            },
+                                        }
+                                    ],
+                                }
+                            ),
+                        ),
+                    )
+                    await db.commit()
+                with_job_summary = await ReportRepository().get_weekly_summary(
+                    week=43, year=2026
+                )
+                synth_rows = [
+                    r for r in with_job_summary["rows"] if r["class_code"] == "VT-SYNTH02"
+                ]
+                self.assertEqual(len(synth_rows), 1)
+                self.assertEqual(synth_rows[0]["bcnb_session_id"], "B")
+                self.assertEqual(synth_rows[0]["qc_issue_note"], "")
+                self.assertEqual(synth_rows[0]["lms_status"], "Chưa quét LMS")
 
 
 if __name__ == "__main__":

@@ -4,6 +4,27 @@ Tài liệu này ghi lại toàn bộ quá trình hình thành, phát triển ki
 
 ---
 
+## [2026-10-29] — Wave 4 (`4.0` → `4.4`): Kiểm Định Chất Lượng Nội Dung LMS/Zalo, Tự Động Ghi `Mô Tả Vấn Đề` Lên Teaching & Bảng Email Quản Lý (`DEC-036`, `DEC-038`)
+
+### ✨ Tính năng mới & Nâng cấp toàn diện (`UPGRADE_PROGRESS.md` — `Wave 4: 25/25 ✅`)
+- **Chặng 4.0 — Sao lưu toàn diện Pre-Wave 4 (`.backups/db/pre-wave4-20261029.sqlite3`, `.backups/pre-wave4-20261029/`)**:
+  - Sao lưu nóng cơ sở dữ liệu SQLite kèm diễn tập khôi phục (`integrity="ok"`, `foreign_key_errors=()`, `restore_drill_ok=true`) và đóng gói bản chụp mã nguồn ZIP kèm `MANIFEST.json` & `ROLLBACK_INSTRUCTIONS.md`.
+- **Chặng 4.1 — Đọc mở rộng bảng Teaching (`check_nhanxet.php`) & Đồng bộ trạng thái nộp LMS/Zalo (`services/bcnb_safety.py`, `services/zalo_discovery_service.py`, `services/zalo_bcnb_service.py`, `repositories/report_repository.py`)**:
+  - Bổ sung `resolve_extended_bcnb_columns` trích xuất đầy đủ `bcnb_session_id`, `khoi`, `nx_zalo_checked`, `nx_lms_checked`, `lms_deadline`, `qc_issue_note`, `instructor_note`, `evaluation_status` từ bảng `check_nhanxet.php` trong cả pha Dò tìm (`ZALO_DISCOVERY`) và pha Quét (`ZALO_SCAN`).
+  - Đồng bộ trạng thái nộp LMS (`✅ Đã nộp LMS` / `❌ Chưa nộp LMS`) và `Tình trạng đánh giá` (`⏳ Đã hoàn tất nhận xét LMS, chưa nhận xét Zalo`, `✅ Đã hoàn thành nhận xét`, ...) vào `ReportRepository.get_weekly_summary` ngay cả khi tuần đó chưa chạy job LMS riêng, kèm bảo vệ chống rò rỉ dữ liệu giữa các buổi trùng mã lớp hoặc trùng `session_id`.
+- **Chặng 4.2 — Động cơ kiểm định chất lượng nội dung LMS & Zalo (`services/lms_quality_service.py`, `services/external_gateways.py`, `services/zalo_scan_evidence.py`, `services/zalo_parallel_service.py`, `repositories/zalo_batch_repository.py`)**:
+  - Kiểm tra **Nội dung bài học LMS (`slot.summary`)**: phát hiện ô trống hoặc chỉ ghi tiêu đề cụt lủn (`"B1"`, `"Bài 1"`, `"Buổi 1"`, `"Kiểm tra checkpoint 1"`, mô tả thực chất `< 15` ký tự) $\rightarrow$ `[LMS] Chưa ghi nội dung bài học`.
+  - Phân biệt chuẩn **Buổi Thường** (đủ 3 ý: `Điểm mạnh`, `Điểm cần cải thiện`, `Lời khuyên`; cảnh báo viết sơ sài vài dòng hoặc copy-paste trùng lặp) và **Buổi Checkpoint** (`Coding` Buổi 5, 9; `Robotics` Buổi 4, 8 — đủ 3 trụ cột `KIẾN THỨC`, `KỸ NĂNG`, `THÁI ĐỘ`) cho học viên đi học (`ATTENDED`, `LATE_ARRIVED`) mà không bao giờ ghi tên thật học viên (bảo vệ PII).
+  - Phát hiện lỗi giáo viên ghi sai ngày học, sai số buổi hoặc sai tên bài học trên Zalo đối chiếu với `slot.summary` của LMS; tích hợp `LmsQualityGateway` trên `ExternalGateways` (cô lập hoàn toàn trong `-Isolated`).
+- **Chặng 4.3 — Tự động ghi vấn đề vào ô `Mô tả vấn đề (TE/TF/QC)` trên Teaching (`services/bcnb_safety.py`, `services/bcnb_actions.py`, `services/zalo_bcnb_service.py`)**:
+  - Bổ sung `merge_checker_issue_note` và `split_checker_issue_note` bảo toàn nguyên vẹn ghi chú thủ công của TE/TF/QC và cập nhật phần `[Auto QC: ...]` idempotent 100%.
+  - Bổ sung `execute_verified_checker_note_action` gửi `POST /check_nhanxet.php` (`action=update_note`, `note_type=checker`, `csrf_token`, `session_id`), kiểm chứng đọc ngược DOM sau hard reload (`verify_checker_note_persisted` $\rightarrow$ `VERIFIED`) ở chế độ `production` (hoặc mô phỏng `DRY_RUN` ở chế độ chạy thử) và lưu vết kiểm toán `BCNB_UPDATE_CHECKER_NOTE` vào `external_action_audit`.
+- **Chặng 4.4 — Bảng Email Quản lý 9 cột (HTML Table + Clipboard Rich Table + Unicode Table), CSV lỗi chất lượng & Hiển thị Dashboard (`services/report_email_service.py`, `repositories/report_repository.py`, `templates/partials/dashboard.html`, `static/js/jobs.js`)**:
+  - Nâng cấp email báo cáo lớp lỗi gửi Quản lý (`quangda@mindx.net.vn`, `tuanpa@mindx.com.vn`) thành bảng 9 cột (`STT`, `Mã lớp`, `Buổi`, `Ngày học`, `Giảng viên`, `NX Zalo`, `NX LMS`, `Tình trạng đánh giá`, `Mô tả vấn đề (TE/TF/QC)`) với cả bảng HTML có màu sắc trực quan (`html_table` / `html_body`), bảng khung viền Unicode (`text_table` / `text_body`) và tự động sao chép bảng Rich HTML vào Clipboard khi mở Gmail Web Compose (`copyFailedEmailReportToClipboard`).
+  - Mở rộng `CSV_HEADERS` / `WEEKLY_CSV_HEADERS` lên 9 cột và cập nhật `is_failed_weekly_summary_row` để bao gồm cả các lớp đã nộp Zalo & LMS nhưng còn lỗi chất lượng nội dung (`issue_description` khác rỗng); hiển thị trực quan `LMS`, `Đánh giá`, `Vấn đề` và `Giải trình GV` ngay trên bảng kết quả Dashboard.
+
+---
+
 ## [2026-10-24] — Củng Cố 4 Chốt An Toàn Hậu Kiểm Sau Rollout Phase 3.2 (`DEC-036`)
 
 ### 🛡️ Sửa lỗi & Củng cố an toàn vận hành
