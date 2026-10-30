@@ -228,7 +228,7 @@ class BcnbActionTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             merged_1,
-            "GV báo xin nộp muộn [đã duyệt] | [Auto QC: [LMS] Chưa ghi nội dung bài học; [Zalo] Báo cáo Zalo ghi sai ngày học (ghi 23/10/2026, lịch BCNB 24/10/2026)]",
+            "GV báo xin nộp muộn [đã duyệt] | [LMS] Chưa ghi nội dung bài học; [Zalo] Báo cáo Zalo ghi sai ngày học (ghi 23/10/2026, lịch BCNB 24/10/2026)",
         )
         # Idempotent re-merge
         merged_2 = merge_checker_issue_note(
@@ -248,15 +248,68 @@ class BcnbActionTests(unittest.IsolatedAsyncioTestCase):
         cleared = merge_checker_issue_note(merged_2, [])
         self.assertEqual(cleared, "GV báo xin nộp muộn [đã duyệt]")
 
-        # Length bound preserves manual note and balanced closing bracket
+        # Legacy [Auto QC: ...] note is also unwrapped cleanly when re-merged or cleared
+        legacy_cleared = merge_checker_issue_note(
+            "[Auto QC: [LMS] Nhận xét HS copy-paste trùng lặp (5/5 HS)]",
+            [],
+        )
+        self.assertEqual(legacy_cleared, "")
+
+        # Manual note containing "copy-paste trùng lặp" is never dropped by legacy auto-issue filter
+        from repositories.report_repository import _resolve_row_issue_description
+
+        manual_with_phrase = "QC: bỏ qua copy-paste trùng lặp; GV chưa nộp minh chứng"
+        self.assertEqual(
+            _resolve_row_issue_description({"qc_issue_note": manual_with_phrase}, st={}),
+            manual_with_phrase,
+        )
+        self.assertEqual(
+            _resolve_row_issue_description(
+                {
+                    "qc_issue_note": f"{manual_with_phrase} | [Auto QC: [LMS] Nhận xét HS copy-paste trùng lặp (3/3 HS); [LMS] Chưa ghi nội dung bài học]"
+                },
+                st={},
+            ),
+            f"{manual_with_phrase}; [LMS] Chưa ghi nội dung bài học",
+        )
+        self.assertEqual(
+            _resolve_row_issue_description(
+                {
+                    "lms_quality_issues": [
+                        "[LMS] Nhận xét HS sơ sài, thiếu đủ 3 ý (4/4 HS)",
+                        "[LMS] Nhận xét Checkpoint chưa đủ cấu trúc năng lực (4/5 HS)",
+                    ],
+                    "zalo_content_issues": [
+                        "[Zalo] Đã báo cáo nhưng ghi sai ngày/buổi trong mẫu — 'Bài số 6' khớp với BCNB W43/2026, ngày 25/10, buổi 6.",
+                        "[Zalo] Đã báo cáo nhưng ghi sai ngày 22/10 — đã ghép theo BCNB W43/2026, ngày 21/10, buổi 13.",
+                    ],
+                },
+                st={},
+            ),
+            "[LMS] Nhận xét thiếu ý; [LMS] Nhận xét Checkpoint chưa đủ cấu trúc năng lực; "
+            "[Zalo] Đã báo cáo nhưng ghi sai ngày/buổi ( Bài số 6 ); "
+            "[Zalo] Đã báo cáo nhưng ghi sai ngày ( ghi ngày 22/10 nhưng lịch là ngày 21/10, buổi 13)",
+        )
+
+        # Auto issue containing internal ; or | is sanitized so re-splitting stays idempotent
+        merged_internal_delim = merge_checker_issue_note(
+            "GV xin phép",
+            ["[Zalo] Báo cáo sai ngày; sai buổi | cần kiểm tra"],
+        )
+        self.assertEqual(
+            split_checker_issue_note(merged_internal_delim),
+            ("GV xin phép", ["[Zalo] Báo cáo sai ngày, sai buổi, cần kiểm tra"]),
+        )
+
+        # Length bound preserves manual note and leading [LMS] tag
         bounded = merge_checker_issue_note(
             "Ghi chú tay quan trọng",
             ["[LMS] " + ("Nội dung rất dài " * 20)],
             max_length=80,
         )
         self.assertLessEqual(len(bounded), 80)
-        self.assertTrue(bounded.startswith("Ghi chú tay quan trọng | [Auto QC: "))
-        self.assertTrue(bounded.endswith("...]"))
+        self.assertTrue(bounded.startswith("Ghi chú tay quan trọng | [LMS] "))
+        self.assertTrue(bounded.endswith("..."))
 
         # Long manual note (480+ chars) is never truncated and [LMS] tag is preserved
         long_manual = "A" * 485
@@ -302,7 +355,7 @@ class BcnbActionTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             audit_repo.record_intent.await_args.kwargs["intended_state"]["qc_issue_note"],
-            "GV báo bận | [Auto QC: [LMS] Chưa ghi nội dung bài học]",
+            "GV báo bận | [LMS] Chưa ghi nội dung bài học",
         )
 
         # 2. Production VERIFIED after readback
@@ -310,7 +363,7 @@ class BcnbActionTests(unittest.IsolatedAsyncioTestCase):
         page.evaluate = AsyncMock(
             return_value={"ok": True, "stage": "after_write", "http_status": 200, "error": ""}
         )
-        expected_merged = "GV báo bận | [Auto QC: [LMS] Chưa ghi nội dung bài học]"
+        expected_merged = "GV báo bận | [LMS] Chưa ghi nội dung bài học"
         with (
             patch(
                 "services.bcnb_actions.verify_checker_note_persisted",
@@ -562,8 +615,8 @@ class BcnbActionTests(unittest.IsolatedAsyncioTestCase):
             "targets": [scan_results[0]["scan_target"]],
         }
         expected_note = (
-            "GV báo bận | [Auto QC: [LMS] Chưa ghi nội dung bài học; "
-            "[LMS] Nhận xét HS sơ sài, thiếu đủ 3 ý (1/1 HS)]"
+            "GV báo bận | [LMS] Chưa ghi nội dung bài học; "
+            "[LMS] Nhận xét thiếu ý"
         )
         page, _, _, _ = self.make_dependencies()
         page.evaluate = AsyncMock(

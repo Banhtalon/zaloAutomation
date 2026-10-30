@@ -3285,6 +3285,46 @@ class LandingReadinessTests(unittest.IsolatedAsyncioTestCase):
             [],
         )
 
+    async def test_scan_one_target_lesson_14_applies_exemption_status_immediately(self):
+        from unittest.mock import MagicMock
+
+        target = {
+            "group_name": "MindX - Lập trình Game VT-C4K-GA37-T6 (18H-20H)",
+            "person": "Đỗ Thị Thùy Trang",
+            "class_code": "VT-C4K-GA37",
+            "week": 43,
+            "year": 2026,
+            "lesson": "14",
+            "class_date": "23/10/2026",
+            "class_date_iso": "2026-10-23",
+        }
+        job_repo = MagicMock(ensure_not_cancelled=AsyncMock())
+        res = await parallel_service._scan_one_target(
+            page=MagicMock(),
+            job_id=412,
+            job_repo=job_repo,
+            target=target,
+            today=datetime(2026, 10, 30),
+            screenshots_dir=".",
+            sync_result={"verified": True},
+        )
+        self.assertEqual(res["status"], "✅ Miễn báo cáo (Buổi 14)")
+        self.assertEqual(
+            res["status_detail"],
+            "Buổi 14 – miễn báo cáo theo quy tắc nghiệp vụ.",
+        )
+        self.assertEqual(res["evidence_state"], "LESSON_14_EXEMPTION")
+        self.assertTrue(res["submitted_for_bcnb"])
+        self.assertEqual(res["evidence"]["validation_errors"], [])
+        self.assertEqual(
+            res["evidence"]["business_rule"]["decision"],
+            "LESSON_14_EXEMPTION",
+        )
+        self.assertEqual(
+            res["evidence"]["business_rule"]["source_evidence_state"],
+            "INSUFFICIENT_EVIDENCE",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

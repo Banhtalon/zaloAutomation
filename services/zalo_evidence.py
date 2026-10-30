@@ -80,7 +80,16 @@ def apply_lesson_14_exemption(
             },
         }
 
-    source_state = result.get("evidence_state")
+    existing_rule = (
+        result.get("evidence", {}).get("business_rule")
+        if isinstance(result.get("evidence"), dict)
+        else None
+    )
+    source_state = (
+        existing_rule.get("source_evidence_state")
+        if isinstance(existing_rule, dict) and "source_evidence_state" in existing_rule
+        else result.get("evidence_state")
+    )
     evidence = result.setdefault("evidence", {})
     evidence["business_rule"] = {
         "decision": LESSON_14_EXEMPTION,

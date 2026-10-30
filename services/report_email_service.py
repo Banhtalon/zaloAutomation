@@ -17,6 +17,7 @@ from repositories.report_repository import (
     _resolve_row_evaluation_status,
     _resolve_row_issue_description,
     build_weekly_summary_csv,
+    normalize_zalo_status_text,
     sanitize_csv_cell,
 )
 
@@ -39,6 +40,8 @@ MANAGER_EMAIL_ALLOWLIST: tuple[str, ...] = (
 )
 DEFAULT_REPORT_EMAIL_RECIPIENTS: tuple[str, ...] = (OWNER_TRIAL_EMAIL,)
 _EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
+_URL_SAFE_CHARS = "/,:()-._~"
+MAX_GMAIL_COMPOSE_URL_LEN = 5400
 
 
 class ReportEmailError(ValueError):
@@ -190,6 +193,68 @@ def _pad_cell(value: str, target_width: int) -> str:
     return value + (" " * pad_len)
 
 
+def _truncate_url_text(value: str, max_width: int) -> str:
+    text = _normalize_unicode_table_cell(value)
+    if _display_width(text) <= max_width:
+        return text
+    budget = max(1, max_width - 2)
+    out: list[str] = []
+    used = 0
+    for ch in text:
+        w = _char_display_width(ch)
+        if used + w > budget:
+            break
+        out.append(ch)
+        used += w
+    return "".join(out).rstrip() + ".."
+
+
+def _short_url_status(value: str) -> str:
+    low = str(value or "").lower()
+    if "chưa quét" in low:
+        return "Chưa quét"
+    if (
+        "❌" in low
+        or "[x]" in low
+        or "⚠️" in low
+        or "⚠" in low
+        or "[!]" in low
+        or "🟡" in low
+        or "[tre]" in low
+        or "chưa" in low
+        or "trễ" in low
+    ):
+        return "Trễ"
+    if "✅" in low or "[ok]" in low or "đã nộp" in low or "đã báo cáo" in low or "đã tích" in low or "hoàn thành" in low:
+        return "OK"
+    return _truncate_url_text(value, 10)
+
+
+def _short_url_issue(value: str) -> str:
+    if not value or value == "—":
+        return ""
+    s = str(value).replace("[LMS] ", "").replace("[Zalo] ", "")
+    s = s.replace("Chưa ghi nội dung bài học", "Thiếu ND")
+    s = s.replace("Nhận xét HS sơ sài, thiếu đủ 3 ý", "NX thiếu ý")
+    s = s.replace("Nhận xét thiếu ý", "NX thiếu ý")
+    s = s.replace("Nhận xét học viên quá ngắn/sơ sài", "NX sơ sài")
+    s = s.replace("Chưa gửi báo cáo nhận xét trên nhóm Zalo", "Trễ Zalo")
+    s = s.replace(
+        "Không tải được đầy đủ dữ liệu buổi học từ LMS, cần kiểm tra thủ công",
+        "Cần KT LMS",
+    )
+    return _truncate_url_text(s, 24)
+
+
+def _compose_gmail_url(to_joined: str, subject: str, body: str) -> str:
+    return (
+        "https://mail.google.com/mail/?view=cm&fs=1"
+        f"&to={quote(to_joined, safe=_URL_SAFE_CHARS)}"
+        f"&su={quote(subject, safe=_URL_SAFE_CHARS)}"
+        f"&body={quote(body, safe=_URL_SAFE_CHARS)}"
+    )
+
+
 def _prepare_email_row_fields(idx: int, row: dict[str, Any]) -> dict[str, str]:
     raw_st = row.get("scan_target")
     st: dict[str, Any] = raw_st if isinstance(raw_st, dict) else {}
@@ -197,7 +262,9 @@ def _prepare_email_row_fields(idx: int, row: dict[str, Any]) -> dict[str, str]:
     teacher = _clean_single_line(row.get("teacher"), "Chưa phân công")
     lesson = _clean_single_line(row.get("lesson"), "—")
     class_date = _clean_single_line(row.get("class_date"), "—")
-    zalo_status = _clean_single_line(row.get("zalo_status"), "Chưa xác định")
+    zalo_status = normalize_zalo_status_text(
+        _clean_single_line(row.get("zalo_status"), "Chưa xác định")
+    )
     lms_status = _clean_single_line(row.get("lms_status"), "Chưa quét LMS")
     raw_eval = str(row.get("evaluation_status") or "").strip()
     if not raw_eval:
@@ -209,7 +276,12 @@ def _prepare_email_row_fields(idx: int, row: dict[str, Any]) -> dict[str, str]:
         )
     evaluation_status = _clean_single_line(raw_eval, "—")
     raw_issue = str(row.get("issue_description") or "").strip()
-    if not raw_issue:
+    if raw_issue:
+        raw_issue = _resolve_row_issue_description(
+            {"qc_issue_note": raw_issue},
+            st={},
+        )
+    else:
         raw_issue = _resolve_row_issue_description(row, st=st)
     issue_description = _clean_single_line(raw_issue, "—")
     verified_at = _clean_single_line(row.get("verified_at"), "—")
@@ -312,6 +384,7 @@ def build_failed_classes_email_package(
 
     detail_lines: list[str] = []
     ultra_compact_lines: list[str] = []
+    url_compact_lines: list[str] = []
     for item in prepared_rows:
         issue_suffix = (
             f" | Vấn đề: {item['issue_description']}"
@@ -335,6 +408,23 @@ def build_failed_classes_email_package(
             f"| LMS:{_truncate_cell(item['lms_status'], 16)}"
             f"{short_issue}"
         )
+        clean_teacher = (
+            re.sub(r"\s*\([^)]*\)", "", item["teacher"] or "").strip()
+            or item["teacher"]
+        )
+        short_date = (
+            item["class_date"][:5]
+            if len(item["class_date"]) >= 5
+            else item["class_date"]
+        )
+        short_url_issue = _short_url_issue(item["issue_description"])
+        url_issue_suffix = f" - {short_url_issue}" if short_url_issue else ""
+        url_compact_lines.append(
+            f"{item['stt']}. {item['class_code']} B{item['lesson']} ({short_date}) "
+            f"- {_truncate_url_text(clean_teacher, 18)} "
+            f"- Zalo:{_short_url_status(item['zalo_status'])}/LMS:{_short_url_status(item['lms_status'])}"
+            f"{url_issue_suffix}"
+        )
 
     header_lines = [
         "Kính gửi Quản lý,",
@@ -342,7 +432,6 @@ def build_failed_classes_email_package(
         f"Hệ thống Zalo & BCNB Automation gửi báo cáo danh sách các lớp lỗi/chưa hoàn tất trong Tuần W{safe_week:02d}/{safe_year}{job_suffix}:",
         f"- Tổng số lớp trong kỳ: {total_count}",
         f"- Số lớp lỗi / cần kiểm tra: {failed_count}",
-        f"- File đính kèm: {filename}",
         "",
     ]
     footer_lines = [
@@ -373,6 +462,16 @@ def build_failed_classes_email_package(
             *header_lines,
             "Danh sách rút gọn các lớp cần xử lý (Mẹo: Bấm Ctrl+V để dán bảng đầy đủ từ Clipboard):",
             *ultra_compact_lines,
+            *footer_lines,
+        ]
+    )
+    compose_url_compact_body = "\n".join(
+        [
+            "Kính gửi Quản lý,",
+            f"Báo cáo lớp lỗi Tuần W{safe_week:02d}/{safe_year}{job_suffix}: {failed_count}/{total_count} lớp cần xử lý.",
+            "(Mẹo: Bảng 9 cột kẻ khung đã tự động copy vào Clipboard - bấm Ctrl+V trong Gmail để dán bảng màu đầy đủ)",
+            "",
+            *url_compact_lines,
             *footer_lines,
         ]
     )
@@ -426,7 +525,6 @@ def build_failed_classes_email_package(
         "<ul>"
         f"<li>Tổng số lớp trong kỳ: <strong>{total_count}</strong></li>"
         f'<li>Số lớp lỗi / cần xử lý: <strong style="color:#dc2626;">{failed_count}</strong></li>'
-        f"<li>File CSV đính kèm: <code>{html.escape(filename)}</code></li>"
         "</ul>"
         f"{html_table}"
         "<p style=\"margin-top:16px;font-size:12px;color:#475569;\">Trân trọng,<br>MindX Zalo &amp; BCNB Automation</p>"
@@ -434,35 +532,44 @@ def build_failed_classes_email_package(
     )
 
     to_joined = ",".join(recipients)
-    max_compose_url_body_chars = 6500
-    if len(text_body) <= max_compose_url_body_chars:
-        compose_source = text_body
-    elif len(compose_compact_body) <= max_compose_url_body_chars:
-        compose_source = compose_compact_body
-    else:
-        compose_source = compose_ultra_compact_body
-    gmail_body_truncated = len(compose_source) > max_compose_url_body_chars
+    candidate_bodies = (
+        text_body,
+        compose_compact_body,
+        compose_ultra_compact_body,
+        compose_url_compact_body,
+    )
+    url_body_preview = compose_url_compact_body
+    gmail_body_truncated = True
+    for candidate in candidate_bodies:
+        if len(_compose_gmail_url(to_joined, subject, candidate)) <= MAX_GMAIL_COMPOSE_URL_LEN:
+            url_body_preview = candidate
+            gmail_body_truncated = False
+            break
+
     if gmail_body_truncated:
         truncation_notice = (
-            "\n... [Nội dung URL Gmail bị giới hạn độ dài — "
-            "Hãy bấm Ctrl+V để dán bảng đầy đủ từ Clipboard hoặc đính kèm file CSV]"
+            "\n... [Nội dung URL Gmail bị giới hạn độ dài - "
+            "Hãy bấm Ctrl+V để dán bảng đầy đủ từ Clipboard]"
         )
-        url_body_preview = (
-            compose_source[: max_compose_url_body_chars - len(truncation_notice)].rstrip()
-            + truncation_notice
-        )
-    else:
-        url_body_preview = compose_source
-    gmail_compose_url = (
-        "https://mail.google.com/mail/?view=cm&fs=1"
-        f"&to={quote(to_joined)}"
-        f"&su={quote(subject)}"
-        f"&body={quote(url_body_preview)}"
-    )
+        kept_lines: list[str] = []
+        for line in compose_url_compact_body.splitlines():
+            trial_body = "\n".join([*kept_lines, line]).rstrip() + truncation_notice
+            if (
+                len(_compose_gmail_url(to_joined, subject, trial_body))
+                > MAX_GMAIL_COMPOSE_URL_LEN
+            ):
+                break
+            kept_lines.append(line)
+        if kept_lines:
+            url_body_preview = "\n".join(kept_lines).rstrip() + truncation_notice
+        else:
+            url_body_preview = truncation_notice.lstrip()
+
+    gmail_compose_url = _compose_gmail_url(to_joined, subject, url_body_preview)
     mailto_url = (
-        f"mailto:{quote(to_joined)}"
-        f"?subject={quote(subject)}"
-        f"&body={quote(url_body_preview)}"
+        f"mailto:{quote(to_joined, safe=_URL_SAFE_CHARS)}"
+        f"?subject={quote(subject, safe=_URL_SAFE_CHARS)}"
+        f"&body={quote(url_body_preview, safe=_URL_SAFE_CHARS)}"
     )
 
     return {
@@ -569,8 +676,8 @@ async def send_failed_classes_report_email(
             "ok": True,
             "delivery_status": "SMTP_NOT_CONFIGURED",
             "message": (
-                f"Đã xuất CSV {len(failed_rows)} lớp lỗi. Chưa cấu hình SMTP_USERNAME/SMTP_PASSWORD trong .env "
-                f"nên hệ thống mở sẵn khung gửi mail tới {', '.join(recipients)}."
+                f"Đã chuẩn bị báo cáo {len(failed_rows)} lớp lỗi (bảng 9 cột đã tự động copy vào Clipboard — bấm Ctrl+V trong Gmail để dán bảng màu). "
+                f"Hệ thống đang mở sẵn khung gửi mail tới {', '.join(recipients)}."
             ),
             "week": int(week),
             "year": int(year),
@@ -665,7 +772,7 @@ async def send_failed_classes_report_email(
         "ok": True,
         "delivery_status": "SENT",
         "message": (
-            f"Đã xuất CSV {len(failed_rows)} lớp lỗi và gửi email tự động thành công tới {', '.join(accepted_recipients)}."
+            f"Đã gửi email báo cáo {len(failed_rows)} lớp lỗi tự động thành công tới {', '.join(accepted_recipients)}."
         ),
         "week": int(week),
         "year": int(year),

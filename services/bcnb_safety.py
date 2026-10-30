@@ -744,6 +744,62 @@ def _normalize_auto_issue_key(text: str) -> str:
     return " ".join(stripped.split())
 
 
+def normalize_auto_issue_text(text: str) -> str:
+    """Normalize auto-generated LMS/Zalo issue strings to the concise canonical wording."""
+    cleaned = " ".join(str(text or "").split()).strip(" ;|")
+    if not cleaned:
+        return ""
+    if re.match(
+        r"^\[LMS\]\s*(?:(?:Nhận|Nhan)\s+x[eé]t\s+(?:HS\s+)?s[oơ]\s+s[aà]i\s*,?\s*thi[eế]u\s*(?:đủ\s*)?3\s*[yý]|(?:Nhận|Nhan)\s+x[eé]t\s+thi[eế]u\s+[yý])(?:\s*\([^)]*\))?\.?$",
+        cleaned,
+        flags=re.IGNORECASE,
+    ):
+        return "[LMS] Nhận xét thiếu ý"
+    if re.match(
+        r"^\[LMS\]\s*(?:Nhận|Nhan)\s+x[eé]t\s+Checkpoint\s+ch[uư]a\s+[đd][uủ]\s+c[aấ]u\s+tr[uú]c\s+n[aă]ng\s+l[uự]c(?:\s*\([^)]*\))?\.?$",
+        cleaned,
+        flags=re.IGNORECASE,
+    ):
+        return "[LMS] Nhận xét Checkpoint chưa đủ cấu trúc năng lực"
+    m_template = re.match(
+        r"^(?:\[Zalo\]\s*)?Đã báo cáo nhưng ghi sai ngày/buổi(?:\s+trong\s+mẫu)?\s*(?:[;—,\-]+|\()\s*['\"]?(Bài\s+số\s+\d+)['\"]?(?:\s+khớp\s+với\b.*|\s*\))\.?$",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    if m_template:
+        lesson_label = " ".join(m_template.group(1).split())
+        if lesson_label[:1].islower():
+            lesson_label = lesson_label[:1].upper() + lesson_label[1:]
+        return f"[Zalo] Đã báo cáo nhưng ghi sai ngày/buổi ( {lesson_label} )"
+    m_wrong_date = re.match(
+        r"^(?:\[Zalo\]\s*)?Đã báo cáo nhưng ghi sai ngày\s+([^\s;—,\)]+)\s*[;—,\-]+\s*đã ghép theo BCNB\s+W\d+/\d+\s*,\s*ngày\s+([^,.\)]+)\s*,\s*buổi\s+([^\s.\)]+)\.?$",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    if m_wrong_date:
+        claimed_date = m_wrong_date.group(1).strip()
+        target_date = m_wrong_date.group(2).strip()
+        target_lesson = m_wrong_date.group(3).strip()
+        return (
+            f"[Zalo] Đã báo cáo nhưng ghi sai ngày "
+            f"( ghi ngày {claimed_date} nhưng lịch là ngày {target_date}, buổi {target_lesson})"
+        )
+    m_wrong_lesson = re.match(
+        r"^(?:\[Zalo\]\s*)?Đã báo cáo nhưng ghi sai buổi\s+([^\s;—,\)]+)\s*[;—,\-]+\s*đã ghép theo BCNB\s+W\d+/\d+\s*,\s*ngày\s+([^,.\)]+)\s*,\s*buổi\s+([^\s.\)]+)\.?$",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    if m_wrong_lesson:
+        claimed_lesson = m_wrong_lesson.group(1).strip()
+        target_date = m_wrong_lesson.group(2).strip()
+        target_lesson = m_wrong_lesson.group(3).strip()
+        return (
+            f"[Zalo] Đã báo cáo nhưng ghi sai buổi "
+            f"( ghi buổi {claimed_lesson} nhưng lịch là ngày {target_date}, buổi {target_lesson})"
+        )
+    return cleaned
+
+
 def split_checker_issue_note(raw_note: Any) -> tuple[str, list[str]]:
     """Split a BCNB checker note into ``(manual_note, auto_issues)`` using balanced brackets."""
     text = clean_bcnb_note_text(raw_note)
@@ -776,7 +832,7 @@ def split_checker_issue_note(raw_note: Any) -> tuple[str, list[str]]:
             inside = remaining[pos:].strip(" ]")
             end_idx = len(remaining)
         for seg in inside.split(";"):
-            cleaned_seg = " ".join(seg.split()).strip(" ;|")
+            cleaned_seg = normalize_auto_issue_text(seg)
             if not cleaned_seg:
                 continue
             key = _normalize_auto_issue_key(cleaned_seg)
@@ -789,7 +845,26 @@ def split_checker_issue_note(raw_note: Any) -> tuple[str, list[str]]:
             remaining = f"{before} | {after}"
         else:
             remaining = before or after
-    manual_clean = " ".join(remaining.split()).strip()
+
+    manual_chunks: list[str] = []
+    auto_tag_re = re.compile(r"^\[(?:LMS|Zalo)\]\s*", flags=re.IGNORECASE)
+    for pipe_chunk in remaining.split("|"):
+        chunk_manual_segs: list[str] = []
+        for seg in pipe_chunk.split(";"):
+            cleaned_seg = " ".join(seg.split()).strip(" ;|")
+            if not cleaned_seg:
+                continue
+            if auto_tag_re.match(cleaned_seg):
+                norm_seg = normalize_auto_issue_text(cleaned_seg)
+                key = _normalize_auto_issue_key(norm_seg)
+                if key and key not in seen_keys:
+                    seen_keys.add(key)
+                    auto_issues.append(norm_seg)
+            else:
+                chunk_manual_segs.append(cleaned_seg)
+        if chunk_manual_segs:
+            manual_chunks.append("; ".join(chunk_manual_segs))
+    manual_clean = " | ".join(manual_chunks).strip()
     return manual_clean, auto_issues
 
 
@@ -806,6 +881,17 @@ def _truncate_single_issue_preserving_tag(issue_text: str, item_budget: int) -> 
     return f"{tag_prefix}{_balance_issue_brackets(sliced_body)}"
 
 
+def _is_legacy_lms_duplicate_issue(text: str) -> bool:
+    cleaned = " ".join(str(text or "").split()).strip()
+    return bool(
+        re.match(
+            r"^\[LMS\]\s*(?:Nhận|Nhan)\s+x[eé]t\s+HS\s+copy-paste\s+tr[uù]ng\s+l[aặ]p\b",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+    )
+
+
 def merge_checker_issue_note(
     existing_note: Any,
     auto_issues: Sequence[str] | None,
@@ -819,8 +905,10 @@ def merge_checker_issue_note(
     seen_keys: set[str] = set()
     for raw_issue in auto_issues or []:
         cleaned = " ".join(str(raw_issue or "").split()).strip(" ;|")
-        if not cleaned:
+        if not cleaned or _is_legacy_lms_duplicate_issue(cleaned):
             continue
+        cleaned = normalize_auto_issue_text(cleaned)
+        cleaned = re.sub(r"\s*[;|]+\s*", ", ", cleaned)
         balanced = _balance_issue_brackets(cleaned)
         key = _normalize_auto_issue_key(balanced)
         if key and key not in seen_keys:
@@ -831,21 +919,19 @@ def merge_checker_issue_note(
         return manual_part
 
     joined_issues = "; ".join(deduped_issues)
-    auto_block = f"[Auto QC: {joined_issues}]"
-    combined = f"{manual_part} | {auto_block}" if manual_part else auto_block
+    combined = f"{manual_part} | {joined_issues}" if manual_part else joined_issues
     if len(combined) <= limit:
         return combined
 
-    prefix_len = len("[Auto QC: ")
-    suffix = "...]"
+    suffix = "..."
     count = len(deduped_issues)
     min_inner_budget = max(20, 18 * count + 2 * max(0, count - 1))
 
     if manual_part:
-        raw_avail = limit - len(manual_part) - 3 - prefix_len - len(suffix)
+        raw_avail = limit - len(manual_part) - 3 - len(suffix)
         inner_budget = max(min_inner_budget, raw_avail)
     else:
-        inner_budget = max(min_inner_budget, limit - prefix_len - len(suffix))
+        inner_budget = max(min_inner_budget, limit - len(suffix))
 
     sep_cost = 2 * max(0, count - 1)
     per_issue_budget = max(18, (inner_budget - sep_cost) // count)
@@ -855,8 +941,8 @@ def merge_checker_issue_note(
     ]
     truncated_inner = "; ".join(truncated_parts).rstrip(" ;|,[")
     if manual_part:
-        return f"{manual_part} | [Auto QC: {truncated_inner}{suffix}"
-    return f"[Auto QC: {truncated_inner}{suffix}"
+        return f"{manual_part} | {truncated_inner}{suffix}"
+    return f"{truncated_inner}{suffix}"
 
 
 def _normalize_bcnb_date_iso(raw_date: str) -> str:

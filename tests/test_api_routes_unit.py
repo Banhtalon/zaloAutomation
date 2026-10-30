@@ -3031,6 +3031,88 @@ class ApiRoutesUnitTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(synth_rows[0]["qc_issue_note"], "")
                 self.assertEqual(synth_rows[0]["lms_status"], "Chưa quét LMS")
 
+    def test_lesson_14_exemption_normalizes_legacy_insufficient_evidence_row(self):
+        from repositories.report_repository import (
+            _sanitize_dashboard_item,
+            build_weekly_summary_csv,
+            is_failed_weekly_summary_row,
+        )
+
+        legacy_l14_item = {
+            "group": "MindX - Lập trình Game VT-C4K-GA37-T6 (18H-20H)",
+            "person": "Đỗ Thị Thùy Trang",
+            "status": "⚠️ Không đủ bằng chứng – Cần kiểm tra thủ công",
+            "status_detail": (
+                "Buổi 14 được miễn báo cáo Zalo.; Không xác minh được tên nhóm Zalo thực tế.; "
+                "Không đọc được tin nhắn Zalo."
+            ),
+            "evidence_state": "LESSON_14_EXEMPTION",
+            "submitted_for_bcnb": False,
+            "nx_lms_checked": True,
+            "evaluation_status": "⚠️ Đã hoàn tất nhận xét LMS, Zalo cần kiểm tra",
+            "scan_target": {
+                "week": 43,
+                "year": 2026,
+                "class_code": "VT-C4K-GA37",
+                "lesson": "14",
+                "class_date": "23/10/2026",
+                "class_date_iso": "2026-10-23",
+                "nx_lms_checked": True,
+                "evaluation_status": "⚠️ Đã hoàn tất nhận xét LMS, Zalo cần kiểm tra",
+            },
+            "evidence": {
+                "date_context": {
+                    "target_week": 43,
+                    "target_year": 2026,
+                    "target_lesson": "14",
+                    "target_class_code": "VT-C4K-GA37",
+                }
+            },
+        }
+        sanitized = _sanitize_dashboard_item(
+            legacy_l14_item,
+            week=43,
+            year=2026,
+            source_job_id=412,
+            lms_status="✅ Đã nộp LMS",
+            job_timestamp="2026-10-30 09:53:19 ICT",
+        )
+        self.assertEqual(sanitized["status"], "✅ Miễn báo cáo (Buổi 14)")
+        self.assertEqual(
+            sanitized["status_detail"],
+            "Buổi 14 – miễn báo cáo theo quy tắc nghiệp vụ.",
+        )
+        self.assertEqual(sanitized["evaluation_status"], "✅ Đã hoàn thành nhận xét")
+        self.assertTrue(sanitized["submitted_for_bcnb"])
+        self.assertEqual(sanitized["evidence_state"], "LESSON_14_EXEMPTION")
+
+        summary_row = {
+            "class_code": "VT-C4K-GA37",
+            "teacher": "Đỗ Thị Thùy Trang",
+            "lesson": "14",
+            "class_date": "23/10/2026",
+            "zalo_status": "⚠️ Không đủ bằng chứng – Cần kiểm tra thủ công",
+            "lms_status": "✅ Đã nộp LMS",
+            "evaluation_status": "⚠️ Đã hoàn tất nhận xét LMS, Zalo cần kiểm tra",
+            "issue_description": "",
+            "verified_at": "2026-10-30 09:53:19 ICT",
+        }
+        self.assertFalse(is_failed_weekly_summary_row(summary_row))
+        self.assertFalse(
+            is_failed_weekly_summary_row(
+                {**summary_row, "evaluation_status": "❌ Chưa nhận xét Zalo"}
+            )
+        )
+        self.assertFalse(
+            is_failed_weekly_summary_row(
+                {**summary_row, "evaluation_status": "⚠️ Chưa nhận xét Zalo"}
+            )
+        )
+        csv_text = build_weekly_summary_csv([summary_row])
+        self.assertIn("✅ Miễn báo cáo (Buổi 14)", csv_text)
+        self.assertIn("✅ Đã hoàn thành nhận xét", csv_text)
+        self.assertNotIn("Zalo cần kiểm tra", csv_text)
+
 
 if __name__ == "__main__":
     unittest.main()

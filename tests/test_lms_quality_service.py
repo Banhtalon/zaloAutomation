@@ -105,13 +105,9 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(res["attended_count"], 6)
         self.assertEqual(res["shallow_count"], 6)
         self.assertEqual(res["duplicate_count"], 6)
-        self.assertIn(
-            "[LMS] Nhận xét HS sơ sài, thiếu đủ 3 ý (6/6 HS)",
+        self.assertEqual(
             res["issues"],
-        )
-        self.assertIn(
-            "[LMS] Nhận xét HS copy-paste trùng lặp (6/6 HS)",
-            res["issues"],
+            ["[LMS] Nhận xét thiếu ý"],
         )
         joined_issues = " ; ".join(res["issues"])
         self.assertNotIn("Học Viên Ẩn Danh", joined_issues)
@@ -201,7 +197,7 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cp_bad["failed_count"], 3)
         self.assertEqual(
             cp_bad["issues"],
-            ["[LMS] Nhận xét Checkpoint chưa đủ cấu trúc năng lực (3/3 HS)"],
+            ["[LMS] Nhận xét Checkpoint chưa đủ cấu trúc năng lực"],
         )
 
     def test_evaluate_zalo_content_issues_detects_wrong_date_lesson_and_title(
@@ -227,7 +223,10 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
             lms_summary_text="Buổi 5: Cấu trúc dữ liệu danh sách (List) và vòng lặp For trong Python",
         )
         self.assertEqual(len(issues), 3)
-        self.assertIn("ghi sai ngày 18/10", issues[0])
+        self.assertEqual(
+            issues[0],
+            "[Zalo] Đã báo cáo nhưng ghi sai ngày ( ghi ngày 18/10 nhưng lịch là ngày 25/10, buổi 5)",
+        )
         self.assertIn(
             "[Zalo] Ghi sai số bài học trong nội dung (ghi Bài 2, lịch là Buổi 5)",
             issues,
@@ -235,6 +234,25 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(
             "[Zalo] Tên bài học trên Zalo không khớp với nội dung bài trên LMS",
             issues,
+        )
+
+        template_mismatch_item = {
+            "scan_target": {
+                "class_code": "VT-ROB-SEMIB07",
+                "lesson": "6",
+                "class_date_iso": "2026-10-25",
+            },
+            "evidence": {
+                "date_context": {
+                    "target_lesson": "6",
+                    "content_lesson": 6,
+                    "target_match_note": "Đã báo cáo nhưng ghi sai ngày/buổi trong mẫu; 'Bài số 6' khớp với BCNB W43/2026, ngày 25/10, buổi 6.",
+                }
+            },
+        }
+        self.assertEqual(
+            evaluate_zalo_content_issues(template_mismatch_item),
+            ["[Zalo] Đã báo cáo nhưng ghi sai ngày/buổi ( Bài số 6 )"],
         )
 
         # Matching topic keywords should not trigger title mismatch
@@ -289,7 +307,7 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
             scan_results[0]["lms_quality_issues"],
             [
                 "[LMS] Chưa ghi nội dung bài học",
-                "[LMS] Nhận xét HS sơ sài, thiếu đủ 3 ý (1/1 HS)",
+                "[LMS] Nhận xét thiếu ý",
             ],
         )
 
@@ -343,10 +361,7 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
             three_students, is_checkpoint=False, lesson=2
         )
         self.assertEqual(res_dup["duplicate_count"], 2)
-        self.assertIn(
-            "[LMS] Nhận xét HS copy-paste trùng lặp (2/3 HS)",
-            res_dup["issues"],
-        )
+        self.assertEqual(res_dup["issues"], [])
 
         # 51 students overflow (> 50 limit) must flag manual check even if first 50 are valid
         overflow_students = [
@@ -737,9 +752,14 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
             is_failed_weekly_summary_row,
         )
         from services.report_email_service import (
+            MAX_GMAIL_COMPOSE_URL_LEN,
             _display_width,
+            _short_url_status,
             build_failed_classes_email_package,
         )
+        self.assertEqual(_short_url_status("🟡 Đã nộp trễ – Có minh chứng"), "Trễ")
+        self.assertEqual(_short_url_status("⚠️ AI gợi ý – Cần kiểm tra"), "Trễ")
+        self.assertEqual(_short_url_status("✅ Đã nộp – Có minh chứng"), "OK")
 
         ten_rows = [
             {
@@ -780,8 +800,9 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
         line_widths = {_display_width(line) for line in table_lines}
         self.assertEqual(len(line_widths), 1)
 
-        # All 10 rows and 25 rows fit inside Gmail compose URL without truncation
+        # All 10 rows and 25 rows fit inside Gmail compose URL without truncation and stay within encoded byte limit
         self.assertFalse(pkg10["gmail_body_truncated"])
+        self.assertLessEqual(len(pkg10["gmail_compose_url"]), MAX_GMAIL_COMPOSE_URL_LEN)
         decoded_url = unquote(pkg10["gmail_compose_url"])
         self.assertIn("VT-C4K-PTB10", decoded_url)
 
@@ -804,11 +825,12 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
             recipients=["quangda@mindx.net.vn"],
         )
         self.assertFalse(pkg25["gmail_body_truncated"])
+        self.assertLessEqual(len(pkg25["gmail_compose_url"]), MAX_GMAIL_COMPOSE_URL_LEN)
         decoded_url25 = unquote(pkg25["gmail_compose_url"])
         for idx in range(1, 26):
             self.assertIn(f"VT-C4K-PTB{idx:02d}", decoded_url25)
 
-        # Very large list (>6500 chars even in ultra-compact mode) sets gmail_body_truncated=True and appends explicit notice
+        # Very large list sets gmail_body_truncated=True, appends explicit notice, and strictly respects encoded URL limit
         many_rows = [
             {
                 **ten_rows[0],
@@ -826,6 +848,7 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
             recipients=["quangda@mindx.net.vn"],
         )
         self.assertTrue(pkg_large["gmail_body_truncated"])
+        self.assertLessEqual(len(pkg_large["gmail_compose_url"]), MAX_GMAIL_COMPOSE_URL_LEN)
         self.assertIn("Ctrl+V", unquote(pkg_large["gmail_compose_url"]))
 
     async def test_hotfix_hostname_validation_temp_page_cleanup_and_rubric_regressions(self) -> None:
@@ -848,10 +871,7 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
         pos_res = evaluate_lms_slot_quality(
             pos_slot, class_code="VT-C4K-PTB16", khoi="Coding", lesson=1
         )
-        self.assertTrue(
-            any("sơ sài" in issue for issue in pos_res["issues"]),
-            pos_res["issues"],
-        )
+        self.assertIn("[LMS] Nhận xét thiếu ý", pos_res["issues"])
 
         # 2. Numbered Checkpoint rubric without "Điểm năng lực" on non-default session (B6) is recognized as Checkpoint
         numbered_rubric = (

@@ -21,7 +21,7 @@ import re
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
-from services.bcnb_safety import fold_text
+from services.bcnb_safety import fold_text, normalize_auto_issue_text
 
 MAX_LMS_QUALITY_CLASSES_PER_BATCH = 60
 MAX_LMS_SLOTS_PER_CLASS = 20
@@ -561,9 +561,7 @@ def evaluate_lms_student_comments(
                 f"[LMS] Chưa nhận xét HS buổi Checkpoint ({missing_count}/{attended_count} HS)"
             )
         elif failed_count > 0:
-            issues.append(
-                f"[LMS] Nhận xét Checkpoint chưa đủ cấu trúc năng lực ({failed_count}/{attended_count} HS)"
-            )
+            issues.append("[LMS] Nhận xét Checkpoint chưa đủ cấu trúc năng lực")
     else:
         if missing_count == attended_count:
             issues.append(
@@ -571,18 +569,18 @@ def evaluate_lms_student_comments(
             )
         elif missing_count > 0 and shallow_count > 0:
             issues.append(
-                f"[LMS] Thiếu nhận xét ({missing_count}/{attended_count} HS) và nhận xét sơ sài thiếu 3 ý ({shallow_count}/{attended_count} HS)"
+                f"[LMS] Thiếu nhận xét học viên ({missing_count}/{attended_count} HS)"
             )
+            issues.append("[LMS] Nhận xét thiếu ý")
         elif missing_count > 0:
             issues.append(
                 f"[LMS] Thiếu nhận xét học viên ({missing_count}/{attended_count} HS)"
             )
         elif shallow_count > 0:
-            issues.append(
-                f"[LMS] Nhận xét HS sơ sài, thiếu đủ 3 ý ({shallow_count}/{attended_count} HS)"
-            )
+            issues.append("[LMS] Nhận xét thiếu ý")
 
-    # Check copy-paste identical comments across attended students (any duplicate group >= 2)
+    # Duplicate comment count is tracked as metadata only; do not flag copy-paste as an issue
+    # as long as each comment satisfies the required 3-part structure.
     duplicate_count = 0
     if not is_checkpoint and len(normalized_bodies) >= 2:
         counts_by_body: dict[str, int] = {}
@@ -591,9 +589,6 @@ def evaluate_lms_student_comments(
         dup_total = sum(c for c in counts_by_body.values() if c >= 2)
         if dup_total >= 2:
             duplicate_count = dup_total
-            issues.append(
-                f"[LMS] Nhận xét HS copy-paste trùng lặp ({duplicate_count}/{attended_count} HS)"
-            )
 
     if overflow_records:
         issues.append(
@@ -761,7 +756,25 @@ def evaluate_zalo_content_issues(
     """Inspect a Zalo scan result for wrong date, wrong lesson number, or wrong lesson title."""
     if not isinstance(item, dict):
         return []
-    if "Miễn" in str(item.get("status") or ""):
+    if (
+        "Miễn" in str(item.get("status") or "")
+        or str(item.get("evidence_state") or "").strip() == "LESSON_14_EXEMPTION"
+    ):
+        return []
+    raw_st_check = item.get("scan_target")
+    st_check: dict[str, Any] = raw_st_check if isinstance(raw_st_check, dict) else {}
+    raw_ev_check = item.get("evidence")
+    ev_check: dict[str, Any] = raw_ev_check if isinstance(raw_ev_check, dict) else {}
+    raw_ctx_check = ev_check.get("date_context")
+    ctx_check: dict[str, Any] = raw_ctx_check if isinstance(raw_ctx_check, dict) else {}
+    if (
+        _parse_lesson_number(
+            st_check.get("lesson")
+            or ctx_check.get("target_lesson")
+            or item.get("lesson")
+        )
+        == 14
+    ):
         return []
     issues: list[str] = []
     seen: set[str] = set()
@@ -773,6 +786,7 @@ def evaluate_zalo_content_issues(
         cleaned = cleaned.replace("; ", " — ")
         if not cleaned.startswith("["):
             cleaned = f"[Zalo] {cleaned}"
+        cleaned = normalize_auto_issue_text(cleaned)
         norm = fold_text(re.sub(r"^\[[^\]]+\]\s*", "", cleaned))
         if norm and norm not in seen:
             seen.add(norm)

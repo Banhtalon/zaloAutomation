@@ -64,6 +64,16 @@ for (const id of requiredIds) {
   }
 }
 
+const dashboardHtml = fs.readFileSync('templates/partials/dashboard.html', 'utf8');
+const specsHtml = fs.readFileSync('templates/partials/specs.html', 'utf8');
+const appCssSource = fs.readFileSync('static/css/app.css', 'utf8');
+if (/id=["']zalo-preflight["']/.test(dashboardHtml) || !/id=["']zalo-preflight["']/.test(specsHtml)) {
+  throw new Error('zalo-preflight banner must reside in templates/partials/specs.html, not dashboard.html');
+}
+if (!/class="data-panel glass-panel shrink-0/.test(dashboardHtml) || !appCssSource.includes('#tab-dashboard .table-scroll')) {
+  throw new Error('Dashboard data-panel must not shrink into a constrained inner scrollbox');
+}
+
 const handlerNames = new Set();
 const ignoredCallKeywords = new Set(['if', 'for', 'while', 'switch', 'catch']);
 for (const attribute of templates.matchAll(/on(?:click|keyup|change)="([^"]+)"/g)) {
@@ -1919,6 +1929,40 @@ async function checkWeeklyHistoryAndCsvExport() {
     ) === true,
     'isFailedWeeklySummaryRow must flag rows with quality issue_description even when Zalo and LMS are submitted',
   );
+  assertFrontend(
+    vm.runInContext(
+      `resolveDashboardRowIssueDescription({
+        qc_issue_note: 'QC: bỏ qua copy-paste trùng lặp; GV chưa nộp minh chứng | [Auto QC: [LMS] Nhận xét HS copy-paste trùng lặp (4/4 HS); [LMS] Chưa ghi nội dung bài học]'
+      })`,
+      harness.context,
+    ) === 'QC: bỏ qua copy-paste trùng lặp; GV chưa nộp minh chứng; [LMS] Chưa ghi nội dung bài học' &&
+      vm.runInContext(
+        `resolveDashboardRowIssueDescription({
+          issue_description: 'QC: bỏ qua copy-paste trùng lặp; GV chưa nộp minh chứng',
+          qc_issue_note: 'QC: bỏ qua copy-paste trùng lặp; GV chưa nộp minh chứng'
+        })`,
+        harness.context,
+      ) === 'QC: bỏ qua copy-paste trùng lặp; GV chưa nộp minh chứng' &&
+      vm.runInContext(
+        `resolveDashboardRowIssueDescription({
+          lms_quality_issues: [
+            '[LMS] Nhận xét HS sơ sài, thiếu đủ 3 ý (4/4 HS)',
+            '[LMS] Nhận xét Checkpoint chưa đủ cấu trúc năng lực (4/5 HS)'
+          ],
+          zalo_content_issues: [
+            "[Zalo] Đã báo cáo nhưng ghi sai ngày/buổi trong mẫu — 'Bài số 6' khớp với BCNB W43/2026, ngày 25/10, buổi 6.",
+            '[Zalo] Đã báo cáo nhưng ghi sai ngày 22/10 — đã ghép theo BCNB W43/2026, ngày 21/10, buổi 13.'
+          ]
+        })`,
+        harness.context,
+      ) ===
+        '[LMS] Nhận xét thiếu ý; [LMS] Nhận xét Checkpoint chưa đủ cấu trúc năng lực; [Zalo] Đã báo cáo nhưng ghi sai ngày/buổi ( Bài số 6 ); [Zalo] Đã báo cáo nhưng ghi sai ngày ( ghi ngày 22/10 nhưng lịch là ngày 21/10, buổi 13)' &&
+      vm.runInContext(
+        `normalizeZaloStatusDisplay('❌ Chưa tìm thấy trong khoảng đã kiểm chứng – Có minh chứng')`,
+        harness.context,
+      ) === 'Chưa nhận xét',
+    'resolveDashboardRowIssueDescription and normalizeZaloStatusDisplay must normalize legacy issue strings and not-found Zalo status',
+  );
   const clipboardCopied = await vm.runInContext(
     `copyFailedEmailReportToClipboard({
       html_table: '<table><tr><td>VT-C4K-PTB16</td></tr></table>',
@@ -1931,12 +1975,22 @@ async function checkWeeklyHistoryAndCsvExport() {
     'copyFailedEmailReportToClipboard must copy email report table to clipboard',
   );
 
-  // 3b. exportAndEmailFailedClassesCsv exports ONLY failed classes (VT-C4K-GI35) and emails quangda@mindx.net.vn
+  // 3b. exportAndEmailFailedClassesCsv sends email for ONLY failed classes (VT-C4K-GI35) to quangda@mindx.net.vn without triggering browser CSV download
+  let downloadTriggeredCount = 0;
+  const origTriggerDownload = vm.runInContext('triggerCsvFileDownload', harness.context);
+  harness.context.triggerCsvFileDownload = (...args) => {
+    downloadTriggeredCount += 1;
+    return origTriggerDownload(...args);
+  };
   const failedCsvOutput = await vm.runInContext('exportAndEmailFailedClassesCsv()', harness.context);
+  const noDownloadWeeklyCsv = await vm.runInContext('exportWeeklySummaryCsv({ downloadCsv: false })', harness.context);
+  harness.context.triggerCsvFileDownload = origTriggerDownload;
   assertFrontend(
-    failedCsvOutput.includes('VT-C4K-GI35,Nguyễn Văn A,1,10/10/2026') &&
+    downloadTriggeredCount === 0 &&
+      noDownloadWeeklyCsv.includes('VT-JSB16') &&
+      failedCsvOutput.includes('VT-C4K-GI35,Nguyễn Văn A,1,10/10/2026') &&
       !failedCsvOutput.includes('VT-JSB16'),
-    'exportAndEmailFailedClassesCsv must include only failed classes and exclude passing classes',
+    'exportAndEmailFailedClassesCsv and exportWeeklySummaryCsv({ downloadCsv: false }) must skip automatic CSV file download',
   );
   assertFrontend(
     emailPayloads.length === 1 &&
@@ -2133,6 +2187,55 @@ async function checkWeeklyHistoryAndCsvExport() {
     vm.runInContext('latestZaloResults.length', harness.context) === 2 &&
       vm.runInContext('weeklyHistoryView && weeklyHistoryView.week', harness.context) === 41,
     'Superseded live-mode reload in onHistoryWeekChange must not clear newly loaded W41 rows',
+  );
+
+  // 10. Lesson 14 legacy row must normalize to exemption status, never show Quét lại or count as failed
+  const l14Check = vm.runInContext(
+    `(() => {
+      const legacyRow = {
+        group: 'MindX - Lập trình Game VT-C4K-GA37-T6 (18H-20H)',
+        person: 'Đỗ Thị Thùy Trang',
+        status: '⚠️ Không đủ bằng chứng – Cần kiểm tra thủ công',
+        status_detail: 'Buổi 14 được miễn báo cáo Zalo.; Không xác minh được tên nhóm Zalo thực tế.',
+        evidence_state: 'LESSON_14_EXEMPTION',
+        lms_status: '✅ Đã nộp LMS',
+        evaluation_status: '⚠️ Đã hoàn tất nhận xét LMS, Zalo cần kiểm tra',
+        scan_target: {
+          week: 41,
+          year: 2026,
+          class_code: 'VT-C4K-GA37',
+          lesson: '14',
+          class_date: '23/10/2026',
+          class_date_iso: '2026-10-23'
+        }
+      };
+      return {
+        normStatus: normalizeZaloStatusDisplay(legacyRow.status, legacyRow),
+        normDetail: normalizeZaloStatusDetailDisplay(legacyRow.status_detail, legacyRow),
+        isWarn: isUnreportedOrWarningZaloStatus(legacyRow.status, legacyRow),
+        evalStatus: resolveDashboardRowEvaluationStatus(legacyRow),
+        isFailedSummary: isFailedWeeklySummaryRow(legacyRow),
+        isFailedChuaNxRed: isFailedWeeklySummaryRow({
+          ...legacyRow,
+          evaluation_status: '❌ Chưa nhận xét Zalo'
+        }),
+        isFailedChuaNxWarn: isFailedWeeklySummaryRow({
+          ...legacyRow,
+          evaluation_status: '⚠️ Chưa nhận xét Zalo'
+        })
+      };
+    })()`,
+    harness.context,
+  );
+  assertFrontend(
+    l14Check.normStatus === '✅ Miễn báo cáo (Buổi 14)' &&
+      l14Check.normDetail === 'Buổi 14 – miễn báo cáo theo quy tắc nghiệp vụ.' &&
+      l14Check.isWarn === false &&
+      l14Check.evalStatus === '✅ Đã hoàn thành nhận xét' &&
+      l14Check.isFailedSummary === false &&
+      l14Check.isFailedChuaNxRed === false &&
+      l14Check.isFailedChuaNxWarn === false,
+    'Lesson 14 legacy row must normalize to ✅ Miễn báo cáo (Buổi 14) and ✅ Đã hoàn thành nhận xét without warning/error flags',
   );
 }
 

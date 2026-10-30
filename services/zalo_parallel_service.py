@@ -34,6 +34,7 @@ from services.lms_quality_service import (
 )
 from services.zalo_bcnb_service import get_evidence_reference, update_bcnb_reports
 from services.zalo_discovery_service import _login_bcnb_if_needed
+from services.zalo_evidence import apply_lesson_14_exemption
 from services.zalo_safety import open_chat_matches
 from services.zalo_scan_evidence import (
     attach_zalo_sync_result,
@@ -1559,7 +1560,12 @@ async def _scan_one_target(
             reason="Buổi 14 được miễn báo cáo Zalo.",
             decision="LESSON_14_EXEMPTION",
         )
-        result["evidence_state"] = "LESSON_14_EXEMPTION"
+        result = apply_lesson_14_exemption(
+            result,
+            class_code=class_code,
+            applied_at=now_utc(),
+        )
+        result.setdefault("evidence", {})["validation_errors"] = []
         context = result.setdefault("evidence", {}).setdefault("date_context", {})
         context.update(
             {

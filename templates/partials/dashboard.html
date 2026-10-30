@@ -1,5 +1,5 @@
 <!-- TAB 1: ZALO AUTO -->
-<div id="tab-dashboard" class="tab-content active flex-1 flex-col space-y-4" role="tabpanel" aria-labelledby="btn-dashboard">
+<div id="tab-dashboard" class="tab-content active shrink-0 flex-col space-y-3.5" role="tabpanel" aria-labelledby="btn-dashboard">
     <div class="metrics-grid grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 shrink-0">
         <div class="metric-card glass-panel glow-card-blue flex items-center justify-between">
             <div class="flex items-center min-w-0">
@@ -52,24 +52,7 @@
     </div>
 
     <!-- COMPACT SAFETY & CONTROL BAR -->
-    <div class="glass-panel p-4 space-y-3 shrink-0">
-        <section id="zalo-preflight" class="preflight-compact flex flex-wrap items-center justify-between gap-2.5 rounded-xl border-2 border-slate-300 border-l-8 border-l-slate-600 bg-slate-50 px-3.5 py-2.5 text-xs text-slate-800 shadow-sm" role="status" aria-live="polite" aria-label="Trạng thái sẵn sàng trước khi chạy">
-            <div class="flex flex-wrap items-center gap-2.5 min-w-0">
-                <span id="zalo-preflight-status" class="rounded-md px-2.5 py-1 text-[10px] font-extrabold uppercase tracking-wider shrink-0 border">Đang kiểm tra</span>
-                <span id="zalo-dashboard-plan-brief" class="font-bold truncate">Chưa có kế hoạch tuần BCNB · Hãy bấm “Dò tìm lại”</span>
-            </div>
-            <div class="preflight-actions flex items-center gap-2 shrink-0">
-                <button id="zalo-preflight-refresh" type="button" onclick="refreshCurrentZaloPreflight()" class="preflight-refresh" aria-label="Kiểm tra lại điều kiện an toàn">
-                    <i class="fa-solid fa-rotate-right text-blue-600" aria-hidden="true"></i>
-                    Kiểm tra lại
-                </button>
-                <button type="button" onclick="switchTab('specs')" class="preflight-refresh" aria-label="Mở tab Chẩn đoán và Nhật ký">
-                    <i class="fa-solid fa-sliders text-indigo-600" aria-hidden="true"></i>
-                    Chẩn đoán &amp; Nhật ký
-                </button>
-            </div>
-        </section>
-
+    <div class="glass-panel p-3.5 space-y-2.5 shrink-0">
         <!-- ROW 1: PRIMARY 3-STEP WORKFLOW (LEFT) & SECONDARY POST-SCAN TOOLS (RIGHT) -->
         <div class="dashboard-action-bar flex flex-wrap items-center justify-between gap-3">
             <div class="dashboard-workflow-group flex flex-wrap items-center gap-2 bg-slate-100 p-1.5 rounded-xl border border-slate-300" role="group" aria-label="Quy trình thực thi chính">
@@ -99,8 +82,8 @@
                 <button type="button" id="btn-copy-reminders" onclick="copyZaloTeacherReminders()" class="action-button action-button--tool" title="Copy danh sách lớp chưa báo cáo gom theo giáo viên">
                     <i class="fa-regular fa-copy text-blue-600" aria-hidden="true"></i> Copy nhắc GV
                 </button>
-                <button type="button" id="btn-export-weekly-csv" onclick="exportAndEmailFailedClassesCsv()" class="action-button action-button--tool" title="Xuất file CSV danh sách các lớp lỗi và gửi về email Quản lý (thử nghiệm: quangda@mindx.net.vn; chính thức: quangda@mindx.net.vn, tuanpa@mindx.com.vn)">
-                    <i class="fa-solid fa-paper-plane text-emerald-600" aria-hidden="true"></i> Xuất CSV lỗi &amp; Gửi Mail
+                <button type="button" id="btn-export-weekly-csv" onclick="exportAndEmailFailedClassesCsv()" class="action-button action-button--tool" title="Gửi email báo cáo danh sách các lớp lỗi về Quản lý (thử nghiệm: quangda@mindx.net.vn; chính thức: quangda@mindx.net.vn, tuanpa@mindx.com.vn)">
+                    <i class="fa-solid fa-paper-plane text-emerald-600" aria-hidden="true"></i> Gửi Mail lớp lỗi
                 </button>
             </div>
         </div>
@@ -139,7 +122,7 @@
         <div id="zalo-review-queue-items" class="mt-2 space-y-1.5 text-xs font-semibold"></div>
     </details>
 
-    <div class="data-panel glass-panel flex-1 flex flex-col overflow-hidden">
+    <div class="data-panel glass-panel shrink-0 flex flex-col overflow-hidden">
         <!-- Dark Table Header Bar -->
         <div class="bg-slate-900 text-white px-5 py-2.5 border-b-2 border-slate-950 flex flex-wrap items-center justify-between gap-2 shrink-0">
             <div class="flex items-center gap-2.5">
@@ -156,7 +139,7 @@
             </div>
         </div>
 
-        <div class="table-scroll flex-1">
+        <div class="table-scroll shrink-0 flex-1">
             <table class="data-table w-full text-sm text-left tabular-nums">
                 <thead class="text-[11px] font-extrabold uppercase tracking-wider sticky top-0 z-10 border-b-2 border-slate-400">
                     <tr>

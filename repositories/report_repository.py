@@ -7,7 +7,7 @@ from typing import Any
 from db.database import get_db_connection
 from core.time_utils import utc_iso
 from repositories.zalo_batch_repository import canonical_target_key
-from services.bcnb_safety import split_checker_issue_note
+from services.bcnb_safety import normalize_auto_issue_text, split_checker_issue_note
 from services.lms_quality_service import evaluate_zalo_content_issues
 
 
@@ -45,6 +45,48 @@ def sanitize_csv_cell(value: Any) -> str:
     return cleaned
 
 
+def _is_lesson_14_exempt_item(
+    item: Any,
+    st: dict[str, Any] | None = None,
+) -> bool:
+    """Return True when a row/item represents a Lesson 14 Zalo reporting exemption."""
+    if not isinstance(item, dict):
+        return False
+    if str(item.get("evidence_state") or "").strip() == "LESSON_14_EXEMPTION":
+        return True
+    raw_st = st if isinstance(st, dict) else item.get("scan_target")
+    st_dict: dict[str, Any] = raw_st if isinstance(raw_st, dict) else {}
+    raw_ev = item.get("evidence")
+    ev_dict: dict[str, Any] = raw_ev if isinstance(raw_ev, dict) else {}
+    raw_ctx = ev_dict.get("date_context")
+    ctx_dict: dict[str, Any] = raw_ctx if isinstance(raw_ctx, dict) else {}
+    lesson = str(
+        st_dict.get("lesson")
+        or ctx_dict.get("target_lesson")
+        or item.get("lesson")
+        or ""
+    ).strip()
+    return lesson == "14"
+
+
+def normalize_zalo_status_text(
+    status: Any,
+    *,
+    item: dict[str, Any] | None = None,
+    st: dict[str, Any] | None = None,
+) -> str:
+    """Normalize Zalo status strings, enforcing Lesson 14 exemption and concise 'Chưa nhận xét' display."""
+    if item is not None and _is_lesson_14_exempt_item(item, st):
+        return "✅ Miễn báo cáo (Buổi 14)"
+    text = " ".join(str(status or "").split()).strip()
+    if text in {
+        "❌ Chưa tìm thấy trong khoảng đã kiểm chứng – Có minh chứng",
+        "❌ Chưa tìm thấy trong khoảng đã kiểm chứng",
+    }:
+        return "Chưa nhận xét"
+    return text
+
+
 def build_weekly_summary_csv(rows: list[dict[str, Any]]) -> str:
     """Build a UTF-8 with BOM CSV string containing only class management columns."""
     buffer = io.StringIO()
@@ -55,9 +97,21 @@ def build_weekly_summary_csv(rows: list[dict[str, Any]]) -> str:
             continue
         raw_st = row.get("scan_target")
         st: dict[str, Any] = raw_st if isinstance(raw_st, dict) else {}
-        zalo_status = str(row.get("zalo_status") or "").strip()
+        zalo_status = normalize_zalo_status_text(
+            row.get("zalo_status") or row.get("status") or "",
+            item=row,
+            st=st,
+        )
         lms_status = str(row.get("lms_status") or "").strip()
         eval_status = str(row.get("evaluation_status") or "").strip()
+        if (
+            "Miễn" in zalo_status
+            and (
+                "zalo cần kiểm tra" in eval_status.lower()
+                or "chưa nhận xét zalo" in eval_status.lower()
+            )
+        ):
+            eval_status = ""
         if not eval_status and (zalo_status or lms_status):
             eval_status = _resolve_row_evaluation_status(
                 zalo_status=zalo_status,
@@ -66,7 +120,12 @@ def build_weekly_summary_csv(rows: list[dict[str, Any]]) -> str:
                 nx_lms_checked=row.get("nx_lms_checked"),
             )
         issue_desc = str(row.get("issue_description") or "").strip()
-        if not issue_desc:
+        if issue_desc:
+            issue_desc = _resolve_row_issue_description(
+                {"qc_issue_note": issue_desc},
+                st={},
+            )
+        else:
             issue_desc = _resolve_row_issue_description(row, st=st)
         writer.writerow(
             [
@@ -88,11 +147,28 @@ def is_failed_weekly_summary_row(row: Any) -> bool:
     """Return True when a weekly summary row has an unresolved Zalo, LMS, or quality issue."""
     if not isinstance(row, dict):
         return False
-    zalo_status = str(row.get("zalo_status") or "").strip()
-    lms_status = str(row.get("lms_status") or "").strip()
-    eval_status = str(row.get("evaluation_status") or "").strip()
     raw_st = row.get("scan_target")
     st: dict[str, Any] = raw_st if isinstance(raw_st, dict) else {}
+    zalo_status = normalize_zalo_status_text(
+        row.get("zalo_status") or row.get("status") or "",
+        item=row,
+        st=st,
+    )
+    lms_status = str(row.get("lms_status") or "").strip()
+    eval_status = str(row.get("evaluation_status") or "").strip()
+    if (
+        "Miễn" in zalo_status
+        and (
+            "zalo cần kiểm tra" in eval_status.lower()
+            or "chưa nhận xét zalo" in eval_status.lower()
+        )
+    ):
+        eval_status = _resolve_row_evaluation_status(
+            zalo_status=zalo_status,
+            lms_status=lms_status,
+            nx_zalo_checked=row.get("nx_zalo_checked"),
+            nx_lms_checked=row.get("nx_lms_checked"),
+        )
     issue_desc = str(
         row.get("issue_description")
         or _resolve_row_issue_description(row, st=st)
@@ -376,7 +452,15 @@ def _resolve_row_evaluation_status(
 ) -> str:
     """Resolve the unified Teaching evaluation status for a weekly summary row."""
     clean_raw = str(raw_evaluation_status or "").strip()
-    zalo_failed_or_warn = zalo_status.startswith(("❌", "⚠️"))
+    if "Miễn" in zalo_status and (
+        "zalo cần kiểm tra" in clean_raw.lower()
+        or "chưa nhận xét zalo" in clean_raw.lower()
+    ):
+        clean_raw = ""
+    zalo_failed_or_warn = (
+        zalo_status.startswith(("❌", "⚠️"))
+        or zalo_status.lower().startswith("chưa nhận xét")
+    )
     lms_failed_or_warn = lms_status.startswith(("❌", "⚠️"))
     zalo_done = not zalo_failed_or_warn and (
         ("✅" in zalo_status)
@@ -437,10 +521,23 @@ def _resolve_row_issue_description(
         stripped = stripped.replace(" — ", "; ").strip(" .;").lower()
         return " ".join(stripped.split())
 
-    def _add_one(raw_segment: str) -> None:
+    legacy_dup_re = re.compile(
+        r"^\[LMS\]\s*(?:Nhận|Nhan)\s+x[eé]t\s+HS\s+copy-paste\s+tr[uù]ng\s+l[aặ]p\b",
+        flags=re.IGNORECASE,
+    )
+
+    def _add_one(raw_segment: str, *, is_auto: bool = False) -> None:
         cleaned = " ".join(str(raw_segment or "").split()).strip(" ;")
         if not cleaned:
             return
+        if legacy_dup_re.match(cleaned) or (
+            is_auto
+            and re.match(r"^\[LMS\]", cleaned, flags=re.IGNORECASE)
+            and "copy-paste trùng lặp" in cleaned.lower()
+        ):
+            return
+        if is_auto or re.match(r"^\[(?:LMS|Zalo)\]\s*", cleaned, flags=re.IGNORECASE):
+            cleaned = normalize_auto_issue_text(cleaned)
         key = _norm_issue_key(cleaned)
         if key and key not in seen_norm:
             seen_norm.add(key)
@@ -456,19 +553,19 @@ def _resolve_row_issue_description(
         text = str(val).strip()
         if not text:
             return
-        # Unwrap [Auto QC: ...] blocks using balanced-bracket parsing so embedded issues deduplicate cleanly
-        if re.search(r"\[Auto\s+QC:\s*", text, flags=re.IGNORECASE):
-            manual_note, auto_segments = split_checker_issue_note(text)
+        # Unwrap legacy [Auto QC: ...] blocks or [LMS]/[Zalo] auto segments so embedded issues deduplicate cleanly
+        manual_note, auto_segments = split_checker_issue_note(text)
+        if auto_segments or re.search(r"\[Auto\s+QC:\s*", text, flags=re.IGNORECASE):
             if manual_note:
-                _add_one(manual_note)
+                _add_one(manual_note, is_auto=False)
             for seg in auto_segments:
-                _add_one(seg)
+                _add_one(seg, is_auto=True)
             return
         if split_semicolon:
             for segment in text.split(";"):
-                _add_one(segment)
+                _add_one(segment, is_auto=False)
         else:
-            _add_one(text)
+            _add_one(text, is_auto=False)
 
     fb_dict = fb or {}
     qc_note = _first_defined_str(item, st, fb_dict, key="qc_issue_note")
@@ -567,7 +664,21 @@ def _sanitize_dashboard_item(
         elif nx_lms_checked is False:
             resolved_lms_status = "❌ Chưa nộp LMS"
 
-    zalo_status_str = str(item.get("status") or "Chưa xác định")
+    is_lesson_14_exempt = _is_lesson_14_exempt_item(item, st)
+    zalo_status_str = normalize_zalo_status_text(
+        item.get("status") or "Chưa xác định",
+        item=item,
+        st=st,
+    )
+    raw_status_detail = item.get("status_detail")
+    if is_lesson_14_exempt:
+        detail_str = str(raw_status_detail or "").strip()
+        if (
+            not detail_str
+            or "Buổi 14 được miễn báo cáo Zalo" in detail_str
+            or "Không xác minh được tên nhóm Zalo thực tế" in detail_str
+        ):
+            raw_status_detail = "Buổi 14 – miễn báo cáo theo quy tắc nghiệp vụ."
     evaluation_status = _resolve_row_evaluation_status(
         zalo_status=zalo_status_str,
         lms_status=resolved_lms_status,
@@ -639,7 +750,7 @@ def _sanitize_dashboard_item(
             ev.get("scanned_at") or item.get("timestamp") or job_timestamp or "—"
         ),
         "status": zalo_status_str,
-        "status_detail": item.get("status_detail"),
+        "status_detail": raw_status_detail,
         "lms_status": resolved_lms_status,
         "evaluation_status": evaluation_status,
         "issue_description": issue_description,
@@ -649,9 +760,13 @@ def _sanitize_dashboard_item(
         "bcnb_session_id": str(st.get("bcnb_session_id") or ""),
         "nx_zalo_checked": nx_zalo_checked,
         "nx_lms_checked": nx_lms_checked,
-        "submitted_for_bcnb": bool(item.get("submitted_for_bcnb")),
+        "submitted_for_bcnb": bool(item.get("submitted_for_bcnb")) or is_lesson_14_exempt,
         "manual_approved": bool(item.get("manual_approved")),
-        "evidence_state": item.get("evidence_state"),
+        "evidence_state": (
+            "LESSON_14_EXEMPTION"
+            if is_lesson_14_exempt
+            else item.get("evidence_state")
+        ),
         "bcnb_update_state": item.get("bcnb_update_state"),
         "source_job_id": resolved_source_job_id,
         "snapshot_id": resolved_snapshot_id,
