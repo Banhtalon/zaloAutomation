@@ -1,7 +1,7 @@
 # KẾ HOẠCH CHI TIẾT & TIẾN ĐỘ NÂNG CẤP DỰ ÁN (UPGRADE PLAN & PROGRESS)
 
-**Cập nhật lần cuối:** `2026-10-29 15:21 +07:00`
-**Trạng thái hiện tại:** Đã hoàn tất **Phase 0 → Phase 3.2 (`45/45` ✅)** và hoàn tất **Wave 4 (Phase 4.0 → Phase 4.4: `25/25` ✅ — Kiểm định chất lượng nội dung LMS/Zalo, Tự động ghi `Mô tả vấn đề` lên Teaching & Bảng Email Quản lý 9 cột)**.
+**Cập nhật lần cuối:** `2026-10-31 07:42 +07:00`
+**Trạng thái hiện tại:** Đã hoàn tất **Phase 0 → Phase 3.2 (`45/45` ✅)**, hoàn tất **Wave 4 (Phase 4.0 → Phase 4.4: `25/25` ✅ — Kiểm định chất lượng nội dung LMS/Zalo, Tự động ghi `Mô tả vấn đề` lên Teaching & Bảng Email Quản lý 9 cột)**, và hoàn tất **Wave 5 (Phase 5.0 → 5.8: `59/59` ✅ — Hardening toàn diện luồng kiểm tra báo cáo)**.
 
 ---
 
@@ -22,6 +22,15 @@
 | **Phase 4.2** | **Kiểm định chất lượng LMS (Nội dung bài + Nhận xét HV Buổi thường/Checkpoint) & Zalo** | P1 (Cao) | ✅ Hoàn thành | `6/6` |
 | **Phase 4.3** | **Tự động ghi nhận vấn đề vào ô `Mô tả vấn đề (TE/TF/QC)` trên Teaching** | P1 (Cao) | ✅ Hoàn thành | `5/5` |
 | **Phase 4.4** | **Bảng Email Quản lý định dạng Table + CSV lỗi chất lượng & Đồng bộ tài liệu** | P1 (Cao) | ✅ Hoàn thành | `6/6` |
+| **Phase 5.0** | **Baseline & sao lưu trước Wave 5** | P0 (Bắt buộc) | ✅ Hoàn thành | `4/4` |
+| **Phase 5.1** | **Độ bền vòng quét Zalo (retry, timeout, chụp lại ảnh)** | P0 | ✅ Hoàn thành | `5/5` |
+| **Phase 5.2** | **Cô lập ghi BCNB: tick vs ghi chú `Mô tả vấn đề`** | P0 | ✅ Hoàn thành | `6/6` |
+| **Phase 5.3** | **Đúng đắn bằng chứng & QC (slot LMS, note rò rỉ, trạng thái không xác định)** | P0 | ✅ Hoàn thành | `6/6` |
+| **Phase 5.4** | **Toàn vẹn Weekly summary / Email / Duyệt tay** | P0 | ✅ Hoàn thành | `7/7` |
+| **Phase 5.5** | **Một nguồn sự thật: `report_status.py` + helper dùng chung** | P1 | ✅ Hoàn thành | `8/8` |
+| **Phase 5.6** | **Không rơi dòng im lặng (Discovery/Plan/Preflight)** | P1 | ✅ Hoàn thành | `8/8` |
+| **Phase 5.7** | **Giao diện vận hành bám dữ liệu server** | P1 | ✅ Hoàn thành | `8/8` |
+| **Phase 5.8** | **Dọn dẹp, tài liệu & nghiệm thu Wave 5** | P2 | ✅ Hoàn thành | `7/7` |
 
 ---
 
@@ -248,7 +257,293 @@
 
 ---
 
+## 🧰 PHASE 5: HARDENING FLOW KIỂM TRA BÁO CÁO (WAVE 5 — LẬP KẾ HOẠCH 2026-10-30)
+
+> **Nguồn**: Audit chỉ đọc 2026-10-30 trên HEAD `b395b94` (4 auditor song song, Lead xác minh lại các phát hiện HIGH). Báo cáo đầy đủ nằm ngoài repo, ở artifact `report_flow_audit.md` của phiên Lead.
+> **Mục tiêu Wave 5**: (1) loại bỏ các lỗi có thể ghi sai BCNB hoặc dừng sai batch; (2) mỗi luật nghiệp vụ chỉ có **một nguồn sự thật**; (3) không để dòng nào rơi khỏi danh sách mà không báo; (4) UI hiển thị theo dữ liệu server, không ghép tạm trong bộ nhớ.
+> **Ngoài phạm vi**: chạy thật trên BCNB/Zalo/LMS, commit/push, đổi `.env`/`database.db`. Mọi việc này cần Owner yêu cầu riêng.
+> **Review kế hoạch**: Sol 6.1 `high` (read-only) qua 4 vòng: R1–R3 `NEEDS_FIX`, đã sửa hết; R4 **`VERDICT: PASS`** (session `01a18bde-94ca-7cf3-a157-769051ab7fc7`, 2026-10-30). Sau khi Owner chốt D1–D6: R5 `NEEDS_FIX` (đã sửa) → R6 **`VERDICT: PASS`** (session `01a18bf2-dd8a-79f0-aa45-3d68b761fcd6`).
+
+### 5.A Quy tắc thực thi cho AI (bắt buộc đọc trước mỗi chặng)
+
+1. **Thứ tự**: 5.0 → (5.1, 5.2, 5.3, 5.4: được đổi thứ tự cho nhau) → 5.5 → 5.6 → 5.7 → 5.8. **5.5 phải xong trước 5.7**, vì UI dùng trường `category`/`is_failed` do backend sinh ra.
+2. **Mỗi lần chỉ làm một chặng**. Trước khi sửa: chụp manifest baseline (`git status --porcelain` + SHA-256 các path đang dirty) và lưu **ngoài repo**. Chỉ sửa các file trong allowlist của chặng; muốn thêm file phải ghi lý do vào dòng checklist. `PROJECT_STATE.md` và `UPGRADE_PROGRESS.md` **luôn được phép** sửa ở mọi chặng (dùng cho G6).
+3. **Tích `[x]`** chỉ khi đã có bằng chứng; ghi kèm ngay dòng đó tên test, số test và session review. Hạng mục bị Owner từ chối ghi `[-]` kèm lý do. Các hạng mục gắn **(Dn đã chốt)** phải làm đúng cột "Cách hiện thực" ở mục 5.B; không tự mở rộng phạm vi quyết định.
+4. **An toàn**:
+   - Không thao tác live trên browser/BCNB/Zalo/LMS; test chỉ dùng fixture tổng hợp.
+   - Config mới phải có giá trị mặc định an toàn và được khai báo cô lập trong `CHECK_QUALITY.ps1`.
+   - Giữ nguyên các bất biến của DEC-030 → DEC-038: preflight fail-closed, `exclusive_browser_job`, readback checkbox, `selection_digest`, ngân sách số dòng (`zalo_discovery_service.py ≤ 400`, `zalo_service.py ≤ 520`).
+5. **Cổng hoàn tất chặng (G1–G6)**: dòng checklist cuối mỗi chặng chỉ được tích khi đạt đủ:
+   - **G1**: test mục tiêu của chặng chạy `venv\Scripts\python.exe -m unittest <modules>` đều OK.
+   - **G2**: `node tests/check_template_js.js` pass.
+   - **G3**: `.\CHECK_QUALITY.ps1 -Isolated` exit `0`; ghi số test và coverage.
+   - **G4**: `git diff --check` exit `0`; so manifest với baseline, chỉ path trong allowlist được thay đổi.
+   - **G5 — Review độc lập Sol 6.1 `high`** (theo yêu cầu Owner 2026-10-30; Wave 5 dùng mức `high` thay cho `xhigh` của DEC-036). PowerShell 5.1 mặc định không dùng UTF-8, nên phải đặt UTF-8 trước khi chạy và kiểm tra exit code:
+     ```powershell
+     $utf8 = [Text.UTF8Encoding]::new($false)
+     [Console]::InputEncoding = $utf8; [Console]::OutputEncoding = $utf8; $OutputEncoding = $utf8
+     $log = "$env:TEMP\wave5_review_5x.log"
+     Get-Content "$env:TEMP\wave5_review_5x.txt" -Raw -Encoding UTF8 |
+       codex exec -m gpt-6.1-sol -c model_reasoning_effort="high" -s read-only - 2>&1 |
+       Tee-Object -FilePath $log
+     if ($LASTEXITCODE -ne 0) { throw "codex exit $LASTEXITCODE" }
+     Select-String -Path $log -Pattern '^VERDICT: (PASS|NEEDS_FIX)\s*$' | Select-Object -Last 1
+     ```
+     Prompt (lưu ngoài repo) gồm: mã chặng, allowlist, mục tiêu từng hạng mục, các bất biến cần giữ, **kết quả test G1–G3 do Lead chạy** (Sol chạy read-only nên có thể không tự chạy được Python/Node), và yêu cầu trả `VERDICT: PASS` hoặc `VERDICT: NEEDS_FIX`. Chỉ tính là đạt khi `exit 0` **và** dòng verdict cuối là `PASS`. Nếu `NEEDS_FIX`: sửa → chạy lại G1–G4 → review lại cho tới khi `PASS`. Ghi session id.
+   - **G6**: thêm mục ngắn vào `PROJECT_STATE.md` (trạng thái, lệnh, kết quả, rủi ro mở); cập nhật bộ đếm ở bảng Master; **không commit/push** nếu Owner chưa yêu cầu; khởi động lại server local nếu đang chạy.
+
+### 5.B Quyết định Owner (đã chốt 2026-10-30)
+
+| Mã | Câu hỏi | Ảnh hưởng | Chốt của Owner (2026-10-30) | Cách hiện thực trong plan |
+| :--- | :--- | :--- | :--- | :--- |
+| D1 | `🟡 Đã nộp trễ` tính là lỗi hay đã xong? | 5.5.1, 5.5.3, 5.5.4, 5.7.7 | ✅ **Nộp trễ không tính là lỗi.** | `category = LATE`, `is_failed = false`. Vẫn tích NX Zalo như hiện tại. Không vào danh sách lỗi của email, không vào Copy nhắc GV hay Quét lại lớp lỗi. KPI tách ô "Trễ" riêng, không tô đỏ chung với "Chưa nộp". |
+| D2 | Báo cáo gửi đúng ngày học nhưng không ghi buổi/ngày (hoặc ghi sai ngày) có khớp không? | 5.5.1, 5.8.4 | ✅ **Khớp, không phải lỗi**, nhưng ghi chú vào ô QC rằng báo cáo không ghi ngày / ghi sai ngày. | Đánh là `SUBMITTED_*` và sinh issue mức **NOTE**: `[Zalo] Báo cáo không ghi ngày/buổi` hoặc `[Zalo] Báo cáo ghi sai ngày (dd/mm)`. Issue này ghi lên ô `Mô tả vấn đề` nhưng không làm dòng bị tính lỗi. |
+| D3 | Thứ tự lên cấp của JS / CS / Robotics? | 5.8.1 | ✅ `JSB → JSA → JSI`; `CSB → CSA → CSI`; Robotics: `PREB → PREA → PREI`, `ARMB → ARMA → ARMI`, `SEMIB → SEMIA → SEMII`; Robotics nhỏ: `ROB4B → ROB4A → ROB4I`. | Mỗi dòng là một track riêng, lên cấp tự động B → A → I **trong cùng track**. Owner chưa xác nhận việc chuyển giữa các track (ví dụ `PREI → ARMB`), nên phần này **không tự động** và vẫn để review. |
+| D4 | "[LMS] … cần kiểm tra thủ công" có tính là lỗi không? | 5.5.1, 5.8.5 | ✅ **Không tính lỗi**, chỉ ghi chú QC trên Teaching. | Issue mức **NOTE**, được ghi lên ô `Mô tả vấn đề`, không làm dòng bị tính lỗi trong email. Chốt an toàn: khi LMS **sập toàn hệ thống** (mọi lớp `fetch_error`) thì **không** ghi note hàng loạt, chỉ hiện cảnh báo chung trên UI/summary. |
+| D5 | AI assist có được gửi nguyên văn tin nhắn lên Gemini? | 5.8.3 | ✅ **Có.** | Không che tên. Cờ `ZALO_AI_ASSIST_CLASSIFIER` vẫn mặc định `false`. Nguyên văn tin nhắn không được ghi vào log hay DB ngoài các chỗ đang có. Ghi quyết định vào DEC-039. |
+| D6 | Có xoá luồng quét tuần tự cũ và phần CSV chết phía JS không? | 5.8.2, 5.7.7 | ✅ **Có.** | Xoá thân `zalo_service.py:176-503` (giữ entrypoint), chuyển invariant sang luồng song song; xoá phần CSV builder chết trong `jobs.js`. |
+
+> **Khái niệm mới do D2/D4 — mức độ issue**: mỗi issue QC có `severity ∈ {FAIL, NOTE}`. **NOTE** chỉ ghi chú lên Teaching và **không** làm `is_failed = true`; **FAIL** giữ hành vi Wave 4 (dòng vào bảng lỗi của email). Mặc định mọi issue hiện có là **FAIL**, trừ các nhóm Owner đã chốt là NOTE: (a) D2 không ghi ngày/buổi hoặc ghi sai ngày; (b) D4 "[LMS] … cần kiểm tra thủ công". Muốn thêm nhóm NOTE khác phải hỏi Owner.
+
+---
+
+### Chặng 5.0 — Baseline & Sao Lưu Trước Wave 5 ✅
+- **Allowlist**: chỉ `UPGRADE_PROGRESS.md`, `PROJECT_STATE.md`. Backup nằm ngoài Git (`.backups/`).
+- **Checklist**:
+  - [x] **5.0.1.** `git status` sạch (ngoài `PROJECT_STATE.md` và `UPGRADE_PROGRESS.md`). Đã ghi HEAD `b395b94ef92b70687239eec5542548274ffe8d01`, lưu manifest baseline ngoài repo (`$env:TEMP\wave5_5.0_baseline_manifest.json`).
+  - [x] **5.0.2.** Backup nóng `database.db` bằng `scripts/backup_restore.py` sang `.backups/db/pre-wave5-20261030-20261030-095820.sqlite3` (`1,134,592` bytes, SHA-256: `B9870B52A6F4916B5305607959BA81B47889F695867C571762F55BDC6C8E53F9`) và chạy restore drill `.backups/restore-drill.sqlite3` (`integrity="ok"`, `foreign_key_errors=[]`, `smoke={"scan_jobs": 11, "external_action_audit": 70, "schema_migrations": 4}`).
+  - [x] **5.0.3.** Chạy baseline `node tests/check_template_js.js` (`scripts=7 handlers=34 behavior=12`) và `.\CHECK_QUALITY.ps1 -Isolated` (`QUALITY GATE PASSED`, `620/620` tests OK, coverage `76.6%`).
+  - [x] **5.0.4.** Xác nhận D1–D6 đã chốt (bảng 5.B, 2026-10-30) và các giới hạn an toàn kèm theo: D2 không áp dụng khi nội dung ghi rõ số buổi khác; D3 không tự nối giữa các track; D4 không ghi note hàng loạt khi LMS sập toàn hệ thống. Nếu Owner đổi ý thì cập nhật bảng 5.B **trước khi** làm hạng mục bị ảnh hưởng.
+
+---
+
+### Chặng 5.1 — Độ Bền Vòng Quét Zalo ✅
+- **Mục tiêu**: lỗi xảy ra ở một target không được làm huỷ cả batch hay để dòng kẹt `RUNNING`; target bị treo phải có giới hạn thời gian.
+- **Allowlist**: `services/zalo_parallel_service.py`, `services/zalo_scan_evidence.py`, `services/zalo_evidence.py`, `googleform_autosubmit/config.py`, `.env.example`, `CHECK_QUALITY.ps1`, `tests/test_zalo_parallel_service.py`, `tests/test_zalo_scan_evidence.py`.
+- **Checklist**:
+  - [x] **5.1.1.** Bọc lời gọi `retry_target_once` (`zalo_parallel_service.py` ~L2248-2289):
+    - `JobCancelledError` → `complete_scan(JOB_CANCELLED)` + `remember_result` rồi raise lại;
+    - `Exception` khác → `SCAN_FAILED` + `policy.record(abnormal)` + `continue`, giống lần thử 1.
+    - **Test**: lần thử 2 ném `RuntimeError` thì dòng thành `FAILED/SCAN_FAILED` và batch quét tiếp target sau (`test_retry_target_once_second_attempt_runtime_error_marks_scan_failed_and_scans_next`); lần thử 2 ném `JobCancelledError` thì không còn dòng nào ở `RUNNING` (`test_retry_target_once_second_attempt_job_cancelled_leaves_no_target_running`).
+  - [x] **5.1.2.** Thêm timeout cho từng target: `asyncio.wait_for` quanh `_scan_one_target`/`scan_open_zalo_chat`, config `ZALO_TARGET_TIMEOUT_SECONDS` (mặc định 180, cô lập trong gate). Hết giờ → `SCAN_FAILED` với `error_code=TARGET_TIMEOUT`, trang được đóng hoặc làm mới an toàn (nằm trong khối `try:` bắt `JobCancelledError`). **Test**: fake page bị treo (`test_per_target_timeout_marks_target_timeout_refreshes_page_and_scans_next`, `test_per_target_timeout_cancelled_during_fresh_page_setup_leaves_no_target_running`).
+  - [x] **5.1.3.** Vòng quét khoảng trống lịch sử (`zalo_scan_evidence.py` ~L1426-1431) kiểm tra lệnh huỷ định kỳ. Batch có trần `capture_max_messages` (mặc định an toàn `DEFAULT_BATCH_MAX_MESSAGES=500`); chạm trần thì trả `INSUFFICIENT_EVIDENCE` có lý do (`MESSAGE_CAP_REACHED`), **không** trả `NOT_FOUND_VERIFIED`. **Test**: `test_history_gap_loop_checks_cancellation_and_message_cap_returns_insufficient`, `test_scan_one_target_exceeding_message_cap_returns_insufficient_evidence`.
+  - [x] **5.1.4.** Chụp lại ảnh báo cáo 1 lần (dùng thật `MAX_CAPTURE_ATTEMPTS`, `zalo_evidence.py` ~L203-207). Vẫn lỗi thì trả `INSUFFICIENT` và ghi lý do vào `capture_diagnostics`. **Test**: lần 1 lỗi, lần 2 ok → `SUBMITTED_*` (`test_report_screenshot_retries_once_and_succeeds_on_second_attempt`, `test_report_found_screenshot_error_persists_typed_capture_diagnostic`).
+  - [x] **5.1.5.** Cổng G1–G6 (test: `tests.test_zalo_parallel_service`, `tests.test_zalo_scan_evidence`: `91/91 OK`; `node tests/check_template_js.js`: pass; `.\CHECK_QUALITY.ps1 -Isolated`: `627/627 OK`, coverage `76.7%`) + Sol 6.1 `high` `VERDICT: PASS` (session `01a18c63-a713-7023-923a-8f87291b776b`).
+
+---
+
+### Chặng 5.2 — Cô Lập Ghi BCNB: Tick vs Ghi Chú `Mô tả vấn đề` ✅
+- **Mục tiêu**: lỗi ghi chú không được chặn việc tích NX Zalo; mọi lần tích phải đi qua ledger; không ghi đè chỉnh sửa tay của QC.
+- **Allowlist**: `services/zalo_bcnb_service.py`, `services/zalo_parallel_service.py`, `services/bcnb_actions.py`, `services/bcnb_safety.py`, `repositories/audit_repository.py`, `tests/test_bcnb_actions.py`, `tests/test_zalo_parallel_service.py`, `tests/test_bcnb_columns.py`, `PROJECT_DECISIONS.md` (chỉ để ghi rủi ro còn lại của 5.2.3).
+- **Checklist**:
+  - [x] **5.2.1.** Ghi chú (`BCNB_UPDATE_CHECKER_NOTE`) không được làm dừng tick. Phải chặn ở **cả hai** đường:
+    - outcome ghi chú qua `on_target_outcome` (`zalo_bcnb_service.py` ~L669, ~L748) không đi vào `policy.record`;
+    - nhánh `except Exception as note_sync_err` của đường notes-only (`zalo_parallel_service.py` ~L2794) cũng không gọi `policy.record(abnormal=True)`.
+    - Thay vào đó đếm riêng `checker_note_failures` trong summary của job và ghi log event (`bcnb.notes_only_sync_failed`).
+    - **Test**: (a) cột ghi chú không đọc được + 10 dòng verified → cả 10 dòng vẫn được tích, không `BLOCKED_BATCH_HALT` (`test_5_2_1_unreadable_checker_note_with_ten_verified_rows_ticks_all_ten_without_halt`); (b) đường notes-only ném exception → `policy.halted` vẫn chưa bật (`test_5_2_1_and_5_2_2_notes_only_unclaimed_sync_exception_never_halts_policy`).
+  - [x] **5.2.2.** Thêm tham số `notes_only: bool = False` cho `update_bcnb_reports`. Nhánh unclaimed (`zalo_parallel_service.py` ~L2768) truyền `notes_only=True` để bỏ qua toàn bộ khối tick. **Test**: ở `notes_only`, `execute_verified_checkbox_action` không được gọi (`test_5_2_2_notes_only_skips_checkbox_actions_and_column_resolution`).
+  - [x] **5.2.3.** Chống ghi đè chỉnh sửa của QC. Lưu ý: POST hiện tại (`bcnb_actions.py` ~L340) không gửi giá trị cũ hay version, nên đọc trước khi ghi **chỉ là bảo vệ lạc quan, không phải compare-and-swap nguyên tử**.
+    - (a) Kiểm tra (chỉ qua source/fixture, không thử live) xem endpoint BCNB có hỗ trợ ghi có điều kiện không. Đã ghi rủi ro còn lại vào `DEC-039` (`PROJECT_DECISIONS.md`).
+    - (b) Ngay trước POST: đọc lại ô theo `session_id` (`read_checker_note_by_session` + `preserveDomNote` trong `_UPDATE_CHECKER_NOTE_JS`). Nếu khác `existing_note` → `FAILED_BEFORE_WRITE` ("QC vừa chỉnh sửa"), không ghi.
+    - (c) Sau POST: readback (`verify_checker_note_persisted`). Nếu giá trị trên server khác `merged_note` thì gắn `CONFLICT_AFTER_WRITE` / `OUTCOME_UNKNOWN` (`BcnbConflictAfterWriteError`) để QC xem lại; không tự ghi lại.
+    - **Test**: ô bị đổi trước POST → không POST; ô bị đổi giữa POST và readback → báo xung đột (`test_5_2_3_optimistic_pre_read_blocks_post_and_post_readback_mismatch_flags_conflict`, `test_read_checker_note_by_session_and_verify_checker_note_persisted_dom_paths`).
+  - [x] **5.2.4.** Phân biệt đoạn auto và đoạn ghi tay. Định dạng Wave 4 không có marker riêng (`bcnb_safety.py` ~L922), nên chuỗi giống nhau không cho biết ai viết. Quy tắc bảo thủ:
+    - Một đoạn chỉ được coi là **auto** khi nó khớp chính xác (sau chuẩn hoá, giữ nguyên tag `[LMS]`/`[Zalo]` trên chuỗi nguyên bản trước `normalize_auto_issue_text`) một issue mà hệ thống **đã tự sinh và đã ghi thành công** cho đúng dòng đó. Không dùng `merged_note` làm bằng chứng, vì nó chứa cả phần ghi tay được giữ lại và được lưu **trước** khi thực thi (`zalo_bcnb_service.py` ~L709-717). Dry-run cũng ghi intent rồi thoát mà không POST (`bcnb_actions.py` ~L517). Bằng chứng hợp lệ phải đến từ một audit thoả **đủ cả 5 điều kiện**:
+      1. `action_type = BCNB_UPDATE_CHECKER_NOTE` và cùng định danh dòng (lớp + buổi + tuần/năm + `session_id`/ngày);
+      2. `execution_mode = production`;
+      3. outcome = `VERIFIED` **có POST thật** (`post_verified is True`, `not no_change`, `before_state` có `qc_issue_note` kiểu `str` khác `after_state`, không phải nhánh "không đổi" hay nhánh recover `INTENT_RECORDED`);
+      4. đoạn đó nằm trong danh sách **`reason.auto_issues`** (danh sách do hệ thống sinh), không phải chỉ xuất hiện trong `merged_note`;
+      5. đoạn đó có mặt trong **`after_state` đã readback** và không phải đoạn đã có sẵn từ `before_state` của lần ghi đó (`key in after_keys and key not in before_keys`).
+    - Các audit `DRY_RUN`, `FAILED`, `OUTCOME_UNKNOWN`, intent còn treo, audit "không đổi", hoặc audit của dòng khác **không** được dùng làm bằng chứng.
+    - Mọi đoạn khác, kể cả bắt đầu bằng `[LMS]`/`[Zalo]` hoặc `[Auto QC: ...]`, được coi là **ghi tay** và giữ nguyên từng byte (`preserve_bcnb_note_text`).
+    - Không đổi định dạng hiển thị trên BCNB.
+    - Quy tắc này áp dụng cho **cả** đường dọn issue cũ ở nhánh notes-only (`resolve_row_proven_auto_issues`).
+    - **Test** table-driven (`test_5_2_4_table_driven_provenance_auto_vs_manual_note`, 15 cases) + **integration** (`test_5_2_4_integration_direct_issue_verified_then_clean_rescan_removes_auto_preserves_manual_bytes`).
+  - [x] **5.2.5.** Tick lỗi thì không `continue` im lặng: ghi outcome ghi chú `SKIPPED_TICK_FAILED` để hiện rõ trong summary. **Test**: `test_5_2_5_checkbox_tick_failure_records_skipped_tick_failed_for_checker_note`.
+  - [x] **5.2.6.** Cổng G1–G6 (test: `tests.test_bcnb_actions`, `tests.test_zalo_parallel_service`, `tests.test_bcnb_columns`, `tests.test_bcnb_dom_contract`: `87/87 OK`; `node tests/check_template_js.js`: pass; `.\CHECK_QUALITY.ps1 -Isolated`: exit `0`, coverage `77.2%`) + Sol 6.1 `high` `VERDICT: PASS` (session `01a18cce-0a4d-77c1-a911-aef4f4d945a3`).
+
+---
+
+### Chặng 5.3 — Đúng Đắn Bằng Chứng & QC ✅ (`6/6`)
+- **Mục tiêu**: không ghi issue `[LMS]`/`[Zalo]` của buổi khác hay của candidate bị loại; lần quét không kết luận được không được xoá issue cũ.
+- **Allowlist**: `services/lms_quality_service.py`, `services/zalo_scan_evidence.py`, `services/zalo_target_matching.py`, `services/zalo_bcnb_service.py`, `tests/test_lms_quality_service.py`, `tests/test_zalo_scan_evidence.py`, `tests/test_zalo_target_matching.py` (tạo mới nếu chưa có), `tests/test_bcnb_actions.py` (cập nhật fixture LMS slot có `date`/`index` theo 5.3.1).
+- **Checklist**:
+  - [x] **5.3.1.** Chọn slot LMS theo **ngày học và số buổi**, bỏ cách lấy theo vị trí `lesson_num - 1` (`lms_quality_service.py` ~L1518). Truy vấn GraphQL hiện chưa lấy ngày hay định danh buổi (~L1132), nên:
+    - (a) ✅ **Đã xác minh tên trường thật (2026-10-30 23:14, Owner duyệt 1 truy vấn chỉ đọc)**: `ClassSlot` trên `https://lms-api.mindx.edu.vn/` có `_id: ID`, `index: Int` (0-based: `buổi N` tương ứng `index == N - 1`), `date: Date` (00:00 `Asia/Ho_Chi_Minh` lưu dạng UTC `17:00:00.000Z` hôm trước), `startTime: Date`, `endTime: Date`, `summary: String`, `studentAttendance: [StudentAttendance]`; schema `ClassSlot` trên LMS không có trường trạng thái huỷ riêng.
+    - (b) Đổi thời gian slot về múi giờ `Asia/Ho_Chi_Minh` rồi so với `ngay_hoc_iso` của BCNB. Slot chỉ được chọn khi **đúng 1** slot khớp ngày **và** khớp số buổi (`index + 1 == lesson_num`). Slot huỷ bị loại khi có cờ huỷ.
+    - (c) Mọi trường hợp còn lại (thiếu metadata ngày/buổi, 0 hoặc >1 slot khớp, lệch số buổi) → "[LMS] … cần kiểm tra thủ công" (không xác định), không fallback theo vị trí.
+    - **Test**: slot lệch do học bù; slot bị huỷ; 2 slot trùng ngày; cùng ngày nhưng sai số buổi; thiếu metadata ngày; thiếu metadata số buổi; ranh giới múi giờ (17:00 UTC hôm trước).
+  - [x] **5.3.2.** Chỉ ghi `target_match_note` vào `date_context` khi candidate **được match**; note của candidate bị loại giữ trong danh sách candidate (kể cả `TARGET_SESSION_AMBIGUOUS`). **Test**: target NOT_FOUND/AMBIGUOUS không rò note cụ thể sang `date_context`/`status_detail`.
+  - [x] **5.3.3.** `evaluate_zalo_content_issues` chỉ chạy khi `evidence_state ∈ SUBMITTED_*`; NOT_FOUND/INSUFFICIENT không sinh issue nội dung. **Test**.
+  - [x] **5.3.4.** Thêm nhánh "không xác định" cho Zalo: khi `evidence_state = INSUFFICIENT_EVIDENCE` hoặc quét lỗi, giữ nguyên các issue `[Zalo]` đang có trên BCNB (giống cách LMS đang làm). **Test**.
+  - [x] **5.3.5.** `CONTENT_DATE_MISMATCH` chỉ gắn cho candidate được match và loại trùng. **Test**.
+  - [x] **5.3.6.** Cổng G1–G6 (test: `tests.test_lms_quality_service`, `tests.test_zalo_scan_evidence`, `tests.test_zalo_parallel_service`, `tests.test_zalo_target_matching`: `113/113 OK`; `node tests/check_template_js.js`: pass; `.\CHECK_QUALITY.ps1 -Isolated`: `643/643 OK`, coverage `76.8%`) + Sol 6.1 `high` `VERDICT: PASS` (session `01a18e0e-f611-7233-97fc-c25809bb6967`).
+
+---
+
+### Chặng 5.4 — Toàn Vẹn Weekly Summary / Email / Duyệt Tay ✅ (`7/7`)
+- **Mục tiêu**: email và bảng tổng hợp chỉ lấy dữ liệu đáng tin; dry-run không làm thay đổi trạng thái thật; mỗi lần gửi mail có audit.
+- **Allowlist**: `repositories/report_repository.py`, `services/report_email_service.py`, `services/zalo_bcnb_service.py`, `api/zalo_routes.py`, `repositories/audit_repository.py`, `tests/test_api_routes_unit.py`, `tests/test_zalo_parallel_service.py`.
+- **Checklist**:
+  - [x] **5.4.1.** Điều kiện đủ tư cách được định nghĩa **theo từng loại nguồn**, áp dụng thống nhất cho weekly summary và email:
+    - **Dữ liệu quét Zalo** (baseline; overlay quét lại có chọn lọc `report_repository.py` ~L2013; job chọn tường minh qua `job_id` ~L1953): job `ZALO_SCAN` **đã kết thúc** (SUCCESS/PARTIAL_SUCCESS) và đúng `execution_mode` yêu cầu (mặc định production; dry-run phải xin rõ và trả kèm badge). Job tường minh không đủ tư cách → trả lỗi/cảnh báo rõ, không âm thầm dùng. Vẫn giữ quy tắc chỉ ghép cùng `snapshot_id`.
+    - **Dữ liệu LMS** (`LMS_ANALYSIS`/`LMS_AUTOMATION`, ~L1052, ~L1542, ~L1559): giữ quy tắc hiện có (dry-run tách khỏi đã tích); chỉ thêm điều kiện job đã kết thúc.
+    - **Duyệt tay** (audit `BCNB_MANUAL_APPROVE_TICK`, ~L1074, ~L1616): chỉ nhận audit `production` + `VERIFIED`, như hiện tại.
+    - **Test**:
+      - job CANCELLED/RUNNING/dry-run mới hơn không được chọn làm baseline;
+      - baseline production + overlay quét lại dry-run → overlay bị loại;
+      - yêu cầu tường minh một job CANCELLED → bị từ chối;
+      - ghép cùng snapshot vẫn đúng;
+      - đóng góp hợp lệ từ LMS và từ duyệt tay production vẫn được giữ.
+  - [x] **5.4.2.** Giới hạn tài nguyên **trước khi** đọc dữ liệu: lọc theo tuần + `LIMIT` số job/target/audit (hằng số có tên). Vượt trần thì trả lỗi rõ ràng, không cắt bớt im lặng. **Test**.
+  - [x] **5.4.3.** Gửi email trả `409 SCAN_ACTIVE_FOR_WEEK` khi đang có job ZALO_SCAN/LMS_AUTOMATION/ZALO_MANUAL_APPROVE hoạt động cho tuần đó. **Test**.
+  - [x] **5.4.4.** Duyệt tay ở dry-run **không** ghi vào `results` của job gốc hay `write_status` của ledger; chỉ ghi audit `DRY_RUN`. Bỏ `suppress(Exception)` ở bước cập nhật ledger, thay bằng log event có `error_type`. **Test**.
+  - [x] **5.4.5.** Email đầy đủ dòng:
+    - các dòng BCNB không có target Zalo hiện là "Chưa quét Zalo";
+    - trạng thái LMS lấy theo `(mã lớp, buổi/ngày)`, không chỉ theo mã lớp.
+    - **Test**: 2 buổi cùng lớp trong 1 tuần.
+  - [x] **5.4.6.** Audit mỗi lần gửi SMTP (tuần, năm, job_id, hash người nhận, SHA-256 nội dung). Gửi trùng trong cửa sổ ngắn phải có `confirm_duplicate=true`. Sửa nhãn "Tổng số lớp" cho đúng (đếm buổi hay đếm lớp). **Test**.
+  - [x] **5.4.7.** Cổng G1–G6 (test: `tests.test_api_routes_unit`, `tests.test_zalo_parallel_service`, `tests.test_lms_quality_service`: `111/111 OK`; `node tests/check_template_js.js`: pass; `.\CHECK_QUALITY.ps1 -Isolated`: `637/637 OK`, coverage `76.9%`) + Sol 6.1 `high` `VERDICT: PASS` (session `01a18ddf-0483-7991-a4b3-6148b1db74a7`).
+
+---
+
+### Chặng 5.5 — Một Nguồn Sự Thật: `services/report_status.py` + Helper Dùng Chung ✅ (`8/8`)
+- **Mục tiêu**: mỗi luật (trạng thái/verdict, Buổi 14, kiểm tra plan, mã lớp, cột BCNB) chỉ có một implementation; ra quyết định theo `evidence_state`/`category`, không theo emoji.
+- **Allowlist**:
+  - tạo mới `services/report_status.py`, `tests/test_report_status.py`;
+  - `services/zalo_parallel_service.py`, `services/zalo_bcnb_service.py`, `services/zalo_evidence.py`, `services/lms_quality_service.py`, `repositories/report_repository.py`, `services/report_email_service.py`;
+  - `services/zalo_preflight.py`, `api/zalo_routes.py`, `services/zalo_safety.py`, `services/zalo_discovery_matching.py`, `services/class_lifecycle.py`, `services/zalo_target_eligibility.py`, `services/zalo_target_matching.py`, `repositories/zalo_batch_repository.py`;
+  - `services/bcnb_safety.py`, `services/bcnb_actions.py`;
+  - `api/job_routes.py` (bổ sung `category`/`is_failed` vào kết quả job API);
+  - `static/js/jobs.js`, `tests/check_template_js.js` (chỉ để consumer JS đọc được issue có cấu trúc; phần chuyển UI sang `category` thuộc 5.7);
+  - test liên quan.
+- **Checklist**:
+  - [x] **5.5.1.** Tạo `services/report_status.py` gồm:
+    - hằng `evidence_state` và các tập trạng thái kết thúc (terminal sets);
+    - nhãn trạng thái (lấy từ `zalo_evidence.py`, không chép);
+    - hằng số cửa sổ ngày;
+    - `is_lesson_14(value)` (qua `normalize_lesson_number`);
+    - `categorize_row(row) -> DONE | LATE | MISSING | REVIEW | EXEMPT | NOT_SCANNED`;
+    - `issue_severity(issue) -> FAIL | NOTE`, dựa trên **mã issue có cấu trúc** (`{code, severity, text}`), không dựa trên chuỗi con tự do:
+      - NOTE gồm đúng 2 nhóm Owner đã chốt: `LMS_MANUAL_CHECK` (D4; producer trong `lms_quality_service` chuyển sang phát mã ngay ở chặng này) và `ZALO_REPORT_NO_DATE`/`ZALO_REPORT_WRONG_DATE` (D2; producer làm ở 5.8.4);
+      - issue cũ đã lưu trong kết quả job trước Wave 5 (chưa có mã) được coi là FAIL, **trừ** đúng marker văn bản cũ của D4. Bộ chuyển đổi tương thích này chỉ được nằm ở **một chỗ** trong `report_status.py`;
+      - **chuyển tiếp cùng lúc**: khi producer đổi sang phát issue có cấu trúc thì mọi consumer phải đọc được ngay trong cùng chặng, gồm `lms_quality_service` (~L1503), `zalo_bcnb_service` (~L418-436), `report_repository` (~L549-557) và `jobs.js` (~L1083). Văn bản ghi lên Teaching và văn bản hiển thị phải là **chữ thường**, không phải chuỗi repr của dict. Mã và severity phải giữ nguyên qua lưu DB, audit provenance (5.2.4), summary/email và sau F5;
+    - `is_failed(row)`: `True` khi có **ít nhất một** trong các điều kiện:
+      - `category ∈ {MISSING, REVIEW}`;
+      - **LMS xác nhận chưa nộp/chưa đánh giá** (giữ đúng tiêu chí trạng thái LMS hiện có ở `report_repository.py` ~L177-180, độc lập với Zalo và issue QC). D4 chỉ hạ mức cho trường hợp *không xác định*;
+      - có issue `FAIL`.
+      - `LATE` (D1), `DONE` và `EXEMPT` mà không vướng điều kiện nào ở trên → `False`.
+    - **Test** table-driven (`test_5_5_1_to_5_5_4_status_category_failure_and_structured_issues`), bắt buộc có:
+      - 🟡 trễ → `LATE`/không lỗi; ✅ + chỉ issue NOTE → không lỗi; ✅ + issue FAIL → lỗi; NOT_FOUND → lỗi; Buổi 14 → `EXEMPT`;
+      - Zalo `DONE`/`LATE` + LMS xác nhận chưa nộp + không có issue QC → **lỗi**;
+      - issue có cấu trúc đi qua lưu DB → summary → email → hiện đúng chữ.
+  - [x] **5.5.2.** Thay mọi bản sao luật Buổi 14 (PS ~1556; BS ~254/619/905; EV ~44; RR ~48/69; LQ ~619/776/1496) bằng `is_lesson_14`. **Test**: `"14"`, `"Buổi 14"`, `"014"`, `14`.
+  - [x] **5.5.3.** Thay các quyết định theo emoji/chuỗi con (RR ~177-179, ~461-506; BS ~1226; LQ ~760) bằng `categorize_row`/`is_failed`/`evidence_state`. Theo **D1**: `is_failed_weekly_summary_row` không còn tính 🟡 là lỗi; bộ đếm summary đưa trễ vào nhóm "đã nộp (trễ)", không vào "pending". Tiêu chí lỗi của email đổi từ `bool(issue_description)` sang `is_failed(row)`, nên issue NOTE không làm dòng thành lỗi. **Test** hồi quy: fixture cũ cho kết quả giống hệt, trừ đúng các thay đổi do D1 và mức NOTE (liệt kê trong test).
+  - [x] **5.5.4.** Backend trả `category` và `is_failed` cho từng dòng trong weekly summary và trong kết quả job API (UI dùng ở 5.7). **Test** contract.
+  - [x] **5.5.5.** Gom một helper `validate_two_week_plan()` dùng chung cho `zalo_preflight`, `/run-scan` và `/api/zalo-scan-plan`. Chỉ yêu cầu khớp nhau ở **lỗi kiểm tra plan** (thiếu tuần, target không hợp lệ, trùng, snapshot cũ), **không** gồm 409 do YELLOW chưa xác nhận hay do đang có job (`zalo_routes.py` ~L71). **Test**: scan-plan báo unavailable với mọi lỗi kiểm tra plan mà `/run-scan` từ chối; test riêng cho xác nhận YELLOW, từ chối khi có job, và RED được ưu tiên hơn YELLOW (`test_5_5_5_validate_two_week_plan_shared_across_preflight_scan_plan_and_run_scan`).
+  - [x] **5.5.6.** Gom một hàm `normalize_class_code()` dùng cho identity, coverage và canonical key (chỉ giữ một bản `_identity_tokens`). `parse_bcnb_scan_target` ưu tiên `class_date_iso`. **Test**: mã có khoảng trắng hoặc ký tự phân cách lạ (`test_5_5_6_normalize_class_code_and_parse_bcnb_scan_target_prefers_iso`).
+  - [x] **5.5.7.** Gom một bộ nhận diện cột BCNB (NX Zalo, NX LMS, ngày, mã lớp, buổi) dùng chung cho `bcnb_safety` và danh sách header JS trong `bcnb_actions`. Gom helper "lấy + chấm LMS" dùng chung cho `zalo_bcnb_service` (~554-602) và `zalo_parallel_service` (~2689-2734). **Test**: `test_bcnb_columns`, `test_bcnb_dom_contract`, `test_5_5_7_bcnb_header_matchers_and_shared_lms_quality_helper`.
+  - [x] **5.5.8.** Cổng G1–G6 (test: `tests.test_report_status`, `tests.test_lms_quality_service`, `tests.test_api_routes_unit`, `tests.test_zalo_parallel_service`, `tests.test_bcnb_columns`: `125/125 OK`; `node tests/check_template_js.js`: pass; `.\CHECK_QUALITY.ps1 -Isolated`: `649/649 OK`, coverage `77.2%`) + Sol 6.1 `high` `VERDICT: PASS` (session `01a18e7f-c706-7e81-a946-1603a43e918c`).
+
+---
+
+### Chặng 5.6 — Không Rơi Dòng Im Lặng (Discovery / Plan / Preflight) ✅ (`8/8`)
+- **Mục tiêu**: dòng BCNB nào không trở thành target đều phải được đếm, liệt kê và đẩy lên preflight.
+- **Allowlist**: `services/zalo_discovery_plan.py`, `services/zalo_discovery_service.py` (≤ 400 dòng), `services/zalo_target_eligibility.py`, `services/zalo_preflight.py`, `services/report_status.py` (nơi đặt `validate_two_week_plan` dùng chung từ 5.5.5), `api/zalo_routes.py`, `repositories/zalo_batch_repository.py`, `repositories/group_repository.py` (mở rộng theo §5.A.2 để `_snapshot_metadata` chấp nhận snapshot chỉ có `exempt_targets` Buổi 14 theo mục `5.6.3`), `db/database.py` (chỉ khi cần migration cộng thêm cho 5.6.3), `services/zalo_parallel_service.py`, `services/zalo_scan_evidence.py`, `services/zalo_bcnb_service.py`, `repositories/report_repository.py`, `services/report_email_service.py`, `static/js/jobs.js`, `static/js/state.js`, `tests/test_zalo_discovery_service.py`, `tests/test_zalo_target_eligibility.py`, `tests/test_api_routes_unit.py`, `tests/test_zalo_parallel_service.py`, `tests/test_zalo_scan_evidence.py`, `tests/check_template_js.js`.
+- **Checklist**:
+  - [x] **5.6.1.** Plan sinh bộ đếm + danh sách cho các nhóm `transition_review`, `missing_zalo`, `ambiguous_zalo`, `deduped`, `invalid_date`, `skipped_empty`. Preflight chuyển **YELLOW** khi có nhóm nào > 0, kèm danh sách. **Test**.
+  - [x] **5.6.2.** Dòng chuyển cấp của tuần trước được hiện thành mục cần xem lại trong plan và UI (không tự tạo target); sửa docstring `_build_scan_targets` cho đúng. **Test**.
+  - [x] **5.6.3.** Miễn trừ Buổi 14 được dựng trực tiếp từ dòng BCNB, không cần match Zalo hay qua time gate, và **không bịa danh tính Zalo**. Hiện `seed_targets` từ chối `group_name` rỗng (`zalo_batch_repository.py` ~L98), nên cần một đường nạp riêng cho miễn trừ:
+    - Ưu tiên không đổi schema: plan có danh sách `exempt_targets` riêng, bước ghi BCNB xử lý chúng và ghi audit/ledger với loại `EXEMPTION`.
+    - Nếu buộc phải đổi schema: dùng migration cộng thêm có checksum (ví dụ cột `target_kind`), đã có backup ở 5.0.2 và phải qua Phase 7 gate.
+    - **Nhận job (admission)**: hiện preflight yêu cầu có candidate thường và target quét đủ điều kiện (`zalo_preflight.py` ~L191, ~L227), và `/run-scan` cũng tự yêu cầu candidate (`zalo_routes.py` ~L203). Phải định nghĩa rõ hai trường hợp, và vẫn giữ nguyên các chốt preflight RED/YELLOW, khóa job độc quyền (`reject_if_active`) và `selected_target_keys`:
+      - **plan chỉ có miễn trừ**;
+      - **miễn trừ + toàn bộ target thường bị hoãn**.
+    - **Test** xuyên suốt discovery → preflight → route `/run-scan` → nạp miễn trừ → ledger → tích miễn có readback:
+      - nhóm Zalo MISSING nhưng Buổi 14 vẫn được miễn;
+      - plan chỉ có miễn trừ;
+      - miễn trừ + target thường bị hoãn hết;
+      - không có dòng scan nào được tạo với `group_name` giả;
+      - RED vẫn chặn; đang có job vẫn bị từ chối.
+  - [x] **5.6.4.** Dòng có ngày học không parse được thành mục cần xem lại riêng; plan vẫn chạy cho các dòng khác (không còn `SCAN_PLAN_INVALID_TARGET` cho cả plan). **Test**.
+  - [x] **5.6.5.** Ghim `snapshot_id`: `/run-scan` dùng snapshot của lần preflight đầu cho cả bước lấy dữ liệu và preflight lần 2; lệch thì trả `409 SNAPSHOT_CHANGED`. **Test**.
+  - [x] **5.6.6.** Tên nhóm có nhiều khung giờ → `parse_group_end_time` trả `None` → hoãn với lý do "cần xác nhận giờ học". **Test**.
+  - [x] **5.6.7.** Gắn cờ `deadline_verification=PENDING` ngay ở bước quét và giải quyết ở bước ghi; UI/email hiện ⏳ khi còn PENDING. Quota AI tính theo `target_key`; ghi lý do `ai_assist_budget_exhausted`/`AI_CLASSIFIER_ERROR` vào `classifier_result`. **Test**.
+  - [x] **5.6.8.** Cổng G1–G6 (test: `tests.test_zalo_discovery_service`, `tests.test_zalo_target_eligibility`, `tests.test_report_status`, `tests.test_api_routes_unit`, `tests.test_zalo_parallel_service`, `tests.test_zalo_scan_evidence`: `176/176 OK`; `node tests/check_template_js.js`: pass; `.\CHECK_QUALITY.ps1 -Isolated`: `651/651 OK`, coverage `77.4%`) + Sol 6.1 `high` `VERDICT: PASS` (session `01a18edc-054f-7e42-b2a3-5564c0df97d5`).
+
+---
+
+### Chặng 5.7 — Giao Diện Vận Hành Bám Dữ Liệu Server ✅ (`8/8`)
+- **Mục tiêu**: bảng kết quả luôn dựng lại được từ server (F5 không mất dữ liệu); nút bấm phản ánh đúng trạng thái; mọi luật hiển thị đọc từ `category`.
+- **Phụ thuộc**: 5.5.4 đã xong.
+- **Allowlist**: `static/js/jobs.js`, `static/js/state.js`, `templates/partials/dashboard.html`, `templates/partials/specs.html`, `api/job_routes.py`, `repositories/job_repository.py`, `tests/check_template_js.js`, `tests/test_api_routes_unit.py`.
+- **Checklist**:
+  - [x] **5.7.1.** Plan cũ vẫn giữ `required_week` để hiển thị, chỉ chặn nút quét. Banner ghi đúng "Kế hoạch đã cũ — Dò lại" kèm `observed_at`. **Test** node (`checkPhase57FrontendHardening`).
+  - [x] **5.7.2.** Khi tải trang và sau khi một job ghi kết thúc (ZALO_SCAN, LMS_AUTOMATION, ZALO_MANUAL_APPROVE): dựng lại bảng từ weekly summary của server (`keepLiveMode:true`), bỏ phụ thuộc vào baseline lưu trong bộ nhớ. `/api/jobs/latest` nhận thêm tham số `job_type`. **Test**: F5 sau khi quét lại có chọn lọc vẫn hiện đủ dòng (`test_5_7_2_get_latest_job_supports_job_type_filter_in_route_and_repo`, `checkPhase57FrontendHardening`).
+  - [x] **5.7.3.** Nút ⟳ giữ nguyên chế độ đang xem (live/lịch sử); polling không tự xoá chế độ xem lịch sử. **Test** (`checkPhase57FrontendHardening`).
+  - [x] **5.7.4.** Không bật lại alert/modal cho job đã kết thúc trước khi tải trang (`finished_at < pageLoadAt` hoặc lưu `sessionStorage`). **Test** (`checkPhase57FrontendHardening`).
+  - [x] **5.7.5.** Khoá các nút hành động khi `currentJobActive`. Nút Quét lại trên từng dòng tuân theo gate plan/preflight. Ẩn nút duyệt dry-run sau khi đã mô phỏng xong. **Test** (`checkPhase57FrontendHardening`).
+  - [x] **5.7.6.** Hộp xác nhận YELLOW liệt kê các cảnh báo. Tab chính có dải preflight/tiến độ thu gọn. **Test** (`checkPhase57FrontendHardening`).
+  - [x] **5.7.7.** KPI, bộ lọc, Copy nhắc GV, Quét lại, Duyệt & Tích đều đọc `category`/`is_failed` từ server. KPI tách ô "Trễ" riêng (D1), không tô đỏ. Issue NOTE hiện dạng ghi chú (màu trung tính), không gắn nhãn lỗi. Xoá logic trạng thái/đánh giá bị trùng trong JS và **xoá phần CSV builder chết** (D6: `jobs.js` ~1959-2109, ~2651-2710; giữ xuất CSV qua server `format=csv` nếu có nút). Lưu ý phụ thuộc: `exportWeeklySummaryCsv` hiện **dựng fallback rows bằng các builder này trước khi** rẽ sang nhánh email (`jobs.js` ~L2529-2542). Đã gỡ lời gọi đó trước khi xoá builder; nút Gửi Mail và xuất CSV qua server chạy đúng, có **test hành vi cho cả hai** (`checkPhase57FrontendHardening`, `checkPhase32WeeklyHistoryAndCsvExport`, `checkPhase44DashboardAndClipboardEmail`). Sửa tooltip `\n`, nút "Kiểm tra lại" bị lặp, thống nhất chữ "Dò kế hoạch". **Test** node behavior.
+  - [x] **5.7.8.** Cổng G1–G6 (test: `tests.test_api_routes_unit`: `41/41 OK`; `node tests/check_template_js.js`: `scripts=7 handlers=34 behavior=13`; `.\CHECK_QUALITY.ps1 -Isolated`: `655/655 OK`, coverage `77.5%`) + Sol 6.1 `high` `VERDICT: PASS` (session `01a18f26-2405-7f20-8260-248a1f8eb3c0`).
+
+---
+
+### Chặng 5.8 — Dọn Dẹp, Tài Liệu & Nghiệm Thu Wave 5 ✅ (`7/7`)
+- **Allowlist**:
+  - `CLASS_LIFECYCLE.md`, `services/class_lifecycle.py`, `tests/test_class_lifecycle*.py`;
+  - `services/zalo_service.py`, `tests/test_zalo_service.py`, `tests/check_phase3_quality.py`, `tests/check_phase4_quality.py` (chỉ để chuyển invariant sang kiểm tra implementation song song còn lại; không nới lỏng kiểm tra hành vi hay ngân sách số dòng);
+  - 5.8.1: `services/zalo_discovery_plan.py`, `services/zalo_discovery_matching.py`, `repositories/group_repository.py`, `tests/test_zalo_discovery_service.py`, `tests/test_basic_repositories.py`;
+  - 5.8.4 / 5.8.5: `services/zalo_scan_evidence.py`, `services/lms_quality_service.py`, `services/zalo_bcnb_service.py`, `services/zalo_parallel_service.py`, `services/report_status.py`, `static/js/state.js`, `tests/test_zalo_scan_evidence.py`, `tests/test_lms_quality_service.py`, `tests/test_zalo_parallel_service.py`, `tests/test_report_status.py`, `tests/test_zalo_target_matching.py`, `tests/check_template_js.js`;
+  - `services/external_gateways.py`, `services/zalo_target_matching.py`, `repositories/report_repository.py`, `services/report_email_service.py`, `static/js/jobs.js`;
+  - `PROJECT_SUMMARY.md`, `PROJECT_STATE.md`, `PROJECT_DECISIONS.md`, `CHANGELOG.md`, `VERSION.md`, `UPGRADE_PROGRESS.md`.
+- **Checklist**:
+  - [x] **5.8.1.** **(D3 đã chốt)** Mở rộng parser vòng đời lớp theo đúng các chuỗi Owner đã xác nhận (`test_5_8_1_table_driven_real_class_codes_and_progression_rules`, `test_5_8_1_js_transition_same_cohort_and_cross_track_pre_to_arm_requires_review`, `test_5_8_1_legacy_js_cs_cohort_key_read_write_continuity_and_collision_fail_closed`; đếm chỉ đọc trên `.backups/db/pre-wave5-20261030-20261030-095820.sqlite3`: `8/25` dòng `class_cohorts`, `8/44` dòng `groups`, `8/25` dòng `class_code_history` mang key `VT-J|S|*`/`VT-C|S|*`):
+    - **Lỗi hiện tại**: `_PROGRESSION_PATTERN.search(token)` neo `$` (`class_lifecycle.py` ~L24-26, ~L56, ~L82-85). Hệ quả là `JSB17`/`CSA03` vô tình bị đọc thành track `S` với center giả `VT-J`/`VT-C`, còn `PRE*/ARM*/SEMI*/ROB4*` trả `None` (không có cohort, không tự kết thúc khi BCNB báo Finished).
+    - **Mới**:
+      - `PROGRESSION_LEVELS` thêm `JS`, `CS`, `PRE`, `ARM`, `SEMI`, `ROB4`, mỗi track `(B, A, I)`.
+      - So khớp **toàn bộ token** (fullmatch), các track xếp dài trước: `ROB4|SEMI|PRE|ARM|PT|JS|CS|G|S`.
+      - Bỏ qua token hậu tố như `HB`; giữ center gồm các token đứng trước (ví dụ `VT-ROB`, `VT-KIND`, `VT-C4K`).
+      - Chỉ lên cấp tự động B → A → I **trong cùng track**. Chuyển giữa track (ví dụ `PREI → ARMB`) không tự động, vẫn để review.
+    - **Tương thích dữ liệu**: các dòng `class_cohorts`/`cohort_key` đang có của JS/CS mang key "vô tình" (`VT-J|S|NN`, `VT-C|S|NN`). Discovery hiện ghi key mới vào `groups`, chèn cohort theo key đó và đánh dấu key cũ không còn thấy là đang chuyển cấp (`group_repository.py` ~L780-784, ~L969-974, ~L1011-1016). Vì vậy alias chỉ ở bước đọc là **không đủ**, có thể tách lịch sử hoặc tạo cohort trùng.
+      - Trước hết đếm số dòng bị ảnh hưởng trên **bản sao backup của 5.0.2** (chỉ đọc).
+      - **Không** tự migrate DB thật. Ở mọi đường đọc **và ghi** (lưu discovery, chèn cohort, đánh dấu lifecycle, lịch sử mã lớp), key cũ được ánh xạ về key mới. Việc ánh xạ chỉ được thực hiện khi danh tính lớp đã lưu (mã lớp đầy đủ) khớp; nếu va chạm (nhiều cohort cũ ứng với một key mới, hoặc ngược lại) thì **fail-closed**: không gộp, đánh dấu cần xem lại.
+      - Backfill dữ liệu thật chỉ làm khi Owner duyệt riêng một script có backup + báo cáo dry-run.
+    - Sửa `CLASS_LIFECYCLE.md` cho khớp code mới. Chạy lại test của 5.6 (transition/coverage).
+    - **Test** table-driven với các định dạng mã thật: `VT-C4K-PTB16`, `VT-C4K-GI35`, `VT-C4K-SA27`, `VT-JSB17`, `VT-JSI12-HB`, `VT-CSA04-HB`, `VT-CSI02`, `VT-ROB-PREA18`, `VT-ROB-ARMB20`, `VT-ROB-SEMIB07`, `VT-KIND-ROB4I02`. Bắt buộc có: `CSA03` **không** ra track `S`; `JSB17 → JSA17` cùng cohort; `PREI16 → ARMB16` không tự nối; key cũ vẫn tra được. Thêm test SQLite tổng hợp (không migrate): DB có cohort key cũ → lưu discovery → lưu lại lần 2 → không tạo cohort trùng, lịch sử mã lớp liền mạch, trạng thái lifecycle đúng; trường hợp va chạm alias → fail-closed.
+  - [x] **5.8.2.** **(D6 đã chốt: xoá)** Xoá thân luồng tuần tự `zalo_service.py:176-503` (còn `166 <= 520` dòng), giữ entrypoint chuyển sang luồng song song; xoá/viết lại các test chỉ nhắm luồng tuần tự (`tests/test_zalo_service.py`: `8/8 OK`); giữ ngân sách ≤ 520 dòng. Các invariant đang bám chuỗi trong `zalo_service.py` (`tests/check_phase3_quality.py`, `tests/check_phase4_quality.py`) đã được **chuyển sang kiểm tra implementation song song** với độ phủ hành vi tương đương; **không** giữ chuỗi giả cho qua gate và không bỏ kiểm tra. Phần CSV builder chết phía JS được xoá ở 5.7.7.
+  - [x] **5.8.3.** **(D5 đã chốt: được gửi nguyên văn)** Không thêm bước che tên. Giữ cờ `ZALO_AI_ASSIST_CLASSIFIER=false` mặc định và cô lập trong gate. Xác nhận nguyên văn tin nhắn gửi Gemini **không** bị ghi thêm vào log, `classification_logs` hay kết quả job ngoài các trường đang có. **Test**: log của lời gọi AI không chứa nguyên văn tin nhắn (`test_5_8_3_ai_assist_passes_verbatim_text_and_never_logs_raw_message`).
+  - [x] **5.8.4.** **(D2 đã chốt: khớp + ghi chú QC)** Trong `resolve_report_target` (`zalo_target_matching.py`) và chuỗi chấm bằng chứng (`zalo_scan_evidence.py`):
+    - Điều kiện chung: ngày gửi lấy từ header ngày của Zalo đọc được và **trùng ngày học của target**.
+    - Nếu nội dung **không ghi ngày lẫn buổi** → khớp (`SUBMITTED_*`) + issue NOTE `[Zalo] Báo cáo không ghi ngày/buổi` (`ZALO_REPORT_NO_DATE`).
+    - Nếu nội dung **ghi ngày khác ngày học** nhưng không ghi số buổi mâu thuẫn → khớp + issue NOTE `[Zalo] Báo cáo ghi sai ngày (dd/mm)` (`ZALO_REPORT_WRONG_DATE`).
+    - **Vẫn để REVIEW** (chỉ áp cho **nhánh fallback D2 mới**, không áp cho các nhánh khớp đang có): không đọc được ngày gửi; gửi khác ngày học **mà không có ngày/buổi khớp target**; nội dung ghi rõ **số buổi khác** target; cùng nhóm có 2 target BCNB trùng ngày đó.
+    - **Giữ nguyên** nhánh khớp hiện có cho báo cáo gửi sau ngày học có ghi đúng ngày/buổi (`zalo_target_matching.py` ~L126-164): báo cáo trễ hợp lệ vẫn khớp và vẫn là `LATE` theo D1.
+    - Issue NOTE đi qua đường ghi chú của 5.2 (có audit provenance 5.2.4) và không làm dòng bị tính lỗi (5.5.3).
+    - **Test**: từng nhánh trên; báo cáo gửi hôm sau không ghi ngày vẫn REVIEW; **hồi quy D1**: báo cáo trễ ghi đúng ngày/buổi → `LATE`, vẫn được tích NX Zalo; nhãn trạng thái và `is_failed=false` (`test_5_8_4_same_day_missing_or_wrong_date_fallback_and_review_branches`, `test_5_8_4_same_day_missing_or_wrong_date_e2e_and_d1_late_regression`).
+  - [x] **5.8.5.** **(D4 đã chốt: chỉ ghi chú QC)**
+    - Chuyển "[LMS] … cần kiểm tra thủ công" thành issue **mã có cấu trúc `LMS_MANUAL_CHECK`, mức NOTE**, thay cho chuỗi điều khiển `"cần kiểm tra thủ công"` (`zalo_bcnb_service.py`, `zalo_parallel_service.py`).
+    - Issue này được **ghi lên ô `Mô tả vấn đề`** của đúng dòng (trước đây bị lọc bỏ), và không làm dòng bị tính lỗi trong email.
+    - **Chốt an toàn**: nếu LMS lỗi **toàn hệ thống** (`is_lms_fetch_unavailable`: mọi lớp được yêu cầu đều `fetch_error`, hoặc lời gọi lấy dữ liệu ném exception) thì **không** ghi note hàng loạt. Khi đó đặt cờ `lms_fetch_unavailable` trong summary và hiện cảnh báo chung trên UI (`static/js/jobs.js`, `static/js/state.js`).
+    - Các issue `[LMS]` FAIL cũ đã verified được giữ nguyên khi kết quả là "không xác định".
+    - **Test**: một lớp thiếu slot → note được ghi, `is_failed=false`; mọi lớp `fetch_error` → không POST note nào, có cờ cảnh báo; issue FAIL cũ không bị xoá (`test_5_8_5_lms_manual_check_note_written_and_system_outage_suppressed`, `checkPhase57FrontendHardening`).
+  - [x] **5.8.6.** Cập nhật `PROJECT_SUMMARY.md`, `PROJECT_STATE.md`, `CHANGELOG.md`, `VERSION.md`; append `PROJECT_DECISIONS.md` **DEC-039** gồm:
+    - quyết định D1–D6 của Owner;
+    - mức độ issue `FAIL`/`NOTE`;
+    - taxonomy `category` một nguồn;
+    - giới hạn của bảo vệ ghi chú (không phải compare-and-swap nguyên tử);
+    - slot LMS theo ngày;
+    - review Wave 5 dùng Sol `high`.
+  - [x] **5.8.7.** Cổng cuối:
+    - G1 (`189/189 OK`), G2 (`node tests/check_template_js.js` pass, `scripts=7 handlers=34 behavior=13`), G3 (`.\CHECK_QUALITY.ps1 -Isolated` đạt exit `0`, `QUALITY GATE PASSED`, `663/663` tests OK, coverage `78.4%`), G4 (`git diff --check` exit `0` + manifest check `PASS`, `outside_delta=0`);
+    - Sol 6.1 `high` review **toàn bộ diff Wave 5** (`git diff b395b94..HEAD` hoặc working tree) đạt `VERDICT: PASS` (session `01a18fa5-a4c3-7293-93d3-1cae60e87f5e`);
+    - soạn **checklist nghiệm thu cho Owner**: dry-run chỉ đọc trên BCNB/Zalo/LMS thật, gồm 1 tuần có học bù, 1 lớp Buổi 14, 1 lớp chuyển cấp, F5 sau quét lại. Chỉ chạy production khi Owner duyệt riêng một target cụ thể.
+
+---
+
 ## 📝 GHI CHÚ CHUẨN BỊ NÂNG CẤP (PREPARATION NOTES)
+
+
 
 1. **Nguyên tắc triển khai từng bước (Incremental & Reversible)**:
    - Mỗi hạng mục (`1.1`, `1.2`, `1.3`...) sẽ được thực hiện độc lập, chạy đủ cổng kiểm tra chất lượng `.\CHECK_QUALITY.ps1` (cả chế độ thường và `-Isolated`), cập nhật tích `[x]` vào file `UPGRADE_PROGRESS.md` này trước khi chuyển sang hạng mục tiếp theo.

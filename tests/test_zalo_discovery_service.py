@@ -972,6 +972,274 @@ class ZaloDiscoveryServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rows[0]["ngay_hoc_iso"], "2026-10-28")
         self.assertEqual(rows[0]["giao_vien"], "Lê Thị Dương")
         self.assertEqual(rows[0]["zalo_deadline"], "22:00 29/10/2026")
+        self.assertEqual(rows.skipped_empty, [])
+
+    def test_scan_plan_tracks_dropped_rows_and_exempt_lesson_14_without_zalo_group(self):
+        week_plan = {
+            "latest_week": {"week": 33, "year": 2026},
+            "required_week": {"week": 32, "year": 2026},
+            "selected_weeks": [
+                {"week": 32, "year": 2026},
+                {"week": 33, "year": 2026},
+            ],
+            "latest_data": [
+                {"ma_lop": "VT-C4K-GA01", "giao_vien": "A", "ngay_hoc": "14/08/2026", "ngay_hoc_iso": "2026-08-14", "buoi_so": "8"},
+                {"ma_lop": "VT-C4K-GA01", "giao_vien": "A", "ngay_hoc": "14/08/2026", "ngay_hoc_iso": "2026-08-14", "buoi_so": "8"},
+                {"ma_lop": "VT-C4K-GA01", "giao_vien": "A", "ngay_hoc": "99/99/2026", "ngay_hoc_iso": "", "buoi_so": "9"},
+                {"ma_lop": "VT-C4K-GA02", "giao_vien": "B", "ngay_hoc": "14/08/2026", "ngay_hoc_iso": "2026-08-14", "buoi_so": "8"},
+                {"ma_lop": "VT-C4K-PTI09", "giao_vien": "C", "ngay_hoc": "15/08/2026", "ngay_hoc_iso": "2026-08-15", "buoi_so": "8"},
+                {"ma_lop": "VT-C4K-SA03", "giao_vien": "E", "ngay_hoc": "16/08/2026", "ngay_hoc_iso": "2026-08-16", "buoi_so": "8"},
+                {"ma_lop": "VT-C4K-L14NOZALO", "giao_vien": "F", "ngay_hoc": "30/08/2026", "ngay_hoc_iso": "2026-08-30", "buoi_so": "14"},
+            ],
+            "required_data": [
+                {"ma_lop": "VT-C4K-GA01", "giao_vien": "A", "ngay_hoc": "07/08/2026", "ngay_hoc_iso": "2026-08-07", "buoi_so": "7"},
+                {"ma_lop": "VT-C4K-L14ZALO", "giao_vien": "G", "ngay_hoc": "07/08/2026", "ngay_hoc_iso": "2026-08-07", "buoi_so": "Buổi 14"},
+            ],
+            "skipped_empty": [
+                {
+                    "week": 33,
+                    "year": 2026,
+                    "row_index": 9,
+                    "class_code": "",
+                    "lesson": "5",
+                    "class_date": "14/08/2026",
+                    "person": "Teacher X",
+                    "drop_reason": "SKIPPED_EMPTY_BCNB_ROW",
+                }
+            ],
+        }
+        plan = service._build_discovery_plan(
+            group_names=[
+                "MindX - VT-C4K-GA01",
+                "MindX - VT-C4K-GB02",
+                "MindX - PTI09 A",
+                "MindX - PTI09 B",
+                "MindX - VT-C4K-L14ZALO",
+            ],
+            bcnb_data=week_plan["latest_data"],
+            ignored_groups=[],
+            existing_groups=[],
+            bcnb_week_plan=week_plan,
+            now=datetime(2026, 8, 17, 9, 0, tzinfo=BUSINESS_TIMEZONE),
+        )
+
+        self.assertEqual(len(plan["exempt_targets"]), 2)
+        exempt_by_code = {item["class_code"]: item for item in plan["exempt_targets"]}
+        self.assertEqual(exempt_by_code["VT-C4K-L14NOZALO"]["group_name"], "")
+        self.assertEqual(exempt_by_code["VT-C4K-L14NOZALO"]["target_kind"], "EXEMPTION")
+        self.assertEqual(exempt_by_code["VT-C4K-L14ZALO"]["group_name"], "MindX - VT-C4K-L14ZALO")
+        self.assertEqual(plan["exempt_target_count"], 2)
+
+        dropped = plan["dropped_rows"]
+        self.assertEqual(dropped["counts"]["transition_review"], 1)
+        self.assertEqual(dropped["counts"]["missing_zalo"], 1)
+        self.assertEqual(dropped["counts"]["ambiguous_zalo"], 1)
+        self.assertEqual(dropped["counts"]["deduped"], 1)
+        self.assertEqual(dropped["counts"]["deduped_targets"], 1)
+        self.assertEqual(dropped["counts"]["invalid_date"], 1)
+        self.assertEqual(dropped["counts"]["skipped_empty"], 1)
+        self.assertEqual(dropped["counts"]["total"], 6)
+        self.assertEqual(len(dropped["groups"]["deduped_targets"]), 1)
+        self.assertEqual(len(dropped["groups"]["invalid_date"]), 1)
+
+        # Exemption-only snapshot without any Zalo group match remains reliable
+        from repositories.group_repository import GroupRepository
+
+        exempt_only_week_plan = {
+            "latest_week": {"week": 33, "year": 2026},
+            "required_week": {"week": 32, "year": 2026},
+            "selected_weeks": [
+                {"week": 32, "year": 2026},
+                {"week": 33, "year": 2026},
+            ],
+            "latest_data": [
+                {
+                    "ma_lop": "VT-C4K-L14NOZALO",
+                    "giao_vien": "F",
+                    "ngay_hoc": "30/08/2026",
+                    "ngay_hoc_iso": "2026-08-30",
+                    "buoi_so": "14",
+                }
+            ],
+            "required_data": [],
+            "skipped_empty": [],
+        }
+        exempt_only_plan = service._build_discovery_plan(
+            group_names=["MindX - Other Unmatched Group"],
+            bcnb_data=exempt_only_week_plan["latest_data"],
+            ignored_groups=[],
+            existing_groups=[{"TenNhom": "MindX - Existing Group", "MaLop": "VT-C4K-GA01"}],
+            bcnb_week_plan=exempt_only_week_plan,
+            now=datetime(2026, 8, 17, 9, 0, tzinfo=BUSINESS_TIMEZONE),
+        )
+        self.assertTrue(exempt_only_plan["reliable"])
+        self.assertFalse(exempt_only_plan["group_reliable"])
+        self.assertEqual(len(exempt_only_plan["exempt_targets"]), 1)
+        meta = GroupRepository._snapshot_metadata(exempt_only_plan)
+        self.assertTrue(meta["reliable"])
+        self.assertFalse(meta["group_reliable"])
+
+    def test_5_8_1_js_transition_same_cohort_and_cross_track_pre_to_arm_requires_review(self):
+        week_plan = {
+            "latest_week": {"week": 33, "year": 2026},
+            "required_week": {"week": 32, "year": 2026},
+            "selected_weeks": [
+                {"week": 32, "year": 2026},
+                {"week": 33, "year": 2026},
+            ],
+            "latest_data": [
+                {
+                    "ma_lop": "VT-JSA17",
+                    "giao_vien": "GV JS",
+                    "ngay_hoc": "29/08/2026",
+                    "ngay_hoc_iso": "2026-08-29",
+                    "buoi_so": "1",
+                },
+                {
+                    "ma_lop": "VT-ROB-ARMB16",
+                    "giao_vien": "GV ROB",
+                    "ngay_hoc": "30/08/2026",
+                    "ngay_hoc_iso": "2026-08-30",
+                    "buoi_so": "1",
+                },
+            ],
+            "required_data": [],
+            "skipped_empty": [],
+        }
+        plan = service._build_discovery_plan(
+            group_names=[
+                "MindX - VT-JSB17 T7 17h30-19h30",
+                "MindX - HN-JSB17 T7 17h30-19h30",
+                "MindX - HN-VT-JSB17 T7 17h30-19h30",
+                "MindX - HN VT-JSB17 T7 17h30-19h30",
+                "HN - JSB17",
+                "HN JSB17",
+                "MindX - VT-JSA17 T7 17h30-19h30",
+                "MindX - VT-ROB-PREI16 CN 09h00-11h00",
+            ],
+            bcnb_data=week_plan["latest_data"],
+            ignored_groups=[],
+            existing_groups=[
+                {
+                    "TenNhom": "MindX - VT-JSB17 T7 17h30-19h30",
+                    "MaLop": "VT-JSB17",
+                    "CohortKey": "VT-J|S|17",
+                },
+                {
+                    "TenNhom": "MindX - VT-ROB-PREI16 CN 09h00-11h00",
+                    "MaLop": "VT-ROB-PREI16",
+                    "CohortKey": "VT-ROB|PRE|16",
+                },
+            ],
+            bcnb_week_plan=week_plan,
+            now=datetime(2026, 8, 17, 9, 0, tzinfo=BUSINESS_TIMEZONE),
+        )
+        # JSB17 -> JSA17 shares cohort VT|JS|17 and links VT-JSB17 in lifecycle_aliases
+        by_code = {item["MaLop"]: item for item in plan["discovered_groups"]}
+        self.assertIn("VT-JSA17", by_code)
+        self.assertEqual(
+            by_code["VT-JSA17"]["TenNhom"],
+            "MindX - VT-JSA17 T7 17h30-19h30",
+        )
+        self.assertEqual(by_code["VT-JSA17"]["CohortKey"], "VT|JS|17")
+        aliases_by_group = {
+            item["group_name"]: item for item in plan["lifecycle_aliases"]
+        }
+        self.assertIn("MindX - VT-JSB17 T7 17h30-19h30", aliases_by_group)
+        self.assertEqual(
+            aliases_by_group["MindX - VT-JSB17 T7 17h30-19h30"]["cohort_key"],
+            "VT|JS|17",
+        )
+        self.assertEqual(
+            aliases_by_group["MindX - VT-JSB17 T7 17h30-19h30"]["class_code"],
+            "VT-JSB17",
+        )
+        # Cross-center HN-JSB17, HN-VT-JSB17, HN VT-JSB17, HN - JSB17, and HN JSB17 must never be aliased to VT|JS|17
+        self.assertNotIn("MindX - HN-JSB17 T7 17h30-19h30", aliases_by_group)
+        self.assertNotIn("MindX - HN-VT-JSB17 T7 17h30-19h30", aliases_by_group)
+        self.assertNotIn("MindX - HN VT-JSB17 T7 17h30-19h30", aliases_by_group)
+        self.assertNotIn("HN - JSB17", aliases_by_group)
+        self.assertNotIn("HN JSB17", aliases_by_group)
+        # Coverage check: if only cross-center groups exist, VT-JSA17 is MISSING_ZALO_GROUP (not TRANSITION_REVIEW)
+        cross_center_only_plan = service._build_discovery_plan(
+            group_names=[
+                "MindX - HN-JSB17 T7 17h30-19h30",
+                "MindX - HN-VT-JSB17 T7 17h30-19h30",
+                "MindX - HN VT-JSB17 T7 17h30-19h30",
+                "HN - JSB17",
+                "HN JSB17",
+            ],
+            bcnb_data=[week_plan["latest_data"][0]],
+            ignored_groups=[],
+            existing_groups=[],
+            bcnb_week_plan={
+                **week_plan,
+                "latest_data": [week_plan["latest_data"][0]],
+            },
+            now=datetime(2026, 8, 17, 9, 0, tzinfo=BUSINESS_TIMEZONE),
+        )
+        cov_by_code = {
+            item["class_code"]: item
+            for item in cross_center_only_plan["bcnb_zalo_coverage"]["records"]
+        }
+        self.assertEqual(cov_by_code["VT-JSA17"]["status"], "MISSING_ZALO_GROUP")
+        # PREI16 -> ARMB16 is cross-track and must NOT auto-connect or alias
+        self.assertNotIn("VT-ROB-ARMB16", by_code)
+        self.assertNotIn("MindX - VT-ROB-PREI16 CN 09h00-11h00", aliases_by_group)
+        missing_codes = {
+            item["class_code"] for item in plan["dropped_rows"]["groups"]["missing_zalo"]
+        }
+        self.assertIn("VT-ROB-ARMB16", missing_codes)
+
+        # Lesson 13 and Lesson 14 on the same group and date must mark Lesson 13 as same_day_target_ambiguous
+        same_day_13_14_plan = service._build_discovery_plan(
+            group_names=["MindX - VT-JSA17 T7 17h30-19h30"],
+            bcnb_data=[
+                {
+                    "ma_lop": "VT-JSA17",
+                    "giao_vien": "GV JS",
+                    "ngay_hoc": "14/08/2026",
+                    "ngay_hoc_iso": "2026-08-14",
+                    "buoi_so": "13",
+                },
+                {
+                    "ma_lop": "VT-JSA17",
+                    "giao_vien": "GV JS",
+                    "ngay_hoc": "14/08/2026",
+                    "ngay_hoc_iso": "2026-08-14",
+                    "buoi_so": "14",
+                },
+            ],
+            ignored_groups=[],
+            existing_groups=[],
+            bcnb_week_plan={
+                "latest_week": {"week": 33, "year": 2026},
+                "required_week": {"week": 32, "year": 2026},
+                "selected_weeks": [{"week": 33, "year": 2026}],
+                "latest_data": [
+                    {
+                        "ma_lop": "VT-JSA17",
+                        "giao_vien": "GV JS",
+                        "ngay_hoc": "14/08/2026",
+                        "ngay_hoc_iso": "2026-08-14",
+                        "buoi_so": "13",
+                    },
+                    {
+                        "ma_lop": "VT-JSA17",
+                        "giao_vien": "GV JS",
+                        "ngay_hoc": "14/08/2026",
+                        "ngay_hoc_iso": "2026-08-14",
+                        "buoi_so": "14",
+                    },
+                ],
+                "required_data": [],
+            },
+            now=datetime(2026, 8, 17, 9, 0, tzinfo=BUSINESS_TIMEZONE),
+        )
+        self.assertEqual(len(same_day_13_14_plan["scan_targets"]), 1)
+        self.assertEqual(len(same_day_13_14_plan["exempt_targets"]), 1)
+        self.assertTrue(same_day_13_14_plan["scan_targets"][0].get("same_day_target_ambiguous"))
+        self.assertEqual(same_day_13_14_plan["scan_targets"][0].get("same_day_target_count"), 2)
 
 
 if __name__ == "__main__":

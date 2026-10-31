@@ -52,6 +52,8 @@ if missing:
     raise SystemExit(f"missing-phase3-files={missing}")
 
 zalo = read("services/zalo_service.py")
+zalo_parallel = read("services/zalo_parallel_service.py")
+zalo_bcnb = read("services/zalo_bcnb_service.py")
 discovery = read("services/zalo_discovery_service.py")
 lms = read("services/lms_service.py")
 google = read("services/googleform_service.py")
@@ -82,12 +84,15 @@ tool_config = read("pyproject.toml")
 quality_script = read("CHECK_QUALITY.ps1")
 
 invariants = {
-    "zalo-live-config-mode": "Config.BCNB_DRY_RUN" not in zalo,
+    "zalo-live-config-mode": "Config.BCNB_DRY_RUN" not in zalo
+    and "Config.BCNB_DRY_RUN" not in zalo_parallel
+    and "Config.BCNB_DRY_RUN" not in zalo_bcnb,
     "google-live-config-mode": "Config.MODE" not in google,
     "dispatcher-persisted-mode": dispatcher.count("mode_from_job(job)") >= 3,
     "lms-digest-binds-mode": '"dry_run": bool(plan.get("dry_run", True))' in plan,
-    "zalo-chat-fail-closed": "open_chat_matches(group_name, header_text)" in zalo
-    and "Không xác minh được nhóm Zalo đang mở" in zalo,
+    "zalo-chat-fail-closed": "open_chat_matches(group_name, header_text)" in zalo_parallel
+    and "async def _wait_for_target_header(" in zalo_parallel
+    and "TARGET_SEARCH_RESULT_TIMEOUT" in zalo_parallel,
     # Discovery deliberately reads the current period from BCNB itself before
     # deriving its predecessor; LMS still uses the shared previous-week helper.
     "shared-bcnb-week-selection": "read_current_week_checked" in discovery
@@ -119,7 +124,7 @@ invariants = {
     and "reconcile_orphans" in read("core/container.py"),
     "bcnb-server-readback": "await page.reload" in read("services/bcnb_safety.py")
     and "verify_checkbox_persisted" in bcnb_actions
-    and "execute_verified_checkbox_action" in zalo
+    and "execute_verified_checkbox_action" in zalo_bcnb
     and "execute_verified_checkbox_action" in lms,
     "dev-tools-pinned": all(
         dependency in dev_requirements

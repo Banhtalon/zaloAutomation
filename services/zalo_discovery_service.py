@@ -27,7 +27,7 @@ from services.zalo_discovery_collection import (
     collect_zalo_group_names,
 )
 from services.zalo_discovery_matching import find_bcnb_match
-from services.zalo_discovery_plan import build_discovery_plan
+from services.zalo_discovery_plan import BcnbWeekRowList, build_discovery_plan
 
 
 group_repo = GroupRepository()
@@ -116,7 +116,7 @@ async def _read_bcnb_week_rows(
     instructor_index = await resolve_instructor_column(page)
     ext_cols = await resolve_extended_bcnb_columns(page)
     rows = await page.locator("table tr").all()
-    result: list[dict[str, str]] = []
+    result = BcnbWeekRowList()
     for row in rows:
         await job_repo.ensure_not_cancelled(job_id)
         cells = await row.locator("td").all()
@@ -125,7 +125,14 @@ async def _read_bcnb_week_rows(
             continue
         class_code = (await cells[class_index].inner_text()).strip()
         class_date = (await cells[date_index].inner_text()).strip()
+        lesson_val = (await cells[lesson_index].inner_text()).strip()
         if not class_code or not class_date:
+            result.skipped_empty.append({
+                "ma_lop": class_code, "class_code": class_code,
+                "buoi_so": lesson_val, "lesson": lesson_val,
+                "ngay_hoc": class_date, "class_date": class_date,
+                "week": str(week), "year": str(year), "reason": "SKIPPED_EMPTY",
+            })
             continue
         instructor_name = (
             (await cells[instructor_index].inner_text()).strip()
@@ -133,19 +140,12 @@ async def _read_bcnb_week_rows(
             else ""
         )
         ext = await extract_bcnb_extended_row_fields(row, cells, ext_cols, include_empty=False)
-        result.append(
-            {
-                "ma_lop": class_code,
-                "buoi_so": (await cells[lesson_index].inner_text()).strip(),
-                "ngay_hoc": class_date,
-                "ngay_hoc_iso": _schedule_date_iso(class_date) or "",
-                "giao_vien": instructor_name,
-                "zalo_deadline": (await cells[deadline_index].inner_text()).strip(),
-                "week": str(week),
-                "year": str(year),
-                **ext,
-            }
-        )
+        result.append({
+            "ma_lop": class_code, "buoi_so": lesson_val, "ngay_hoc": class_date,
+            "ngay_hoc_iso": _schedule_date_iso(class_date) or "", "giao_vien": instructor_name,
+            "zalo_deadline": (await cells[deadline_index].inner_text()).strip(),
+            "week": str(week), "year": str(year), **ext,
+        })
     log_message(f"Đã lấy thành công {len(result)} dòng BCNB W{week}/{year}.")
     return result
 
@@ -207,12 +207,10 @@ async def _collect_bcnb_week_plan(page, job_id: int) -> dict:
     return {
         "latest_week": {"week": latest_week, "year": latest_year},
         "required_week": {"week": required_week, "year": required_year},
-        "selected_weeks": [
-            {"week": required_week, "year": required_year},
-            {"week": latest_week, "year": latest_year},
-        ],
+        "selected_weeks": [{"week": required_week, "year": required_year}, {"week": latest_week, "year": latest_year}],
         "latest_data": latest_data,
         "required_data": required_data,
+        "skipped_empty": [*getattr(required_data, "skipped_empty", []), *getattr(latest_data, "skipped_empty", [])],
     }
 
 

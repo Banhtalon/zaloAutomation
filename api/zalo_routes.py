@@ -1,4 +1,3 @@
-from datetime import timedelta
 import re
 
 from fastapi import APIRouter, Body, Depends, Query, Response
@@ -9,7 +8,7 @@ from api.errors import internal_error
 from core.auth import AuthUser
 from core.container import AppContainer
 from core.time_utils import now_business
-from core.time_utils import now_utc, parse_timestamp, utc_iso
+from core.time_utils import now_utc, parse_timestamp
 from repositories.report_repository import (
     WeeklySummaryError,
     build_weekly_summary_csv,
@@ -21,13 +20,13 @@ from services.report_email_service import (
     ReportEmailError,
     send_failed_classes_report_email,
 )
+from services.report_status import validate_two_week_plan
 from services.zalo_bcnb_service import (
     collect_result_item_evidence_paths,
     find_manual_approve_target_matches,
     is_result_item_already_submitted,
     parse_scan_job_results_envelope,
 )
-from services.zalo_target_eligibility import split_scan_targets_for_execution
 from services.zalo_preflight import (
     assess_zalo_scan_preflight,
     effective_scan_worker_count,
@@ -58,7 +57,10 @@ def _enforce_scan_preflight(
             (item for item in checks if item.get("status") == "RED"),
             None,
         )
-        if blocker and str(blocker.get("code", "")).startswith("SCAN_PLAN_"):
+        if blocker and (
+            str(blocker.get("code", "")).startswith("SCAN_PLAN_")
+            or blocker.get("code") == "SCAN_TARGETS_DEFERRED"
+        ):
             raise public_error(409, blocker["code"], blocker["message"])
         raise public_error(
             409,
@@ -148,79 +150,78 @@ async def run_scan(
         dry_run=dry_run,
         confirm_yellow=confirm_yellow,
     )
-    snapshot = (
-        await container.group_repo.get_discovery_snapshot(snapshot_id)
+    raw_pf_id = preflight.get("snapshot_id") or (preflight.get("plan") or {}).get(
+        "snapshot_id"
+    )
+    pinned_snapshot_id = (
+        snapshot_id
         if snapshot_id is not None
+        else (
+            raw_pf_id
+            if isinstance(raw_pf_id, int) and not isinstance(raw_pf_id, bool)
+            else None
+        )
+    )
+
+    async def _ensure_snapshot_not_drifted(
+        expected_id: int | None,
+        observed_pf: dict | None = None,
+    ) -> None:
+        if expected_id is None:
+            return
+        pf_id = (
+            observed_pf.get("snapshot_id")
+            or (observed_pf.get("plan") or {}).get("snapshot_id")
+            if isinstance(observed_pf, dict)
+            else None
+        )
+        latest_snap = (
+            await container.group_repo.get_latest_discovery_snapshot()
+            if snapshot_id is None
+            else None
+        )
+        if (
+            (pf_id is not None and pf_id != expected_id)
+            or (
+                snapshot_id is None
+                and (
+                    latest_snap is None
+                    or latest_snap.get("snapshot_id") != expected_id
+                )
+            )
+        ):
+            raise public_error(
+                409,
+                "SNAPSHOT_CHANGED",
+                "Kế hoạch dò tìm đã thay đổi trong lúc chuẩn bị quét; hãy kiểm tra lại rồi bấm Quét.",
+            )
+
+    await _ensure_snapshot_not_drifted(pinned_snapshot_id)
+    snapshot = (
+        await container.group_repo.get_discovery_snapshot(pinned_snapshot_id)
+        if pinned_snapshot_id is not None
         else await container.group_repo.get_latest_discovery_snapshot()
     )
-    if snapshot is None:
+    max_age_minutes = int(
+        getattr(container.settings, "zalo_plan_max_age_minutes", 30)
+    )
+    validation = validate_two_week_plan(
+        snapshot,
+        max_age_minutes=max_age_minutes,
+        now=now_utc(),
+        business_now=now_business(),
+    )
+    if not validation["valid"]:
+        err_code = str(validation["error_code"] or "SCAN_PLAN_INCOMPLETE")
+        if err_code != "SCAN_TARGETS_DEFERRED":
+            raise public_error(409, err_code, str(validation["message"]))
+    if isinstance(snapshot, dict) and _snapshot_is_stale(snapshot, max_age_minutes):
         raise public_error(
             409,
-            "SCAN_PLAN_REQUIRED",
-            "Hãy bấm Dò tìm để tạo kế hoạch hai tuần trước khi quét.",
+            "SCAN_PLAN_STALE",
+            "Kế hoạch BCNB đã quá hạn; hãy bấm Dò tìm lại trước khi quét.",
         )
-    if snapshot.get("status") not in {"OBSERVED_ONLY", "PROMOTED"}:
-        raise public_error(
-            409,
-            "SCAN_PLAN_NOT_TRUSTED",
-            "Kế hoạch tuần BCNB chưa đủ tin cậy để quét.",
-        )
-    plan = snapshot.get("plan") or {}
-    week_plan = plan.get("bcnb_week_plan") or {}
-    selected_weeks = week_plan.get("selected_weeks") or []
-    candidate_targets = [
-        *(plan.get("scan_targets") or []),
-        *(plan.get("deferred_targets") or []),
-    ]
-    normalized_periods = set()
-    for item in selected_weeks:
-        if not isinstance(item, dict):
-            continue
-        try:
-            normalized_periods.add((int(item["week"]), int(item["year"])))
-        except (KeyError, TypeError, ValueError):
-            continue
-    latest_period: tuple[int, int] | None
-    required_period: tuple[int, int] | None
-    try:
-        latest_period = (
-            int(week_plan["latest_week"]["week"]),
-            int(week_plan["latest_week"]["year"]),
-        )
-        required_period = (
-            int(week_plan["required_week"]["week"]),
-            int(week_plan["required_week"]["year"]),
-        )
-    except (KeyError, TypeError, ValueError):
-        latest_period = required_period = None
-    if (
-        len(selected_weeks) != 2
-        or len(normalized_periods) != 2
-        or latest_period is None
-        or required_period is None
-        or normalized_periods != {latest_period, required_period}
-        or latest_period == required_period
-        or not candidate_targets
-    ):
-        raise public_error(
-            409,
-            "SCAN_PLAN_INCOMPLETE",
-            "Kế hoạch BCNB chưa có đủ hai tuần và target quét.",
-        )
-    try:
-        target_keys = [canonical_target_key(item) for item in candidate_targets]
-    except (AttributeError, TypeError, ValueError) as exc:
-        raise public_error(
-            409,
-            "SCAN_PLAN_INVALID_TARGET",
-            "Kế hoạch BCNB có target thiếu identity bất biến; hãy Dò tìm lại.",
-        ) from exc
-    if len(target_keys) != len(set(target_keys)):
-        raise public_error(
-            409,
-            "SCAN_PLAN_DUPLICATE_TARGET",
-            "Kế hoạch BCNB có target trùng; hãy Dò tìm lại.",
-        )
+    target_keys = list(validation["target_keys"])
     if normalized_selected_keys is not None:
         admitted_key_set = set(target_keys)
         if any(key not in admitted_key_set for key in normalized_selected_keys):
@@ -229,30 +230,10 @@ async def run_scan(
                 "SCAN_SELECTED_TARGET_NOT_IN_PLAN",
                 "Target chọn lọc không thuộc kế hoạch tuần BCNB hiện tại; hãy Dò tìm lại.",
             )
-    if _snapshot_is_stale(
-        snapshot,
-        int(getattr(container.settings, "zalo_plan_max_age_minutes", 30)),
-    ):
-        raise public_error(
-            409,
-            "SCAN_PLAN_STALE",
-            "Kế hoạch BCNB đã quá hạn; hãy bấm Dò tìm lại trước khi quét.",
-        )
-    observed_at = parse_timestamp(snapshot.get("observed_at"))
-    if observed_at is None:
-        raise public_error(
-            409,
-            "SCAN_PLAN_STALE",
-            "Kế hoạch BCNB thiếu thời điểm quan sát hợp lệ; hãy bấm Dò tìm lại.",
-        )
-    expires_at = observed_at + timedelta(
-        minutes=int(getattr(container.settings, "zalo_plan_max_age_minutes", 30))
-    )
-    scan_targets, deferred_targets = split_scan_targets_for_execution(
-        candidate_targets,
-        latest_week=week_plan.get("latest_week"),
-        now=now_business(),
-    )
+    selected_weeks = validation["selected_weeks"]
+    scan_targets = list(validation["scan_targets"])
+    deferred_targets = list(validation["deferred_targets"])
+    exempt_targets = list(validation.get("exempt_targets") or [])
     if normalized_selected_keys is not None:
         selected_key_set = set(normalized_selected_keys)
         scan_targets = [
@@ -265,16 +246,28 @@ async def run_scan(
             for target in deferred_targets
             if canonical_target_key(target) in selected_key_set
         ]
-    if not scan_targets:
+        exempt_targets = [
+            target
+            for target in exempt_targets
+            if canonical_target_key(target) in selected_key_set
+        ]
+    if not scan_targets and not exempt_targets:
         raise public_error(
             409,
             "SCAN_TARGETS_DEFERRED",
             "Chưa có lớp đủ giờ học để quét. Các lớp hôm nay sẽ tự khả dụng sau giờ kết thúc buổi học.",
         )
+    assert isinstance(snapshot, dict)
+    effective_snapshot_id = (
+        pinned_snapshot_id
+        if pinned_snapshot_id is not None
+        else snapshot.get("snapshot_id")
+    )
     latest_preflight = await assess_zalo_scan_preflight(
         container,
-        snapshot_id=snapshot_id,
+        snapshot_id=effective_snapshot_id,
     )
+    await _ensure_snapshot_not_drifted(effective_snapshot_id, latest_preflight)
     _enforce_scan_preflight(
         latest_preflight,
         dry_run=dry_run,
@@ -283,17 +276,20 @@ async def run_scan(
     scan_plan = {
         "snapshot_id": snapshot["snapshot_id"],
         "observed_at": snapshot.get("observed_at"),
-        "expires_at": utc_iso(expires_at),
-        "latest_week": week_plan.get("latest_week"),
-        "required_week": week_plan.get("required_week"),
+        "expires_at": validation["expires_at"],
+        "latest_week": validation["latest_week"],
+        "required_week": validation["required_week"],
         "selected_weeks": selected_weeks,
         "targets": scan_targets,
         "deferred_targets": deferred_targets,
+        "exempt_targets": exempt_targets,
+        "dropped_rows": validation.get("dropped_rows"),
     }
     if normalized_selected_keys is not None:
         scan_plan["selective_rescan"] = True
         scan_plan["selected_target_keys"] = [
-            canonical_target_key(target) for target in scan_targets
+            canonical_target_key(target)
+            for target in [*scan_targets, *exempt_targets]
         ]
     try:
         job_id = await container.job_repo.create_job(
@@ -325,6 +321,7 @@ async def run_scan(
         "job_id": job_id,
         "dry_run": dry_run,
         "target_count": len(scan_targets),
+        "exempt_target_count": len(exempt_targets),
         "worker_count": int(
             effective_scan_worker_count(container.settings, execution_mode)
         ),
@@ -569,64 +566,33 @@ async def get_zalo_scan_plan(container: AppContainer = Depends(get_container)):
     snapshot = await container.group_repo.get_latest_discovery_snapshot()
     if snapshot is None:
         return {"available": False, "plan": None}
-    plan = snapshot.get("plan") or {}
-    week_plan = plan.get("bcnb_week_plan") or {}
-    selected_weeks = week_plan.get("selected_weeks") or []
-    candidate_targets = [
-        *(plan.get("scan_targets") or []),
-        *(plan.get("deferred_targets") or []),
-    ]
-    selected_periods = set()
-    for item in selected_weeks:
-        if isinstance(item, dict):
-            try:
-                selected_periods.add((int(item["week"]), int(item["year"])))
-            except (KeyError, TypeError, ValueError):
-                continue
-    latest_period: tuple[int, int] | None
-    required_period: tuple[int, int] | None
-    try:
-        latest_period = (
-            int(week_plan["latest_week"]["week"]),
-            int(week_plan["latest_week"]["year"]),
-        )
-        required_period = (
-            int(week_plan["required_week"]["week"]),
-            int(week_plan["required_week"]["year"]),
-        )
-    except (KeyError, TypeError, ValueError):
-        latest_period = required_period = None
-    scan_targets, deferred_targets = split_scan_targets_for_execution(
-        candidate_targets,
-        latest_week=week_plan.get("latest_week"),
-        now=now_business(),
+    max_age_minutes = int(
+        getattr(container.settings, "zalo_plan_max_age_minutes", 30)
     )
-    target_count = len(scan_targets)
-    deferred_target_count = len(deferred_targets)
-    available = (
-        snapshot.get("status") in {"OBSERVED_ONLY", "PROMOTED"}
-        and not _snapshot_is_stale(
-            snapshot,
-            int(getattr(container.settings, "zalo_plan_max_age_minutes", 30)),
-        )
-        and len(selected_weeks) == 2
-        and latest_period is not None
-        and required_period is not None
-        and latest_period != required_period
-        and selected_periods == {latest_period, required_period}
-        and target_count > 0
+    validation = validate_two_week_plan(
+        snapshot,
+        max_age_minutes=max_age_minutes,
+        now=now_utc(),
+        business_now=now_business(),
+    )
+    available = bool(
+        validation["valid"]
+        and not _snapshot_is_stale(snapshot, max_age_minutes)
     )
     return {
         "available": available,
-        "snapshot_id": snapshot.get("snapshot_id"),
-        "status": snapshot.get("status"),
-        "observed_at": snapshot.get("observed_at"),
-        "latest_week": week_plan.get("latest_week"),
-        "required_week": week_plan.get("required_week"),
-        "selected_weeks": selected_weeks,
-        "target_count": target_count,
-        "deferred_target_count": deferred_target_count,
-        "candidate_target_count": len(candidate_targets),
+        "reason_code": validation["error_code"] if not available else None,
+        "snapshot_id": validation["snapshot_id"],
+        "status": validation["status"],
+        "observed_at": validation["observed_at"],
+        "latest_week": validation["latest_week"],
+        "required_week": validation["required_week"],
+        "selected_weeks": validation["selected_weeks"],
+        "target_count": validation["target_count"],
+        "deferred_target_count": validation["deferred_target_count"],
+        "exempt_target_count": validation["exempt_target_count"],
+        "candidate_target_count": validation["candidate_target_count"],
+        "dropped_rows": validation["dropped_rows"],
     }
 
 
@@ -810,6 +776,8 @@ async def get_weekly_summary(
     job_id: int | None = Query(default=None, ge=1),
     format: str | None = Query(default=None),
     failed_only: bool = Query(default=False),
+    execution_mode: str | None = Query(default=None),
+    include_dry_run: bool = Query(default=False),
     container: AppContainer = Depends(get_container),
 ):
     week, year, job_id = _normalize_weekly_summary_params(week, year, job_id)
@@ -824,12 +792,18 @@ async def get_weekly_summary(
             "Định dạng báo cáo không hợp lệ (chỉ hỗ trợ json hoặc csv).",
         )
     failed_only_flag = False if hasattr(failed_only, "default") else bool(failed_only)
+    exec_mode_param = None if hasattr(execution_mode, "default") else execution_mode
+    include_dry_run_flag = (
+        False if hasattr(include_dry_run, "default") else bool(include_dry_run)
+    )
 
     try:
         payload = await container.report_repo.get_weekly_summary(
             week=week,
             year=year,
             job_id=job_id,
+            execution_mode=exec_mode_param,
+            include_dry_run=include_dry_run_flag,
         )
     except WeeklySummaryError as exc:
         raise public_error(exc.status_code, exc.code, str(exc)) from exc
@@ -841,21 +815,35 @@ async def get_weekly_summary(
         rows_for_output = filter_failed_weekly_summary_rows(rows_for_output)
 
     if fmt == "csv":
-        csv_text = build_weekly_summary_csv(rows_for_output)
+        is_dry_run_csv = bool(
+            payload.get("is_dry_run")
+            or payload.get("execution_mode") == "dry-run"
+            or payload.get("execution_mode_badge") == "DRY-RUN"
+        )
+        csv_text = build_weekly_summary_csv(
+            rows_for_output,
+            is_dry_run=is_dry_run_csv,
+            execution_mode_badge=payload.get("execution_mode_badge"),
+        )
         sel_w = payload.get("week")
         sel_y = payload.get("year")
         prefix = "Bao_Cao_Lop_Loi_Tuan" if failed_only_flag else "Bao_Cao_Tuan"
+        mode_suffix = "_DRY_RUN" if is_dry_run_csv else ""
         filename = (
-            f"{prefix}_W{int(sel_w):02d}_{int(sel_y)}.csv"
+            f"{prefix}_W{int(sel_w):02d}_{int(sel_y)}{mode_suffix}.csv"
             if sel_w is not None and sel_y is not None
-            else f"{prefix}.csv"
+            else f"{prefix}{mode_suffix}.csv"
         )
+        resp_headers = {
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "X-Execution-Mode": "dry-run" if is_dry_run_csv else "production",
+        }
+        if is_dry_run_csv:
+            resp_headers["X-Execution-Mode-Badge"] = "DRY-RUN"
         return Response(
             content=csv_text.encode("utf-8"),
             media_type="text/csv; charset=utf-8",
-            headers={
-                "Content-Disposition": f'attachment; filename="{filename}"',
-            },
+            headers=resp_headers,
         )
     if failed_only_flag:
         return {
@@ -875,17 +863,53 @@ async def send_failed_csv_email_report(
     year: int | None = Body(default=None, embed=True),
     job_id: int | None = Body(default=None, embed=True),
     recipients: list[str] | None = Body(default=None, embed=True),
+    confirm_duplicate: bool = Body(default=False, embed=True),
+    execution_mode: str | None = Body(default=None, embed=True),
+    include_dry_run: bool = Body(default=False, embed=True),
     container: AppContainer = Depends(get_container),
 ):
     week, year, job_id = _normalize_weekly_summary_params(week, year, job_id)
     if hasattr(recipients, "default"):
         recipients = None
+    confirm_duplicate_flag = (
+        False if hasattr(confirm_duplicate, "default") else bool(confirm_duplicate)
+    )
+    exec_mode_param = None if hasattr(execution_mode, "default") else execution_mode
+    include_dry_run_flag = (
+        False if hasattr(include_dry_run, "default") else bool(include_dry_run)
+    )
+
+    if week is not None and year is not None:
+        try:
+            active_jobs = await container.report_repo.get_active_mutation_jobs_for_week(
+                int(week), int(year)
+            )
+        except Exception as exc:
+            raise internal_error(
+                exc, event="api.reports.send_failed_csv_email_failed"
+            ) from exc
+        if active_jobs:
+            active_desc = ", ".join(
+                f"#{j.get('id')} ({j.get('job_type')}:{j.get('status')})"
+                for j in active_jobs
+            )
+            err = public_error(
+                409,
+                "SCAN_ACTIVE_FOR_WEEK",
+                f"Tuần W{int(week):02d}/{int(year)} đang có tác vụ chạy hoặc chờ chạy ({active_desc}). "
+                "Vui lòng đợi tác vụ hoàn tất trước khi gửi email báo cáo.",
+            )
+            if isinstance(err.detail, dict):
+                err.detail["active_jobs"] = active_jobs
+            raise err
 
     try:
         payload = await container.report_repo.get_weekly_summary(
             week=week,
             year=year,
             job_id=job_id,
+            execution_mode=exec_mode_param,
+            include_dry_run=include_dry_run_flag,
         )
     except WeeklySummaryError as exc:
         raise public_error(exc.status_code, exc.code, str(exc)) from exc
@@ -912,6 +936,12 @@ async def send_failed_csv_email_report(
             failed_rows=failed_rows,
             selected_job_id=payload.get("selected_job_id"),
             requested_recipients=recipients,
+            confirm_duplicate=confirm_duplicate_flag,
+            execution_mode=str(payload.get("execution_mode") or "production"),
+            is_dry_run=bool(payload.get("is_dry_run", False)),
+            execution_mode_badge=payload.get("execution_mode_badge"),
+            audit_repo=getattr(container, "audit_repo", None),
+            report_repo=getattr(container, "report_repo", None),
         )
     except ReportEmailError as exc:
         err = public_error(exc.status_code, exc.code, str(exc))

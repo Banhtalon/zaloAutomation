@@ -4,8 +4,58 @@
         let currentJobType = null;
         let jobPollingTimer = null;
         const JOB_POLL_INTERVAL_MS = 3000;
+        const pageLoadAtMs = Date.now();
         const handledTerminalJobIds = new Set();
+        const sessionTrackedJobIds = new Set();
         const terminalStatuses = new Set(['SUCCESS', 'PARTIAL_SUCCESS', 'FAILED', 'CANCELLED']);
+        const HANDLED_TERMINAL_JOBS_STORAGE_KEY = 'zalo_handled_terminal_jobs';
+
+        function loadSessionHandledTerminalJobs() {
+            try {
+                if (typeof sessionStorage !== 'undefined' && sessionStorage && typeof sessionStorage.getItem === 'function') {
+                    const raw = sessionStorage.getItem(HANDLED_TERMINAL_JOBS_STORAGE_KEY);
+                    const parsed = raw ? JSON.parse(raw) : [];
+                    if (Array.isArray(parsed)) {
+                        parsed.forEach(id => {
+                            const num = Number(id);
+                            if (Number.isInteger(num) && num > 0) handledTerminalJobIds.add(num);
+                        });
+                    }
+                }
+            } catch (_) {
+                // Ignore storage errors in sandboxed/headless environments
+            }
+        }
+
+        function markTerminalJobHandled(jobId) {
+            const num = Number(jobId);
+            if (!Number.isInteger(num) || num <= 0) return;
+            handledTerminalJobIds.add(num);
+            if (handledTerminalJobIds.size > 200) {
+                handledTerminalJobIds.delete(handledTerminalJobIds.values().next().value);
+            }
+            try {
+                if (typeof sessionStorage !== 'undefined' && sessionStorage && typeof sessionStorage.setItem === 'function') {
+                    sessionStorage.setItem(
+                        HANDLED_TERMINAL_JOBS_STORAGE_KEY,
+                        JSON.stringify([...handledTerminalJobIds])
+                    );
+                }
+            } catch (_) {
+                // Ignore storage errors
+            }
+        }
+
+        function isJobFinishedBeforePageLoad(job) {
+            if (!job || typeof job !== 'object') return false;
+            const jobId = Number(job.id);
+            if (Number.isInteger(jobId) && sessionTrackedJobIds.has(jobId)) return false;
+            if (!job.finished_at) return false;
+            const finishedMs = Date.parse(String(job.finished_at));
+            return Number.isFinite(finishedMs) && finishedMs < pageLoadAtMs;
+        }
+
+        loadSessionHandledTerminalJobs();
         let googleformUploadIds = [];
         let googleformUploadInFlight = 0;
         let googleformBatchId = null;
@@ -20,6 +70,7 @@
         let lmsSelectedClassesToTick = [];
         let lmsConfirmInFlight = false;
         let latestZaloResults = [];
+        let latestLmsFetchUnavailable = false;
         let zaloScanPlan = null;
         let zaloPreflight = null;
         let weeklyHistoryView = null;
@@ -30,9 +81,13 @@
         let lastFailedCsvEmailResult = null;
 
         function trackJob(jobId) {
+            const num = Number(jobId);
+            if (Number.isInteger(num) && num > 0) {
+                sessionTrackedJobIds.add(num);
+            }
             currentJobId = jobId;
             currentJobActive = true;
-            renderZaloWorkflow();
+            applyZaloRunState();
             if (typeof restartJobPolling === 'function') {
                 restartJobPolling();
             }
@@ -112,6 +167,26 @@
             } catch (err) { alert("Lỗi kết nối đến server!"); }
         }
 
+        function isZaloScanPlanRunnable(plan = zaloScanPlan) {
+            if (!plan || !plan.snapshot_id) return false;
+            if (plan.available === false || plan.stale === true || plan.reason_code === 'SCAN_PLAN_STALE') {
+                return false;
+            }
+            const hasCounts = plan.target_count !== undefined || plan.exempt_target_count !== undefined;
+            if (hasCounts) {
+                const totalAdmitted = Number(plan.target_count || 0) + Number(plan.exempt_target_count || 0);
+                if (totalAdmitted < 1) return false;
+            }
+            return true;
+        }
+
+        function canRunZaloScanNow() {
+            const hasPlan = isZaloScanPlanRunnable(zaloScanPlan);
+            const hasPreflight = Boolean(zaloPreflight);
+            const blocked = getZaloPreflightStatus() === 'RED';
+            return Boolean(!currentJobActive && hasPlan && hasPreflight && !blocked);
+        }
+
         function refreshDashboardRequiredWeekView() {
             if (typeof syncWeeklyHistoryControlsWithPlan === 'function') {
                 syncWeeklyHistoryControlsWithPlan();
@@ -119,23 +194,32 @@
             if (Array.isArray(latestZaloResults)
                 && latestZaloResults.length > 0
                 && typeof renderZaloResults === 'function') {
-                renderZaloResults(latestZaloResults, true);
+                const keepHistory = typeof isHistoricalWeekViewActive === 'function' && isHistoricalWeekViewActive();
+                renderZaloResults(latestZaloResults, true, {
+                    preserveOrigin: true,
+                    isHistoricalView: keepHistory,
+                });
             }
         }
 
         function renderZaloScanPlan(plan) {
             const element = document.getElementById('zalo-scan-plan');
             const brief = document.getElementById('zalo-dashboard-plan-brief');
+            const stripPlanText = typeof document.getElementById === 'function'
+                ? document.getElementById('dashboard-plan-strip-text')
+                : null;
             if (!element) return;
             if (typeof document.querySelector !== 'function') return;
             const scanButton = document.querySelector('.action-button--scan');
-            if (!plan || !plan.snapshot_id
+            const isStale = Boolean(plan && (plan.stale === true || plan.reason_code === 'SCAN_PLAN_STALE'));
+            if (!plan || (!plan.snapshot_id && !isStale)
                 || !Array.isArray(plan.selected_weeks)
                 || plan.selected_weeks.length !== 2) {
                 zaloScanPlan = null;
-                element.textContent = 'Chưa có kế hoạch tuần BCNB. Hãy bấm “Dò tìm” trước khi quét.';
+                element.textContent = 'Chưa có kế hoạch tuần BCNB. Hãy bấm “Dò kế hoạch” trước khi quét.';
                 element.className = 'rounded-xl border-2 border-amber-400 border-l-8 border-l-amber-600 bg-amber-50 px-4 py-2.5 text-xs font-bold text-amber-950 shadow-sm';
-                if (brief) brief.textContent = 'Chưa có kế hoạch tuần BCNB · Hãy bấm “Dò tìm lại”';
+                if (brief) brief.textContent = 'Chưa có kế hoạch tuần BCNB · Hãy bấm “Dò kế hoạch”';
+                if (stripPlanText) stripPlanText.textContent = 'Chưa có kế hoạch tuần BCNB · Hãy bấm “Dò kế hoạch”';
                 if (scanButton) scanButton.disabled = true;
                 refreshDashboardRequiredWeekView();
                 applyZaloRunState();
@@ -144,24 +228,51 @@
             const latest = plan.latest_week || {};
             const required = plan.required_week || {};
             const deferred = Number(plan.deferred_target_count || 0);
-            if (!plan.available || Number(plan.target_count || 0) < 1) {
-                zaloScanPlan = null;
-                element.textContent = `Kế hoạch BCNB: mới nhất W${latest.week}/${latest.year} · phải xử lý W${required.week}/${required.year} · Dashboard chỉ hiển thị W${required.week}/${required.year} · ${deferred} lớp chưa đến giờ học, chưa thể quét.`;
+            const exempt = Number(plan.exempt_target_count || 0);
+            const droppedCounts = (plan.dropped_rows && plan.dropped_rows.counts) ? plan.dropped_rows.counts : {};
+            const droppedTotal = Number(droppedCounts.total || 0);
+            const totalAdmitted = Number(plan.target_count || 0) + exempt;
+            zaloScanPlan = plan;
+            if (isStale) {
+                const observedSuffix = plan.observed_at ? ` (${plan.observed_at})` : '';
+                element.textContent = `Kế hoạch đã cũ — Dò lại${observedSuffix} · mới nhất W${latest.week}/${latest.year} · phải xử lý W${required.week}/${required.year} · Dashboard chỉ hiển thị W${required.week}/${required.year}.`;
                 element.className = 'rounded-xl border-2 border-amber-400 border-l-8 border-l-amber-600 bg-amber-50 px-4 py-2.5 text-xs font-bold text-amber-950 shadow-sm';
-                if (brief) brief.textContent = `Tuần W${required.week}/${required.year} · Chưa có lớp đủ điều kiện (${deferred} lớp chờ giờ học)`;
+                const staleBrief = `Tuần W${required.week}/${required.year} · Kế hoạch đã cũ — Dò lại${observedSuffix}`;
+                if (brief) brief.textContent = staleBrief;
+                if (stripPlanText) stripPlanText.textContent = staleBrief;
                 if (scanButton) scanButton.disabled = true;
                 refreshDashboardRequiredWeekView();
                 applyZaloRunState();
                 return;
             }
-            zaloScanPlan = plan;
+            if (!plan.available || totalAdmitted < 1) {
+                element.textContent = `Kế hoạch BCNB: mới nhất W${latest.week}/${latest.year} · phải xử lý W${required.week}/${required.year} · Dashboard chỉ hiển thị W${required.week}/${required.year} · ${deferred} lớp chưa đến giờ học, chưa thể quét.`;
+                element.className = 'rounded-xl border-2 border-amber-400 border-l-8 border-l-amber-600 bg-amber-50 px-4 py-2.5 text-xs font-bold text-amber-950 shadow-sm';
+                const deferredBrief = `Tuần W${required.week}/${required.year} · Chưa có lớp đủ điều kiện (${deferred} lớp chờ giờ học)`;
+                if (brief) brief.textContent = deferredBrief;
+                if (stripPlanText) stripPlanText.textContent = deferredBrief;
+                if (scanButton) scanButton.disabled = true;
+                refreshDashboardRequiredWeekView();
+                applyZaloRunState();
+                return;
+            }
             const deferredText = deferred > 0
                 ? ` · ${deferred} lớp chưa đến giờ học (chưa quét)`
                 : '';
-            element.textContent = `Kế hoạch BCNB: mới nhất W${latest.week}/${latest.year} · phải xử lý W${required.week}/${required.year} · Dashboard chỉ hiển thị W${required.week}/${required.year} · ${plan.target_count || 0} target${deferredText}`;
+            const exemptText = exempt > 0
+                ? ` · ${exempt} lớp Buổi 14 miễn báo cáo`
+                : '';
+            const droppedText = droppedTotal > 0
+                ? ` · ${droppedTotal} dòng bị loại cần rà soát`
+                : '';
+            element.textContent = `Kế hoạch BCNB: mới nhất W${latest.week}/${latest.year} · phải xử lý W${required.week}/${required.year} · Dashboard chỉ hiển thị W${required.week}/${required.year} · ${plan.target_count || 0} target${exemptText}${deferredText}${droppedText}`;
             element.className = 'rounded-xl border-2 border-indigo-400 border-l-8 border-l-indigo-600 bg-indigo-50 px-4 py-2.5 text-xs font-bold text-indigo-950 shadow-sm';
+            const activeBrief = `Tuần báo cáo W${required.week}/${required.year} · ${totalAdmitted} lớp cần xử lý${deferred > 0 ? ` (${deferred} lớp chờ giờ học)` : ''}${droppedTotal > 0 ? ` · ${droppedTotal} dòng bị loại` : ''}`;
             if (brief) {
-                brief.textContent = `Tuần báo cáo W${required.week}/${required.year} · ${plan.target_count || 0} lớp cần xử lý${deferred > 0 ? ` (${deferred} lớp chờ giờ học)` : ''}`;
+                brief.textContent = activeBrief;
+            }
+            if (stripPlanText) {
+                stripPlanText.textContent = activeBrief;
             }
             if (scanButton) scanButton.disabled = false;
             refreshDashboardRequiredWeekView();
@@ -195,31 +306,87 @@
         function applyZaloRunState() {
             if (typeof document === 'undefined' || typeof document.querySelector !== 'function') return;
             const scanButton = document.querySelector('.action-button--scan');
+            const btnScanById = typeof document.getElementById === 'function'
+                ? document.getElementById('btn-scan')
+                : null;
+            const discoverButton = typeof document.getElementById === 'function'
+                ? document.getElementById('btn-discover')
+                : null;
+            const lmsButton = typeof document.getElementById === 'function'
+                ? document.getElementById('btn-lms-run')
+                : null;
             const rescanButton = typeof document.getElementById === 'function'
                 ? document.getElementById('btn-rescan-failed')
                 : null;
-            const hasPlan = Boolean(zaloScanPlan && zaloScanPlan.snapshot_id);
+            const hasPlan = isZaloScanPlanRunnable(zaloScanPlan);
             const hasPreflight = Boolean(zaloPreflight);
             const blocked = getZaloPreflightStatus() === 'RED';
-            if (scanButton) {
-                scanButton.disabled = !hasPlan || !hasPreflight || blocked;
-                scanButton.title = !hasPlan
-                    ? 'Hãy bấm Dò tìm lại trước.'
+            const scanDisabled = Boolean(currentJobActive || !hasPlan || !hasPreflight || blocked);
+            const scanTitle = currentJobActive
+                ? 'Đang có một job hoạt động.'
+                : (!hasPlan
+                    ? 'Hãy bấm Dò kế hoạch trước.'
                     : (!hasPreflight
                         ? 'Bấm “Kiểm tra lại” trước khi chạy.'
-                        : (blocked ? 'Cần xử lý kiểm tra đỏ trước khi chạy.' : ''));
+                        : (blocked ? 'Cần xử lý kiểm tra đỏ trước khi chạy.' : '')));
+            if (scanButton) {
+                scanButton.disabled = scanDisabled;
+                scanButton.title = scanTitle;
+            }
+            if (btnScanById && btnScanById !== scanButton) {
+                btnScanById.disabled = scanDisabled;
+                btnScanById.title = scanTitle;
+            }
+            if (discoverButton) {
+                discoverButton.disabled = Boolean(currentJobActive);
+            }
+            if (lmsButton) {
+                lmsButton.disabled = Boolean(currentJobActive);
             }
             if (rescanButton) {
                 const inHistoricalView = typeof isHistoricalWeekViewActive === 'function'
                     && isHistoricalWeekViewActive();
-                rescanButton.disabled = !hasPlan || !hasPreflight || blocked || inHistoricalView;
+                rescanButton.disabled = Boolean(currentJobActive || !hasPlan || !hasPreflight || blocked || inHistoricalView);
+            }
+            const canRescanNow = canRunZaloScanNow()
+                && !(typeof isHistoricalWeekViewActive === 'function' && isHistoricalWeekViewActive());
+            const syncRowButton = btn => {
+                if (!btn) return;
+                const cls = String(btn.className || '');
+                const isRescan = (btn.classList && btn.classList.contains('btn-row-rescan'))
+                    || /\bbtn-row-rescan\b/.test(cls);
+                const isApprove = (btn.classList && btn.classList.contains('btn-row-manual-approve'))
+                    || /\bbtn-row-manual-approve\b/.test(cls);
+                if (isRescan) {
+                    btn.disabled = !canRescanNow;
+                    if (btn.classList) btn.classList.toggle('is-disabled', !canRescanNow);
+                } else if (isApprove) {
+                    btn.disabled = Boolean(currentJobActive);
+                    if (btn.classList) btn.classList.toggle('is-disabled', Boolean(currentJobActive));
+                }
+            };
+            if (typeof document.querySelectorAll === 'function') {
+                Array.from(document.querySelectorAll('.btn-row-rescan') || []).forEach(syncRowButton);
+                Array.from(document.querySelectorAll('.btn-row-manual-approve') || []).forEach(syncRowButton);
+            }
+            if (typeof document.getElementById === 'function') {
+                const tbody = document.getElementById('results-table');
+                const rows = tbody && tbody.children ? Array.from(tbody.children) : [];
+                rows.forEach(tr => {
+                    const trChildren = tr && tr.children ? Array.from(tr.children) : [];
+                    const actionTd = trChildren[4] || null;
+                    const tdChildren = actionTd && actionTd.children ? Array.from(actionTd.children) : [];
+                    const actionsWrap = tdChildren[0] || null;
+                    const buttons = actionsWrap && actionsWrap.children ? Array.from(actionsWrap.children) : [];
+                    buttons.forEach(syncRowButton);
+                });
             }
             renderZaloWorkflow();
         }
 
         function renderZaloWorkflow() {
             if (typeof document === 'undefined' || typeof document.getElementById !== 'function') return;
-            const hasPlan = Boolean(zaloScanPlan && zaloScanPlan.snapshot_id);
+            const hasPlan = isZaloScanPlanRunnable(zaloScanPlan);
             const preflightStatus = getZaloPreflightStatus();
             const updateStep = (id, state, detail) => {
                 const step = document.getElementById(id);
@@ -236,7 +403,7 @@
                 hasPlan ? 'complete' : 'current',
                 hasPlan
                     ? `Kế hoạch W${zaloScanPlan.required_week?.week || '?'} đã sẵn sàng`
-                    : 'Bấm “Dò tìm lại” để lấy dữ liệu',
+                    : 'Bấm “Dò kế hoạch” để lấy dữ liệu',
             );
 
             const preflightState = !hasPlan
@@ -274,16 +441,26 @@
             const details = document.getElementById('zalo-preflight-details');
             const detailSummary = document.getElementById('zalo-preflight-detail-summary');
             const checkedAt = document.getElementById('zalo-preflight-checked-at');
+            const stripPill = document.getElementById('dashboard-preflight-pill');
+            const stripDrawer = document.getElementById('dashboard-preflight-drawer');
+            const stripDrawerSummary = document.getElementById('dashboard-preflight-drawer-summary');
+            const stripDrawerChecks = document.getElementById('dashboard-preflight-drawer-checks');
             if (!panel || !summary || !status || !checks) return;
             zaloPreflight = report || null;
             checks.replaceChildren();
+            if (stripDrawerChecks) stripDrawerChecks.replaceChildren();
             if (!report) {
                 status.textContent = 'Chưa kiểm tra';
                 status.className = 'rounded-md bg-amber-800 border border-amber-950 px-2.5 py-1 text-[10px] font-extrabold uppercase tracking-wider text-white shadow-sm';
+                if (stripPill) {
+                    stripPill.textContent = 'Chưa kiểm tra';
+                    stripPill.className = 'rounded-md bg-amber-800 border border-amber-950 px-2 py-0.5 text-[10px] font-extrabold uppercase tracking-wider text-white shrink-0';
+                }
                 summary.textContent = 'Chưa đọc được kiểm tra an toàn. Hãy thử làm mới.';
                 if (checkedAt) checkedAt.textContent = 'Chưa có lần kiểm tra gần nhất';
                 if (!currentJobExecutionMode) renderRuntimeMode(null);
                 if (details) details.classList.add('hidden');
+                if (stripDrawer) stripDrawer.classList.add('hidden');
                 panel.className = 'preflight-compact flex flex-wrap items-center justify-between gap-2.5 rounded-xl border-2 border-amber-400 border-l-8 border-l-amber-600 bg-amber-50 px-3.5 py-2.5 text-xs text-amber-950 shadow-sm';
                 applyZaloRunState();
                 return;
@@ -302,6 +479,10 @@
             const style = styles[level];
             status.textContent = labels[level];
             status.className = `rounded-md ${style[3]} px-2.5 py-1 text-[10px] font-extrabold uppercase tracking-wider ${style[4]} shadow-sm shrink-0`;
+            if (stripPill) {
+                stripPill.textContent = labels[level];
+                stripPill.className = `rounded-md ${style[3]} px-2 py-0.5 text-[10px] font-extrabold uppercase tracking-wider ${style[4]} shrink-0`;
+            }
             panel.className = `preflight-compact flex flex-wrap items-center justify-between gap-2.5 rounded-xl border-2 border-l-8 ${style[0]} ${style[1]} ${style[2]} px-3.5 py-2.5 text-xs shadow-sm`;
             const mode = report.mode === 'production' ? 'production' : 'dry-run';
             const targets = Number(report.target_count || 0);
@@ -328,10 +509,18 @@
                 line.textContent = `${icon} ${item.message || item.code || 'Kiểm tra'}`;
                 if (item.action) line.textContent += ` — ${item.action}`;
                 checks.appendChild(line);
+                if (stripDrawerChecks) {
+                    const stripLine = document.createElement('div');
+                    stripLine.className = line.className;
+                    stripLine.textContent = line.textContent;
+                    stripDrawerChecks.appendChild(stripLine);
+                }
             });
             checks.classList.remove('hidden');
             if (detailSummary) detailSummary.textContent = `Xem ${visibleChecks.length} kiểm tra chi tiết`;
             if (details) details.classList.toggle('hidden', visibleChecks.length === 0);
+            if (stripDrawerSummary) stripDrawerSummary.textContent = `Chi tiết kiểm tra (${visibleChecks.length})`;
+            if (stripDrawer) stripDrawer.classList.toggle('hidden', visibleChecks.length === 0);
             applyZaloRunState();
         }
 
@@ -359,7 +548,14 @@
                 if (!response.ok) throw new Error('Không đọc được kế hoạch BCNB.');
                 const plan = await response.json();
                 renderZaloScanPlan(plan);
-                await refreshZaloPreflight(plan.snapshot_id || null);
+                await refreshZaloPreflight(plan && plan.snapshot_id ? plan.snapshot_id : null);
+                if (
+                    plan
+                    && plan.required_week
+                    && typeof refreshZaloRequiredWeekSummary === 'function'
+                ) {
+                    await refreshZaloRequiredWeekSummary(plan, { keepLiveMode: true, silent: true });
+                }
             } catch (error) {
                 renderZaloScanPlan(null);
                 await refreshZaloPreflight();
@@ -373,11 +569,11 @@
                 alert('Không có lớp hợp lệ nào được chọn để quét lại.');
                 return;
             }
-            if (!zaloScanPlan || !zaloScanPlan.snapshot_id) {
+            if (!isZaloScanPlanRunnable(zaloScanPlan)) {
                 await refreshZaloScanPlan();
             }
-            if (!zaloScanPlan || !zaloScanPlan.snapshot_id) {
-                alert('Hãy bấm Dò tìm để tạo kế hoạch hai tuần trước khi quét.');
+            if (!isZaloScanPlanRunnable(zaloScanPlan)) {
+                alert('Hãy bấm Dò kế hoạch để tạo kế hoạch hai tuần trước khi quét.');
                 return;
             }
             await refreshZaloPreflight(zaloScanPlan.snapshot_id);
@@ -391,13 +587,22 @@
             }
             const targetCountLabel = isSelective
                 ? selectedTargetKeys.length
-                : Number(zaloScanPlan.target_count || 0);
+                : (Number(zaloScanPlan.target_count || 0) + Number(zaloScanPlan.exempt_target_count || 0));
             let confirmYellow = false;
-            if (preflightStatus === 'YELLOW' && zaloPreflight.mode === 'production') {
-                confirmYellow = window.confirm(
-                    `Có cảnh báo an toàn trước khi chạy production (${targetCountLabel} target). `
-                    + 'Hãy đọc phần cảnh báo và chỉ tiếp tục khi bạn chắc chắn muốn chạy.'
-                );
+            if (preflightStatus === 'YELLOW' && (zaloPreflight.mode === 'production' || zaloPreflight.requires_confirmation)) {
+                const yellowChecks = (zaloPreflight && Array.isArray(zaloPreflight.checks))
+                    ? zaloPreflight.checks.filter(item => item && item.status === 'YELLOW')
+                    : [];
+                const warningLines = yellowChecks
+                    .map(item => `• ${item.message || item.code || 'Cảnh báo'}${item.action ? ` — ${item.action}` : ''}`)
+                    .join('\n');
+                const confirmPrompt = `Có cảnh báo an toàn trước khi chạy production (${targetCountLabel} target):\n`
+                    + (warningLines ? `${warningLines}\n\n` : '')
+                    + 'Hãy đọc phần cảnh báo và chỉ tiếp tục khi bạn chắc chắn muốn chạy.';
+                const confirmFn = (typeof window !== 'undefined' && typeof window.confirm === 'function')
+                    ? window.confirm.bind(window)
+                    : (typeof confirm === 'function' ? confirm : null);
+                confirmYellow = confirmFn ? Boolean(confirmFn(confirmPrompt)) : false;
                 if (!confirmYellow) return;
             }
             const requestBody = {

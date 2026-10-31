@@ -31,6 +31,7 @@ $isolatedEnvironmentNames = @(
     "GOOGLE_FORM_MODE",
     "BCNB_DRY_RUN",
     "ZALO_AI_ASSIST_CLASSIFIER",
+    "ZALO_TARGET_TIMEOUT_SECONDS",
     "FORM_URL",
     "BCNB_URL",
     "BCNB_CLASS_STATUS_URL",
@@ -99,6 +100,7 @@ if ($Isolated) {
         GOOGLE_FORM_MODE = "dry-run"
         BCNB_DRY_RUN = "true"
         ZALO_AI_ASSIST_CLASSIFIER = "false"
+        ZALO_TARGET_TIMEOUT_SECONDS = "180"
         FORM_URL = ""
         BCNB_URL = "http://127.0.0.1/quality-disabled/check_nhanxet.php"
         BCNB_CLASS_STATUS_URL = "http://127.0.0.1/quality-disabled/hocsinh.php"

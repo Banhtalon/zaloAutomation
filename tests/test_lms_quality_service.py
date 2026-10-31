@@ -13,6 +13,13 @@ from services.lms_quality_service import (
     inspect_and_attach_quality_issues,
     is_checkpoint_session,
 )
+from services.report_status import (
+    ISSUE_CODE_LMS_MANUAL_CHECK,
+    SEVERITY_NOTE,
+    issue_code,
+    issue_severity,
+    issue_text,
+)
 
 
 class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
@@ -204,6 +211,7 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         item = {
+            "evidence_state": "SUBMITTED_VERIFIED",
             "scan_target": {
                 "class_code": "VT-C4K-PTI11",
                 "lesson": "5",
@@ -237,6 +245,7 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
         )
 
         template_mismatch_item = {
+            "evidence_state": "SUBMITTED_LATE_VERIFIED",
             "scan_target": {
                 "class_code": "VT-ROB-SEMIB07",
                 "lesson": "6",
@@ -257,6 +266,7 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
 
         # Matching topic keywords should not trigger title mismatch
         matching_item = {
+            "evidence_state": "SUBMITTED_VERIFIED",
             "scan_target": {"class_code": "VT-C4K-PTI11", "lesson": "5"},
             "raw_content": "Tên bài học: Danh sách List và vòng lặp For trong Python",
         }
@@ -268,6 +278,20 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
             [],
         )
 
+        # 5.3.3: NOT_FOUND_VERIFIED and INSUFFICIENT_EVIDENCE never produce Zalo content issues
+        for non_submitted_state in ("NOT_FOUND_VERIFIED", "INSUFFICIENT_EVIDENCE", ""):
+            non_submitted_item = {
+                **item,
+                "evidence_state": non_submitted_state,
+            }
+            self.assertEqual(
+                evaluate_zalo_content_issues(
+                    non_submitted_item,
+                    lms_summary_text="Buổi 5: Cấu trúc dữ liệu danh sách (List) và vòng lặp For trong Python",
+                ),
+                [],
+            )
+
     def test_inspect_and_attach_quality_issues_populates_scan_results(self) -> None:
         scan_results = [
             {
@@ -276,12 +300,14 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
                 "scan_target": {
                     "class_code": "VT-C4K-PTB16",
                     "lesson": "1",
+                    "class_date_iso": "2026-10-24",
                     "khoi": "Coding",
                 },
                 "evidence": {
                     "date_context": {
                         "target_class_code": "VT-C4K-PTB16",
                         "target_lesson": "1",
+                        "target_class_date": "2026-10-24",
                     }
                 },
             }
@@ -289,6 +315,10 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
         slots_by_class = {
             "VT-C4K-PTB16": [
                 {
+                    "_id": "slot-ptb16-0",
+                    "index": 0,
+                    "date": "2026-10-23T17:00:00.000Z",
+                    "startTime": "2026-10-24T01:00:00.000Z",
                     "summary": "",
                     "studentAttendance": [
                         {
@@ -315,6 +345,10 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
         fixed_slots_by_class = {
             "VT-C4K-PTB16": [
                 {
+                    "_id": "slot-ptb16-0",
+                    "index": 0,
+                    "date": "2026-10-23T17:00:00.000Z",
+                    "startTime": "2026-10-24T01:00:00.000Z",
                     "summary": "Buổi 1: Làm quen ngôn ngữ Python, biến và kiểu dữ liệu cơ bản",
                     "studentAttendance": [
                         {
@@ -375,7 +409,12 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
             overflow_students, is_checkpoint=False, lesson=3
         )
         self.assertTrue(
-            any("vượt giới hạn kiểm tra" in issue for issue in res_overflow["issues"])
+            any(
+                "vượt giới hạn kiểm tra" in issue_text(issue)
+                and issue_code(issue) == ISSUE_CODE_LMS_MANUAL_CHECK
+                and issue_severity(issue) == SEVERITY_NOTE
+                for issue in res_overflow["issues"]
+            )
         )
 
         # Fetch error slot must flag manual check instead of returning issues=[]
@@ -386,7 +425,9 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
             lesson=1,
         )
         self.assertEqual(len(err_eval["issues"]), 1)
-        self.assertIn("Không tải được đầy đủ dữ liệu", err_eval["issues"][0])
+        self.assertEqual(issue_code(err_eval["issues"][0]), ISSUE_CODE_LMS_MANUAL_CHECK)
+        self.assertEqual(issue_severity(err_eval["issues"][0]), SEVERITY_NOTE)
+        self.assertIn("Không tải được đầy đủ dữ liệu", issue_text(err_eval["issues"][0]))
 
     async def test_gateway_isolated_mode_and_mock_page_fetch(self) -> None:
         fake_page = AsyncMock()
@@ -455,13 +496,21 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
             None, is_checkpoint=False, lesson=1
         )
         self.assertEqual(len(res_none_att["issues"]), 1)
-        self.assertIn("Chưa kiểm tra được danh sách học viên", res_none_att["issues"][0])
+        self.assertEqual(issue_code(res_none_att["issues"][0]), ISSUE_CODE_LMS_MANUAL_CHECK)
+        self.assertIn(
+            "Chưa kiểm tra được danh sách học viên",
+            issue_text(res_none_att["issues"][0]),
+        )
 
         res_empty_att = evaluate_lms_student_comments(
             [], is_checkpoint=False, lesson=1
         )
         self.assertEqual(len(res_empty_att["issues"]), 1)
-        self.assertIn("Chưa kiểm tra được danh sách học viên", res_empty_att["issues"][0])
+        self.assertEqual(issue_code(res_empty_att["issues"][0]), ISSUE_CODE_LMS_MANUAL_CHECK)
+        self.assertIn(
+            "Chưa kiểm tra được danh sách học viên",
+            issue_text(res_empty_att["issues"][0]),
+        )
 
         # 2. 61st class overflow & missing class in slots_map
         fake_page = AsyncMock()
@@ -491,9 +540,13 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
         item_61 = {"scan_target": {"class_code": codes[60], "lesson": "1"}}
         inspect_and_attach_quality_issues([item_61], lms_slots_by_class=slots)
         self.assertTrue(item_61.get("lms_quality_issues"))
+        self.assertEqual(
+            issue_code(item_61["lms_quality_issues"][0]),
+            ISSUE_CODE_LMS_MANUAL_CHECK,
+        )
         self.assertIn(
             "Vượt giới hạn số lớp kiểm tra LMS",
-            item_61["lms_quality_issues"][0],
+            issue_text(item_61["lms_quality_issues"][0]),
         )
 
         # 3. 21st lesson (beyond MAX_LMS_SLOTS_PER_CLASS = 20)
@@ -510,9 +563,13 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
         item_21 = {"scan_target": {"class_code": "SYNTH-JSB01", "lesson": "21"}}
         inspect_and_attach_quality_issues([item_21], lms_slots_by_class=slots_20)
         self.assertTrue(item_21.get("lms_quality_issues"))
+        self.assertEqual(
+            issue_code(item_21["lms_quality_issues"][0]),
+            ISSUE_CODE_LMS_MANUAL_CHECK,
+        )
         self.assertIn(
             "Buổi 21 vượt giới hạn kiểm tra LMS",
-            item_21["lms_quality_issues"][0],
+            issue_text(item_21["lms_quality_issues"][0]),
         )
 
         # 4. Duplicate class code on LMS must flag manual check even if second record has slots=null
@@ -589,7 +646,13 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
         inspect_and_attach_quality_issues([dup_item], lms_slots_by_class=dup_slots)
         self.assertEqual(
             dup_item["lms_quality_issues"],
-            ["[LMS] Phát hiện trùng mã lớp trên LMS, cần kiểm tra thủ công"],
+            [
+                {
+                    "code": ISSUE_CODE_LMS_MANUAL_CHECK,
+                    "severity": SEVERITY_NOTE,
+                    "text": "[LMS] Phát hiện trùng mã lớp trên LMS, cần kiểm tra thủ công",
+                }
+            ],
         )
 
     async def test_period_scoping_and_parallel_batch_persistence(self) -> None:
@@ -675,6 +738,9 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
                 return_value={
                     code: [
                         {
+                            "index": 0,
+                            "date": "2026-08-20T17:00:00.000Z",
+                            "startTime": "2026-08-21T01:00:00.000Z",
                             "summary": "",
                             "studentAttendance": [
                                 {"status": "ATTENDED", "comment": ""}
@@ -968,6 +1034,411 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
             await fetch_lms_class_slots_via_page(main_cancel, class_names=["VT-C4K-PTB16"])
         self.assertTrue(temp_cancel.closed)
         self.assertIn("request", temp_cancel.removed_listeners)
+
+    def test_stage5_3_lms_slot_selection_by_date_and_lesson_and_zalo_indeterminate(
+        self,
+    ) -> None:
+        from services.zalo_bcnb_service import _collect_row_verifiable_auto_issues
+
+        good_comment = (
+            "Điểm mạnh: Con hiểu bài nhanh và hoàn thành tốt dự án.\n"
+            "Điểm cần cải thiện: Cần chú ý kiểm tra kỹ cú pháp trước khi chạy.\n"
+            "Lời khuyên: Về nhà con làm thêm bài tập trên LMS nhé."
+        )
+        valid_slot_base = {
+            "summary": "Buổi học: Tìm hiểu cấu trúc dữ liệu danh sách và vòng lặp trong Python",
+            "studentAttendance": [{"status": "ATTENDED", "comment": good_comment}],
+        }
+        bad_slot_base = {
+            "summary": "",
+            "studentAttendance": [{"status": "ATTENDED", "comment": "Học tốt."}],
+        }
+
+        # 1. Makeup-shifted slot order: Buổi 3 (index=2, date 2026-10-24) is at array position 1,
+        # while position 2 has Buổi 2 rescheduled to 2026-10-27. Must select by (date, index), never position!
+        makeup_slots = {
+            "VT-C4K-PTB16": [
+                {
+                    **bad_slot_base,
+                    "_id": "s0",
+                    "index": 0,
+                    "date": "2026-10-09T17:00:00.000Z",
+                },
+                {
+                    **valid_slot_base,
+                    "_id": "s2-at-pos1",
+                    "index": 2,
+                    "date": "2026-10-23T17:00:00.000Z",
+                    "startTime": "2026-10-24T11:00:00.000Z",
+                },
+                {
+                    **bad_slot_base,
+                    "_id": "s1-makeup-at-pos2",
+                    "index": 1,
+                    "date": "2026-10-26T17:00:00.000Z",
+                    "startTime": "2026-10-27T11:00:00.000Z",
+                },
+            ]
+        }
+        row_buoi3 = {
+            "scan_target": {
+                "class_code": "VT-C4K-PTB16",
+                "lesson": "3",
+                "class_date_iso": "2026-10-24",
+                "khoi": "Coding",
+            }
+        }
+        inspect_and_attach_quality_issues([row_buoi3], lms_slots_by_class=makeup_slots)
+        self.assertEqual(row_buoi3["lms_quality_issues"], [])
+
+        # And if BCNB checks Buổi 2 on original date 2026-10-17 (shifted on LMS to 2026-10-27),
+        # must flag manual check instead of falling back to position 1!
+        row_buoi2_shifted = {
+            "scan_target": {
+                "class_code": "VT-C4K-PTB16",
+                "lesson": "2",
+                "class_date_iso": "2026-10-17",
+                "khoi": "Coding",
+            }
+        }
+        inspect_and_attach_quality_issues(
+            [row_buoi2_shifted], lms_slots_by_class=makeup_slots
+        )
+        self.assertEqual(len(row_buoi2_shifted["lms_quality_issues"]), 1)
+        self.assertEqual(
+            issue_code(row_buoi2_shifted["lms_quality_issues"][0]),
+            ISSUE_CODE_LMS_MANUAL_CHECK,
+        )
+        self.assertIn(
+            "cần kiểm tra thủ công",
+            issue_text(row_buoi2_shifted["lms_quality_issues"][0]),
+        )
+
+        # 2. Cancelled slot: excluded from matching; if no active replacement -> manual check
+        cancelled_slots = {
+            "VT-C4K-PTB16": [
+                {
+                    **valid_slot_base,
+                    "index": 0,
+                    "date": "2026-10-23T17:00:00.000Z",
+                    "cancelled": True,
+                }
+            ]
+        }
+        row_cancelled = {
+            "scan_target": {
+                "class_code": "VT-C4K-PTB16",
+                "lesson": "1",
+                "class_date_iso": "2026-10-24",
+            }
+        }
+        inspect_and_attach_quality_issues(
+            [row_cancelled], lms_slots_by_class=cancelled_slots
+        )
+        self.assertEqual(len(row_cancelled["lms_quality_issues"]), 1)
+        self.assertIn("đã bị huỷ", issue_text(row_cancelled["lms_quality_issues"][0]))
+        self.assertIn("cần kiểm tra thủ công", issue_text(row_cancelled["lms_quality_issues"][0]))
+
+        # 3. Two active slots on the same date -> manual check
+        dup_date_slots = {
+            "VT-C4K-PTB16": [
+                {
+                    **valid_slot_base,
+                    "index": 0,
+                    "date": "2026-10-23T17:00:00.000Z",
+                },
+                {
+                    **valid_slot_base,
+                    "index": 0,
+                    "date": "2026-10-23T17:00:00.000Z",
+                },
+            ]
+        }
+        row_dup_date = {
+            "scan_target": {
+                "class_code": "VT-C4K-PTB16",
+                "lesson": "1",
+                "class_date_iso": "2026-10-24",
+            }
+        }
+        inspect_and_attach_quality_issues(
+            [row_dup_date], lms_slots_by_class=dup_date_slots
+        )
+        self.assertEqual(len(row_dup_date["lms_quality_issues"]), 1)
+        self.assertIn("trùng ngày", issue_text(row_dup_date["lms_quality_issues"][0]))
+        self.assertIn("cần kiểm tra thủ công", issue_text(row_dup_date["lms_quality_issues"][0]))
+
+        # 4. Same date but wrong lesson number (index=3 -> Buổi 4 vs BCNB Buổi 1) -> manual check
+        wrong_lesson_slots = {
+            "VT-C4K-PTB16": [
+                {
+                    **valid_slot_base,
+                    "index": 3,
+                    "date": "2026-10-23T17:00:00.000Z",
+                }
+            ]
+        }
+        row_wrong_lesson = {
+            "scan_target": {
+                "class_code": "VT-C4K-PTB16",
+                "lesson": "1",
+                "class_date_iso": "2026-10-24",
+            }
+        }
+        inspect_and_attach_quality_issues(
+            [row_wrong_lesson], lms_slots_by_class=wrong_lesson_slots
+        )
+        self.assertEqual(len(row_wrong_lesson["lms_quality_issues"]), 1)
+        self.assertIn("lệch số buổi", issue_text(row_wrong_lesson["lms_quality_issues"][0]))
+        self.assertIn("cần kiểm tra thủ công", issue_text(row_wrong_lesson["lms_quality_issues"][0]))
+
+        # 5. Missing date metadata on slot -> manual check (no positional fallback!)
+        no_date_slots = {"VT-C4K-PTB16": [{**valid_slot_base, "index": 0}]}
+        row_no_date = {
+            "scan_target": {
+                "class_code": "VT-C4K-PTB16",
+                "lesson": "1",
+                "class_date_iso": "2026-10-24",
+            }
+        }
+        inspect_and_attach_quality_issues(
+            [row_no_date], lms_slots_by_class=no_date_slots
+        )
+        self.assertEqual(len(row_no_date["lms_quality_issues"]), 1)
+        self.assertIn("Thiếu thông tin ngày học", issue_text(row_no_date["lms_quality_issues"][0]))
+        self.assertIn("cần kiểm tra thủ công", issue_text(row_no_date["lms_quality_issues"][0]))
+
+        # 5b. Missing lesson metadata (no index/slot_index/lesson) on slot with matching date -> manual check!
+        no_lesson_slots = {
+            "VT-C4K-PTB16": [
+                {
+                    **valid_slot_base,
+                    "date": "2026-10-23T17:00:00.000Z",
+                }
+            ]
+        }
+        row_no_lesson = {
+            "scan_target": {
+                "class_code": "VT-C4K-PTB16",
+                "lesson": "1",
+                "class_date_iso": "2026-10-24",
+            }
+        }
+        inspect_and_attach_quality_issues(
+            [row_no_lesson], lms_slots_by_class=no_lesson_slots
+        )
+        self.assertEqual(len(row_no_lesson["lms_quality_issues"]), 1)
+        self.assertIn("Thiếu thông tin số buổi", issue_text(row_no_lesson["lms_quality_issues"][0]))
+        self.assertIn("cần kiểm tra thủ công", issue_text(row_no_lesson["lms_quality_issues"][0]))
+
+        # 6. Timezone boundary: 2026-10-23T16:59:59.000Z is 2026-10-23 23:59:59 ICT (does not match 2026-10-24),
+        # while 2026-10-23T17:00:00.000Z is 2026-10-24 00:00:00 ICT (matches 2026-10-24).
+        tz_prev_day_slots = {
+            "VT-C4K-PTB16": [
+                {
+                    **valid_slot_base,
+                    "index": 0,
+                    "date": "2026-10-23T16:59:59.000Z",
+                }
+            ]
+        }
+        row_tz_prev = {
+            "scan_target": {
+                "class_code": "VT-C4K-PTB16",
+                "lesson": "1",
+                "class_date_iso": "2026-10-24",
+            }
+        }
+        inspect_and_attach_quality_issues(
+            [row_tz_prev], lms_slots_by_class=tz_prev_day_slots
+        )
+        self.assertEqual(len(row_tz_prev["lms_quality_issues"]), 1)
+        self.assertIn("Không tìm thấy slot khớp ngày", issue_text(row_tz_prev["lms_quality_issues"][0]))
+
+        # 7. 5.3.4: Indeterminate Zalo scan (INSUFFICIENT_EVIDENCE or scan error) preserves existing [Zalo] issues on BCNB
+        existing_bcnb_note = "Ghi chú tay | [Zalo] Báo cáo ghi sai buổi; [LMS] Chưa ghi nội dung bài học"
+        proven_issues = [
+            "[Zalo] Báo cáo ghi sai buổi",
+            "[LMS] Chưa ghi nội dung bài học",
+        ]
+        insufficient_res = {
+            "evidence_state": "INSUFFICIENT_EVIDENCE",
+            "zalo_content_issues": [],
+            "lms_quality_issues": [],
+        }
+        combined_insuff, should_sync_insuff = _collect_row_verifiable_auto_issues(
+            insufficient_res,
+            existing_note=existing_bcnb_note,
+            lms_slots_by_class={"VT-C4K-PTB16": []},
+            proven_auto_issues=proven_issues,
+        )
+        self.assertEqual(combined_insuff, ["[Zalo] Báo cáo ghi sai buổi"])
+        self.assertTrue(should_sync_insuff)
+
+        error_res = {
+            "evidence_state": "NOT_FOUND_VERIFIED",
+            "error_code": "TARGET_TIMEOUT",
+            "scan_status": "FAILED",
+            "zalo_content_issues": [],
+            "lms_quality_issues": [],
+        }
+        combined_err, _ = _collect_row_verifiable_auto_issues(
+            error_res,
+            existing_note=existing_bcnb_note,
+            lms_slots_by_class={"VT-C4K-PTB16": []},
+            proven_auto_issues=proven_issues,
+        )
+        self.assertEqual(combined_err, ["[Zalo] Báo cáo ghi sai buổi"])
+
+    async def test_5_8_5_lms_manual_check_note_written_and_system_outage_suppressed(
+        self,
+    ) -> None:
+        from datetime import datetime
+        from types import SimpleNamespace
+        import services.zalo_bcnb_service as bcnb
+        from services.lms_quality_service import is_lms_fetch_unavailable
+        from services.report_status import is_failed
+        from services.zalo_bcnb_service import _collect_row_verifiable_auto_issues
+
+        # 1. Single class missing slot -> structured LMS_MANUAL_CHECK NOTE is included in auto issues to write to BCNB
+        #    and evaluate_row_status keeps is_failed=False.
+        single_missing_res = {
+            "evidence_state": "SUBMITTED_VERIFIED",
+            "status": "✅ Đã báo cáo – Minh chứng hợp lệ",
+            "scan_target": {
+                "class_code": "VT-C4K-PTB16",
+                "lesson": "2",
+                "class_date_iso": "2026-10-25",
+                "week": 43,
+                "year": 2026,
+            },
+        }
+        slots_one_missing = {
+            "VT-C4K-PTB16": [
+                {
+                    "index": 0,
+                    "date": "2026-10-17T17:00:00.000Z",
+                    "summary": "Buổi 1: Làm quen lập trình Python",
+                    "studentAttendance": [
+                        {
+                            "status": "ATTENDED",
+                            "comment": "Điểm mạnh: Tốt.\nĐiểm cần cải thiện: Chú ý.\nLời khuyên: Ôn bài.",
+                        }
+                    ],
+                }
+            ]
+        }
+        inspect_and_attach_quality_issues(
+            [single_missing_res],
+            lms_slots_by_class=slots_one_missing,
+        )
+        self.assertFalse(is_lms_fetch_unavailable(slots_one_missing))
+        self.assertFalse(is_failed(single_missing_res))
+        auto_issues_single, should_sync_single = _collect_row_verifiable_auto_issues(
+            single_missing_res,
+            existing_note="",
+            lms_slots_by_class=slots_one_missing,
+        )
+        self.assertTrue(should_sync_single)
+        self.assertEqual(len(auto_issues_single), 1)
+        self.assertIn("Không tìm thấy slot khớp ngày", issue_text(auto_issues_single[0]))
+        self.assertIn("cần kiểm tra thủ công", issue_text(auto_issues_single[0]))
+
+        # 2. Prior verified [LMS] FAIL issue is preserved alongside single-class LMS_MANUAL_CHECK when indeterminate
+        prior_fail_res = {
+            "evidence_state": "SUBMITTED_VERIFIED",
+            "status": "✅ Đã báo cáo – Minh chứng hợp lệ",
+            "lms_quality_issues": ["[LMS] Chưa ghi nội dung bài học"],
+            "scan_target": {
+                "class_code": "VT-C4K-PTB16",
+                "lesson": "2",
+                "class_date_iso": "2026-10-25",
+                "week": 43,
+                "year": 2026,
+            },
+        }
+        inspect_and_attach_quality_issues(
+            [prior_fail_res],
+            lms_slots_by_class=slots_one_missing,
+        )
+        texts_prior = [issue_text(x) for x in prior_fail_res["lms_quality_issues"]]
+        self.assertIn("[LMS] Chưa ghi nội dung bài học", texts_prior)
+        auto_with_prior, _ = _collect_row_verifiable_auto_issues(
+            prior_fail_res,
+            existing_note="[LMS] Chưa ghi nội dung bài học",
+            lms_slots_by_class=slots_one_missing,
+            proven_auto_issues=["[LMS] Chưa ghi nội dung bài học"],
+        )
+        self.assertIn(
+            "[LMS] Chưa ghi nội dung bài học",
+            [issue_text(x) for x in auto_with_prior],
+        )
+
+        # 3. System-wide LMS outage (all requested classes fetch_error or gateway raises) ->
+        #    zero note POSTs for LMS_MANUAL_CHECK, lms_fetch_unavailable=True in summary,
+        #    while prior verified [LMS] FAIL issues are still preserved!
+        outage_slots = {
+            "VT-C4K-PTB16": [{"fetch_error": True}],
+            "VT-C4K-PTI11": [{"fetch_error": True}],
+        }
+        self.assertTrue(is_lms_fetch_unavailable(outage_slots))
+        outage_row_clean = {
+            "evidence_state": "SUBMITTED_VERIFIED",
+            "status": "✅ Đã báo cáo – Minh chứng hợp lệ",
+            "scan_target": {
+                "class_code": "VT-C4K-PTB16",
+                "lesson": "2",
+                "class_date": "25/10/2026",
+                "class_date_iso": "2026-10-25",
+                "week": 43,
+                "year": 2026,
+            },
+        }
+        inspect_and_attach_quality_issues(
+            [outage_row_clean],
+            lms_slots_by_class=outage_slots,
+        )
+        self.assertTrue(outage_row_clean.get("lms_fetch_unavailable"))
+        auto_outage, should_sync_outage = _collect_row_verifiable_auto_issues(
+            outage_row_clean,
+            existing_note="",
+            lms_slots_by_class=outage_slots,
+        )
+        self.assertEqual(auto_outage, [])
+        self.assertFalse(should_sync_outage)
+
+        # Verify update_bcnb_reports sets lms_fetch_unavailable=True and makes 0 checker note POSTs on system-wide outage
+        outage_gw = SimpleNamespace(
+            fetch_class_slots=AsyncMock(side_effect=RuntimeError("LMS API 503"))
+        )
+        note_post_mock = AsyncMock()
+        with (
+            patch.object(bcnb, "_read_bcnb_schedule_rows", AsyncMock(return_value=[])),
+            patch.object(bcnb, "resolve_report_columns", AsyncMock(return_value=(0, 1, 2))),
+            patch.object(bcnb, "execute_verified_checker_note_action", note_post_mock),
+            patch.object(bcnb, "log_message"),
+        ):
+            summary_outage = await bcnb.update_bcnb_reports(
+                object(),
+                job_id=585,
+                execution_mode="production",
+                scan_results=[outage_row_clean],
+                today=datetime(2026, 10, 26),
+                scan_plan={
+                    "selected_weeks": [
+                        {"week": 42, "year": 2026},
+                        {"week": 43, "year": 2026},
+                    ],
+                    "latest_week": {"week": 43, "year": 2026},
+                    "targets": [],
+                },
+                job_repo=SimpleNamespace(ensure_not_cancelled=AsyncMock()),
+                audit_repo=SimpleNamespace(record_intent=AsyncMock()),
+                lms_quality_gateway=outage_gw,
+                notes_only=True,
+            )
+        self.assertTrue(summary_outage["lms_fetch_unavailable"])
+        note_post_mock.assert_not_awaited()
 
 
 if __name__ == "__main__":

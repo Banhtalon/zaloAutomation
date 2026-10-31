@@ -9,6 +9,12 @@ import unicodedata
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from core.time_utils import previous_business_week
+from services.report_status import (
+    StructuredIssueStr,
+    coerce_structured_issue,
+    issue_text,
+    normalize_class_code,
+)
 
 
 def fold_text(value: str) -> str:
@@ -20,9 +26,137 @@ def fold_text(value: str) -> str:
 
 
 def _canonical_class_code(value: str) -> str:
-    normalized = unicodedata.normalize("NFKC", value or "").strip().upper()
-    normalized = normalized.replace("–", "-").replace("—", "-")
-    return re.sub(r"\s+", "", normalized)
+    return normalize_class_code(value)
+
+
+BCNB_CLASS_HEADER_SUBSTRINGS: tuple[str, ...] = ("ma lop", "class code")
+BCNB_CLASS_HEADER_EXACT: tuple[str, ...] = ("lop",)
+BCNB_LESSON_HEADER_SUBSTRINGS: tuple[str, ...] = ("buoi",)
+BCNB_DATE_HEADER_SUBSTRINGS: tuple[str, ...] = ("ngay hoc", "lesson date")
+BCNB_DATE_HEADER_EXACT: tuple[str, ...] = ("date",)
+BCNB_ZALO_DEADLINE_HEADER_SUBSTRINGS: tuple[str, ...] = ("deadline zalo",)
+BCNB_LMS_DEADLINE_HEADER_SUBSTRINGS: tuple[str, ...] = ("deadline lms",)
+BCNB_ZALO_CHECKBOX_CURRENT_SUBSTRINGS: tuple[str, ...] = ("nhan xet zalo",)
+BCNB_ZALO_CHECKBOX_LEGACY_SUBSTRINGS: tuple[str, ...] = (
+    "bao cao",
+    "da nop",
+    "nop bao cao",
+)
+BCNB_LMS_CHECKBOX_CURRENT_SUBSTRINGS: tuple[str, ...] = ("nhan xet lms",)
+BCNB_LMS_CHECKBOX_LEGACY_SUBSTRINGS: tuple[str, ...] = (
+    "nhan xet",
+    "da nop",
+    "nop",
+)
+BCNB_CHECKER_NOTE_HEADER_SUBSTRINGS: tuple[str, ...] = (
+    "mo ta van de",
+    "te/tf/qc",
+    "ghi chu qc",
+)
+BCNB_INSTRUCTOR_NOTE_HEADER_SUBSTRINGS: tuple[str, ...] = (
+    "ghi chu giang vien",
+    "ghi chu gv",
+)
+BCNB_EVALUATION_STATUS_HEADER_SUBSTRINGS: tuple[str, ...] = (
+    "tinh trang danh gia",
+    "tinh trang kiem tra",
+    "trang thai danh gia",
+)
+
+
+def match_bcnb_column_indexes(headers: Sequence[str]) -> dict[str, list[int]]:
+    """Classify folded BCNB table headers into canonical column index lists."""
+    headers = [fold_text(str(h or "")).strip() for h in headers]
+    class_indexes = [
+        i
+        for i, text in enumerate(headers)
+        if any(sub in text for sub in BCNB_CLASS_HEADER_SUBSTRINGS)
+        or text in BCNB_CLASS_HEADER_EXACT
+    ]
+    lesson_indexes = [
+        i
+        for i, text in enumerate(headers)
+        if any(sub in text for sub in BCNB_LESSON_HEADER_SUBSTRINGS)
+    ]
+    class_date_indexes = [
+        i
+        for i, text in enumerate(headers)
+        if any(sub in text for sub in BCNB_DATE_HEADER_SUBSTRINGS)
+        or text in BCNB_DATE_HEADER_EXACT
+    ]
+    zalo_deadline_indexes = [
+        i
+        for i, text in enumerate(headers)
+        if any(sub in text for sub in BCNB_ZALO_DEADLINE_HEADER_SUBSTRINGS)
+        or ("zalo" in text and "deadline" in text)
+    ]
+    lms_deadline_indexes = [
+        i
+        for i, text in enumerate(headers)
+        if any(sub in text for sub in BCNB_LMS_DEADLINE_HEADER_SUBSTRINGS)
+        or ("lms" in text and "deadline" in text)
+    ]
+    current_zalo_indexes = [
+        i
+        for i, text in enumerate(headers)
+        if any(sub in text for sub in BCNB_ZALO_CHECKBOX_CURRENT_SUBSTRINGS)
+        or re.fullmatch(r"nx\s*zalo", text)
+    ]
+    legacy_zalo_indexes = [
+        i
+        for i, text in enumerate(headers)
+        if "lms" not in text
+        and any(sub in text for sub in BCNB_ZALO_CHECKBOX_LEGACY_SUBSTRINGS)
+    ]
+    current_lms_indexes = [
+        i
+        for i, text in enumerate(headers)
+        if any(sub in text for sub in BCNB_LMS_CHECKBOX_CURRENT_SUBSTRINGS)
+        or re.fullmatch(r"nx\s*lms", text)
+    ]
+    legacy_lms_indexes = [
+        i
+        for i, text in enumerate(headers)
+        if "lms" in text
+        and "deadline" not in text
+        and (
+            text == "lms"
+            or any(sub in text for sub in BCNB_LMS_CHECKBOX_LEGACY_SUBSTRINGS)
+        )
+    ]
+    block_indexes = [
+        i
+        for i, text in enumerate(headers)
+        if text == "khoi" or "khoi" in text or text == "block"
+    ]
+    checker_note_indexes = [
+        i
+        for i, text in enumerate(headers)
+        if any(sub in text for sub in BCNB_CHECKER_NOTE_HEADER_SUBSTRINGS)
+    ]
+    instructor_note_indexes = [
+        i
+        for i, text in enumerate(headers)
+        if any(sub in text for sub in BCNB_INSTRUCTOR_NOTE_HEADER_SUBSTRINGS)
+    ]
+    evaluation_status_indexes = [
+        i
+        for i, text in enumerate(headers)
+        if any(sub in text for sub in BCNB_EVALUATION_STATUS_HEADER_SUBSTRINGS)
+    ]
+    return {
+        "class_indexes": class_indexes,
+        "lesson_indexes": lesson_indexes,
+        "class_date_indexes": class_date_indexes,
+        "zalo_deadline_indexes": zalo_deadline_indexes,
+        "lms_deadline_indexes": lms_deadline_indexes,
+        "report_indexes": current_zalo_indexes or legacy_zalo_indexes,
+        "lms_indexes": current_lms_indexes or legacy_lms_indexes,
+        "block_indexes": block_indexes,
+        "checker_note_indexes": checker_note_indexes,
+        "instructor_note_indexes": instructor_note_indexes,
+        "evaluation_status_indexes": evaluation_status_indexes,
+    }
 
 
 async def select_week_checked(page, week: int, year: int) -> tuple[int, int]:
@@ -278,22 +412,10 @@ async def select_last_week_checked(page) -> tuple[int, int]:
 async def resolve_report_columns(page) -> tuple[int, int, int]:
     header_cells = await page.locator("table tr").first.locator("th, td").all()
     headers = [fold_text((await cell.inner_text()).strip()) for cell in header_cells]
-    class_indexes = [
-        i for i, text in enumerate(headers) if "ma lop" in text or "class code" in text
-    ]
-    lesson_indexes = [i for i, text in enumerate(headers) if "buoi" in text]
-    current_report_indexes = [
-        i
-        for i, text in enumerate(headers)
-        if "nhan xet zalo" in text or re.fullmatch(r"nx\s*zalo", text)
-    ]
-    legacy_report_indexes = [
-        i
-        for i, text in enumerate(headers)
-        if "lms" not in text
-        and ("bao cao" in text or "da nop" in text or "nop bao cao" in text)
-    ]
-    report_indexes = current_report_indexes or legacy_report_indexes
+    matched = match_bcnb_column_indexes(headers)
+    class_indexes = matched["class_indexes"]
+    lesson_indexes = matched["lesson_indexes"]
+    report_indexes = matched["report_indexes"]
     if not all(len(indexes) == 1 for indexes in (class_indexes, lesson_indexes, report_indexes)):
         raise RuntimeError(
             "Cấu trúc bảng BCNB đã thay đổi: cột mã lớp/buổi/báo cáo thiếu hoặc không duy nhất."
@@ -305,10 +427,9 @@ async def resolve_class_lesson_columns(page) -> tuple[int, int]:
     """Resolve the two columns Discovery needs without requiring report columns."""
     header_cells = await page.locator("table tr").first.locator("th, td").all()
     headers = [fold_text((await cell.inner_text()).strip()) for cell in header_cells]
-    class_indexes = [
-        i for i, text in enumerate(headers) if "ma lop" in text or "class code" in text
-    ]
-    lesson_indexes = [i for i, text in enumerate(headers) if "buoi" in text]
+    matched = match_bcnb_column_indexes(headers)
+    class_indexes = matched["class_indexes"]
+    lesson_indexes = matched["lesson_indexes"]
     if len(class_indexes) != 1 or len(lesson_indexes) != 1:
         raise RuntimeError(
             "Cấu trúc bảng BCNB đã thay đổi: cột mã lớp/buổi thiếu hoặc không duy nhất."
@@ -327,20 +448,11 @@ async def resolve_schedule_columns(page) -> tuple[int, int, int, int]:
     """
     header_cells = await page.locator("table tr").first.locator("th, td").all()
     headers = [fold_text((await cell.inner_text()).strip()) for cell in header_cells]
-    class_indexes = [
-        i for i, text in enumerate(headers) if "ma lop" in text or "class code" in text
-    ]
-    lesson_indexes = [i for i, text in enumerate(headers) if "buoi" in text]
-    class_date_indexes = [
-        i
-        for i, text in enumerate(headers)
-        if "ngay hoc" in text or "lesson date" in text or text == "date"
-    ]
-    deadline_indexes = [
-        i
-        for i, text in enumerate(headers)
-        if "deadline zalo" in text or ("zalo" in text and "deadline" in text)
-    ]
+    matched = match_bcnb_column_indexes(headers)
+    class_indexes = matched["class_indexes"]
+    lesson_indexes = matched["lesson_indexes"]
+    class_date_indexes = matched["class_date_indexes"]
+    deadline_indexes = matched["zalo_deadline_indexes"]
     if not all(
         len(indexes) == 1
         for indexes in (
@@ -405,27 +517,9 @@ async def resolve_instructor_column(page) -> int | None:
 async def resolve_lms_columns(page) -> tuple[int, int]:
     header_cells = await page.locator("table tr").first.locator("th, td").all()
     headers = [fold_text((await cell.inner_text()).strip()) for cell in header_cells]
-    class_indexes = [
-        i for i, text in enumerate(headers) if "ma lop" in text or "class code" in text
-    ]
-    current_lms_indexes = [
-        i
-        for i, text in enumerate(headers)
-        if "nhan xet lms" in text or re.fullmatch(r"nx\s*lms", text)
-    ]
-    legacy_lms_indexes = [
-        i
-        for i, text in enumerate(headers)
-        if "lms" in text
-        and "deadline" not in text
-        and (
-            text == "lms"
-            or "nhan xet" in text
-            or "da nop" in text
-            or "nop" in text
-        )
-    ]
-    lms_indexes = current_lms_indexes or legacy_lms_indexes
+    matched = match_bcnb_column_indexes(headers)
+    class_indexes = matched["class_indexes"]
+    lms_indexes = matched["lms_indexes"]
     if len(class_indexes) != 1 or len(lms_indexes) != 1:
         raise RuntimeError(
             "Cấu trúc bảng BCNB đã thay đổi: cột mã lớp/LMS thiếu hoặc không duy nhất."
@@ -520,6 +614,32 @@ def clean_bcnb_note_text(raw: Any) -> str:
     return text
 
 
+def preserve_bcnb_note_text(raw: Any) -> str:
+    """Return note text preserving exact leading/trailing whitespace and newlines, or '' for placeholders."""
+    if raw is None:
+        return ""
+    text = str(raw)
+    if not text:
+        return ""
+    stripped = text.strip()
+    if not stripped:
+        return ""
+    if stripped.startswith('"') and stripped.endswith('"'):
+        try:
+            decoded = json.loads(stripped)
+            if isinstance(decoded, str):
+                text = decoded
+                stripped = decoded.strip()
+                if not stripped:
+                    return ""
+        except (TypeError, ValueError):
+            pass
+    folded = re.sub(r"\s+", " ", fold_text(stripped)).strip()
+    if folded in _BCNB_NOTE_PLACEHOLDERS:
+        return ""
+    return text
+
+
 async def resolve_extended_bcnb_columns(page) -> dict[str, int | None]:
     """Resolve optional extended columns on BCNB check_nhanxet.php by semantic header."""
     header_cells = await page.locator("table tr").first.locator("th, td").all()
@@ -528,67 +648,15 @@ async def resolve_extended_bcnb_columns(page) -> dict[str, int | None]:
     def _unique(indices: list[int]) -> int | None:
         return indices[0] if len(indices) == 1 else None
 
-    block_indexes = [
-        i for i, text in enumerate(headers) if text == "khoi" or "khoi" in text or text == "block"
-    ]
-    current_zalo_indexes = [
-        i
-        for i, text in enumerate(headers)
-        if "nhan xet zalo" in text or re.fullmatch(r"nx\s*zalo", text)
-    ]
-    legacy_zalo_indexes = [
-        i
-        for i, text in enumerate(headers)
-        if "lms" not in text
-        and ("bao cao" in text or "da nop" in text or "nop bao cao" in text)
-    ]
-    lms_deadline_indexes = [
-        i
-        for i, text in enumerate(headers)
-        if "deadline lms" in text or ("lms" in text and "deadline" in text)
-    ]
-    current_lms_indexes = [
-        i
-        for i, text in enumerate(headers)
-        if "nhan xet lms" in text or re.fullmatch(r"nx\s*lms", text)
-    ]
-    legacy_lms_indexes = [
-        i
-        for i, text in enumerate(headers)
-        if "lms" in text
-        and "deadline" not in text
-        and (
-            text == "lms"
-            or "nhan xet" in text
-            or "da nop" in text
-            or "nop" in text
-        )
-    ]
-    checker_note_indexes = [
-        i
-        for i, text in enumerate(headers)
-        if "mo ta van de" in text or "te/tf/qc" in text or "ghi chu qc" in text
-    ]
-    instructor_note_indexes = [
-        i
-        for i, text in enumerate(headers)
-        if "ghi chu giang vien" in text or "ghi chu gv" in text
-    ]
-    evaluation_status_indexes = [
-        i
-        for i, text in enumerate(headers)
-        if "tinh trang danh gia" in text
-        or "tinh trang kiem tra" in text
-        or "trang thai danh gia" in text
-    ]
+    matched = match_bcnb_column_indexes(headers)
     return {
-        "block_index": _unique(block_indexes),
-        "zalo_checkbox_index": _unique(current_zalo_indexes or legacy_zalo_indexes),
-        "lms_deadline_index": _unique(lms_deadline_indexes),
-        "lms_checkbox_index": _unique(current_lms_indexes or legacy_lms_indexes),
-        "checker_note_index": _unique(checker_note_indexes),
-        "instructor_note_index": _unique(instructor_note_indexes),
-        "evaluation_status_index": _unique(evaluation_status_indexes),
+        "block_index": _unique(matched["block_indexes"]),
+        "zalo_checkbox_index": _unique(matched["report_indexes"]),
+        "lms_deadline_index": _unique(matched["lms_deadline_indexes"]),
+        "lms_checkbox_index": _unique(matched["lms_indexes"]),
+        "checker_note_index": _unique(matched["checker_note_indexes"]),
+        "instructor_note_index": _unique(matched["instructor_note_indexes"]),
+        "evaluation_status_index": _unique(matched["evaluation_status_indexes"]),
     }
 
 
@@ -615,7 +683,7 @@ async def _read_optional_note_cell(cell, *, note_type: str) -> str | None:
                 if hasattr(note_el, "get_attribute"):
                     raw_attr = await note_el.get_attribute("data-current-note")
                     if raw_attr is not None and not isinstance(raw_attr, Exception):
-                        attr_value = clean_bcnb_note_text(str(raw_attr))
+                        attr_value = preserve_bcnb_note_text(str(raw_attr))
                         if attr_value:
                             return attr_value
         except Exception:
@@ -624,7 +692,7 @@ async def _read_optional_note_cell(cell, *, note_type: str) -> str | None:
         try:
             raw_text = await cell.inner_text()
             if raw_text is not None:
-                return clean_bcnb_note_text(str(raw_text))
+                return preserve_bcnb_note_text(str(raw_text))
         except Exception:
             return attr_value
     return attr_value
@@ -744,6 +812,29 @@ def _normalize_auto_issue_key(text: str) -> str:
     return " ".join(stripped.split())
 
 
+def _provenance_issue_key(text: Any) -> str:
+    """Return a canonical provenance key that requires and preserves the leading [LMS]/[Zalo] tag."""
+    cleaned = " ".join(issue_text(text).split()).strip(" ;|")
+    if not cleaned:
+        return ""
+    if not re.match(r"^\[(lms|zalo)\]\s+.+$", cleaned, flags=re.IGNORECASE):
+        return ""
+    norm = normalize_auto_issue_text(cleaned)
+    norm = re.sub(r"\s*[;|]+\s*", ", ", norm)
+    balanced = _balance_issue_brackets(norm).strip(" ;|")
+    tag_match = re.match(r"^\[(lms|zalo)\]\s+(.+)$", balanced, flags=re.IGNORECASE)
+    if not tag_match:
+        return ""
+    tag = tag_match.group(1).lower()
+    body = tag_match.group(2).replace(" — ", "; ").strip(" ;|").lower()
+    if body.endswith(".") and not body.endswith(".."):
+        body = body[:-1].rstrip(" ;|")
+    body = " ".join(body.split())
+    if not body:
+        return ""
+    return f"[{tag}] {body}"
+
+
 def normalize_auto_issue_text(text: str) -> str:
     """Normalize auto-generated LMS/Zalo issue strings to the concise canonical wording."""
     cleaned = " ".join(str(text or "").split()).strip(" ;|")
@@ -800,13 +891,12 @@ def normalize_auto_issue_text(text: str) -> str:
     return cleaned
 
 
-def split_checker_issue_note(raw_note: Any) -> tuple[str, list[str]]:
-    """Split a BCNB checker note into ``(manual_note, auto_issues)`` using balanced brackets."""
+def _extract_raw_candidate_segments(raw_note: Any) -> list[str]:
+    """Extract all candidate issue strings from a note for after_state provenance matching."""
     text = clean_bcnb_note_text(raw_note)
     if not text:
-        return "", []
-    auto_issues: list[str] = []
-    seen_keys: set[str] = set()
+        return []
+    segments: list[str] = []
     remaining = text
     pattern = re.compile(r"\[Auto\s+QC:\s*", flags=re.IGNORECASE)
     while True:
@@ -832,40 +922,417 @@ def split_checker_issue_note(raw_note: Any) -> tuple[str, list[str]]:
             inside = remaining[pos:].strip(" ]")
             end_idx = len(remaining)
         for seg in inside.split(";"):
-            cleaned_seg = normalize_auto_issue_text(seg)
-            if not cleaned_seg:
-                continue
-            key = _normalize_auto_issue_key(cleaned_seg)
-            if key and key not in seen_keys:
-                seen_keys.add(key)
-                auto_issues.append(cleaned_seg)
-        before = re.sub(r"\s*\|\s*$", "", remaining[:start_idx]).strip()
-        after = re.sub(r"^\s*\|\s*", "", remaining[end_idx:]).strip()
-        if before and after:
-            remaining = f"{before} | {after}"
-        else:
-            remaining = before or after
-
-    manual_chunks: list[str] = []
-    auto_tag_re = re.compile(r"^\[(?:LMS|Zalo)\]\s*", flags=re.IGNORECASE)
+            cleaned_seg = " ".join(seg.split()).strip(" ;|")
+            if cleaned_seg:
+                segments.append(cleaned_seg)
+        before = re.sub(r"\s*\|\s*$", "", remaining[:start_idx])
+        after = re.sub(r"^\s*\|\s*", "", remaining[end_idx:])
+        remaining = f"{before} | {after}" if (before and after) else (before or after)
     for pipe_chunk in remaining.split("|"):
-        chunk_manual_segs: list[str] = []
         for seg in pipe_chunk.split(";"):
             cleaned_seg = " ".join(seg.split()).strip(" ;|")
-            if not cleaned_seg:
+            if cleaned_seg:
+                segments.append(cleaned_seg)
+    return segments
+
+
+def extract_proven_auto_issues_from_audits(
+    audits: Sequence[Mapping[str, Any]] | None,
+    *,
+    class_code: str,
+    lesson: str,
+    week: int,
+    year: int,
+    session_id: str | None = None,
+    class_date_iso: str | None = None,
+) -> list[str]:
+    """Return auto issues proven by a production VERIFIED checker-note audit for this exact row.
+
+    Enforces all 5 conditions of 5.2.4:
+    1. action_type == BCNB_UPDATE_CHECKER_NOTE and same row identity (class_code, lesson, week, year, session_id/class_date_iso).
+    2. execution_mode == production.
+    3. outcome == VERIFIED with a real POST (not the no-change branch).
+    4. Segment is present in reason.auto_issues.
+    5. Segment is present in after_state.qc_issue_note readback.
+    """
+    if not audits:
+        return []
+    target_code = _canonical_class_code(class_code)
+    target_lesson = str(lesson or "").strip()
+    try:
+        target_week = int(week)
+        target_year = int(year)
+    except (TypeError, ValueError):
+        return []
+    if not target_code or not target_lesson:
+        return []
+    row_sid = str(session_id or "").strip()
+    row_date = _normalize_bcnb_date_iso(str(class_date_iso or ""))
+    if not row_sid and not row_date:
+        return []
+
+    proven: list[str] = []
+    seen_keys: set[str] = set()
+    for audit in audits:
+        if not isinstance(audit, Mapping):
+            continue
+        if str(audit.get("action_type") or "").strip() != "BCNB_UPDATE_CHECKER_NOTE":
+            continue
+        reason = audit.get("reason")
+        if not isinstance(reason, Mapping):
+            continue
+        audit_code = _canonical_class_code(
+            str(audit.get("target_id") or reason.get("class_code") or "")
+        )
+        if audit_code != target_code:
+            continue
+        audit_lesson = str(reason.get("lesson") or "").strip()
+        if audit_lesson != target_lesson:
+            continue
+        try:
+            audit_week = int(reason.get("week") or 0)
+            audit_year = int(reason.get("year") or 0)
+        except (TypeError, ValueError):
+            continue
+        if audit_week != target_week or audit_year != target_year:
+            continue
+        before_state = audit.get("before_state")
+        after_state = audit.get("after_state")
+        if not isinstance(after_state, Mapping):
+            continue
+        audit_sid = str(
+            reason.get("bcnb_session_id")
+            or after_state.get("bcnb_session_id")
+            or (
+                before_state.get("bcnb_session_id")
+                if isinstance(before_state, Mapping)
+                else ""
+            )
+            or ""
+        ).strip()
+        audit_date = _normalize_bcnb_date_iso(
+            str(reason.get("class_date") or reason.get("class_date_iso") or "")
+        )
+        if row_sid and audit_sid and row_sid != audit_sid:
+            continue
+        if row_date and audit_date and row_date != audit_date:
+            continue
+        has_positive_row_match = (
+            (bool(row_sid) and bool(audit_sid) and row_sid == audit_sid)
+            or (bool(row_date) and bool(audit_date) and row_date == audit_date)
+        )
+        if not has_positive_row_match:
+            continue
+
+        mode = str(audit.get("mode") or audit.get("execution_mode") or "").strip().lower()
+        if mode != "production":
+            continue
+
+        if str(audit.get("outcome") or "").strip().upper() != "VERIFIED":
+            continue
+        if bool(after_state.get("no_change")) or after_state.get("post_verified") is not True:
+            continue
+        if not isinstance(before_state, Mapping):
+            continue
+        before_note_raw = before_state.get("qc_issue_note")
+        if not isinstance(before_note_raw, str):
+            continue
+        after_note_raw = after_state.get("qc_issue_note")
+        if not isinstance(after_note_raw, str) or not preserve_bcnb_note_text(after_note_raw):
+            continue
+        if preserve_bcnb_note_text(before_note_raw) == preserve_bcnb_note_text(after_note_raw):
+            continue
+
+        raw_auto_list = reason.get("auto_issues")
+        if not isinstance(raw_auto_list, Sequence) or isinstance(
+            raw_auto_list, (str, bytes)
+        ):
+            continue
+        reason_auto_by_key: dict[str, str] = {}
+        for raw_item in raw_auto_list:
+            cleaned_item = " ".join(issue_text(raw_item).split()).strip(" ;|")
+            if not cleaned_item:
                 continue
-            if auto_tag_re.match(cleaned_seg):
+            key = _provenance_issue_key(cleaned_item)
+            if not key:
+                continue
+            norm_item = normalize_auto_issue_text(cleaned_item)
+            norm_item = re.sub(r"\s*[;|]+\s*", ", ", norm_item)
+            balanced_item = _balance_issue_brackets(norm_item)
+            if key not in reason_auto_by_key:
+                adapted_meta = coerce_structured_issue(raw_item)
+                reason_auto_by_key[key] = StructuredIssueStr(
+                    balanced_item,
+                    code=adapted_meta["code"],
+                    severity=adapted_meta["severity"],
+                )
+        if not reason_auto_by_key:
+            continue
+
+        before_segments = _extract_raw_candidate_segments(before_note_raw)
+        before_keys = {
+            _provenance_issue_key(seg)
+            for seg in before_segments
+            if _provenance_issue_key(seg)
+        }
+        after_segments = _extract_raw_candidate_segments(after_note_raw)
+        after_keys = {
+            _provenance_issue_key(seg)
+            for seg in after_segments
+            if _provenance_issue_key(seg)
+        }
+        for key, canonical_issue in reason_auto_by_key.items():
+            if key in after_keys and key not in before_keys and key not in seen_keys:
+                seen_keys.add(key)
+                proven.append(canonical_issue)
+    return proven
+
+
+async def resolve_row_proven_auto_issues(
+    audit_repo: Any,
+    *,
+    class_code: str,
+    lesson: str,
+    week: int,
+    year: int,
+    session_id: str | None = None,
+    class_date_iso: str | None = None,
+) -> list[str]:
+    """Query ``audit_repo`` (when supported) and return proven auto issues for one BCNB row."""
+    if audit_repo is None or not hasattr(audit_repo, "list_checker_note_audits_for_class"):
+        return []
+    try:
+        call_res = audit_repo.list_checker_note_audits_for_class(class_code)
+        raw_audits = await call_res if hasattr(call_res, "__await__") else call_res
+    except Exception:
+        return []
+    if not isinstance(raw_audits, (list, tuple)):
+        return []
+    return extract_proven_auto_issues_from_audits(
+        raw_audits,
+        class_code=class_code,
+        lesson=lesson,
+        week=week,
+        year=year,
+        session_id=session_id,
+        class_date_iso=class_date_iso,
+    )
+
+
+def _split_by_pattern_with_seps(text: str, pattern: re.Pattern[str]) -> tuple[list[str], list[str]]:
+    parts: list[str] = []
+    seps: list[str] = []
+    last_end = 0
+    for match in pattern.finditer(text):
+        parts.append(text[last_end : match.start()])
+        seps.append(match.group(0))
+        last_end = match.end()
+    parts.append(text[last_end:])
+    return parts, seps
+
+
+def split_checker_issue_note(
+    raw_note: Any,
+    *,
+    proven_auto_issues: Sequence[Any] | None = None,
+    audit_records: Sequence[Mapping[str, Any]] | None = None,
+    row_identity: Mapping[str, Any] | None = None,
+) -> tuple[str, list[str]]:
+    """Split a BCNB checker note into ``(manual_note, auto_issues)``.
+
+    Direct ``[LMS]``/``[Zalo]`` segments are classified as auto ONLY when proven by
+    ``proven_auto_issues`` or ``audit_records`` + ``row_identity`` (5.2.4).
+    All unproven segments are treated as manual and preserved byte-for-byte.
+    """
+    text = preserve_bcnb_note_text(raw_note)
+    if not text:
+        return "", []
+
+    proven_list: list[Any] = list(proven_auto_issues or [])
+    if audit_records is not None and isinstance(row_identity, Mapping):
+        proven_list.extend(
+            extract_proven_auto_issues_from_audits(
+                audit_records,
+                class_code=str(row_identity.get("class_code") or ""),
+                lesson=str(row_identity.get("lesson") or ""),
+                week=int(row_identity.get("week") or 0),
+                year=int(row_identity.get("year") or 0),
+                session_id=(
+                    str(
+                        row_identity.get("session_id")
+                        or row_identity.get("bcnb_session_id")
+                        or ""
+                    ).strip()
+                    or None
+                ),
+                class_date_iso=(
+                    str(
+                        row_identity.get("class_date_iso")
+                        or row_identity.get("class_date")
+                        or ""
+                    ).strip()
+                    or None
+                ),
+            )
+        )
+    proven_keys: set[str] = set()
+    proven_meta_by_key: dict[str, dict[str, str]] = {}
+    for item in proven_list:
+        key_p = _provenance_issue_key(item)
+        if key_p:
+            proven_keys.add(key_p)
+            if key_p not in proven_meta_by_key:
+                proven_meta_by_key[key_p] = coerce_structured_issue(item)
+
+    if not proven_keys:
+        return text, []
+
+    auto_issues: list[str] = []
+    seen_keys: set[str] = set()
+    remaining = text
+    pattern = re.compile(r"\[Auto\s+QC:\s*", flags=re.IGNORECASE)
+    search_from = 0
+    while True:
+        match = pattern.search(remaining, search_from)
+        if not match:
+            break
+        start_idx = match.start()
+        pos = match.end()
+        depth = 1
+        end_idx = len(remaining)
+        inside = ""
+        for idx in range(pos, len(remaining)):
+            ch = remaining[idx]
+            if ch == "[":
+                depth += 1
+            elif ch == "]":
+                depth -= 1
+                if depth == 0:
+                    inside = remaining[pos:idx]
+                    end_idx = idx + 1
+                    break
+        if depth > 0:
+            inside = remaining[pos:]
+            end_idx = len(remaining)
+        semi_re_inner = re.compile(r" ?; ?")
+        inner_parts, inner_seps = _split_by_pattern_with_seps(inside, semi_re_inner)
+        kept_inner: list[tuple[int, str]] = []
+        wrapper_removed_any = False
+        for i_idx, raw_seg in enumerate(inner_parts):
+            cleaned_seg = " ".join(raw_seg.split()).strip(" ;|")
+            if not cleaned_seg:
+                kept_inner.append((i_idx, raw_seg))
+                continue
+            key = _provenance_issue_key(cleaned_seg)
+            if key and key in proven_keys:
                 norm_seg = normalize_auto_issue_text(cleaned_seg)
-                key = _normalize_auto_issue_key(norm_seg)
-                if key and key not in seen_keys:
+                norm_seg = re.sub(r"\s*[;|]+\s*", ", ", norm_seg)
+                balanced_seg = _balance_issue_brackets(norm_seg)
+                wrapper_removed_any = True
+                if key not in seen_keys:
                     seen_keys.add(key)
-                    auto_issues.append(norm_seg)
+                    meta = proven_meta_by_key.get(key) or coerce_structured_issue(balanced_seg)
+                    auto_issues.append(
+                        StructuredIssueStr(
+                            balanced_seg,
+                            code=meta["code"],
+                            severity=meta["severity"],
+                        )
+                    )
             else:
-                chunk_manual_segs.append(cleaned_seg)
-        if chunk_manual_segs:
-            manual_chunks.append("; ".join(chunk_manual_segs))
-    manual_clean = " | ".join(manual_chunks).strip()
-    return manual_clean, auto_issues
+                kept_inner.append((i_idx, raw_seg))
+        if not wrapper_removed_any:
+            search_from = end_idx
+            continue
+        non_empty_inner = [(idx, val) for idx, val in kept_inner if val.strip()]
+        if non_empty_inner:
+            rebuilt_inside = non_empty_inner[0][1]
+            for prev_item, curr_item in zip(non_empty_inner, non_empty_inner[1:]):
+                sep = (
+                    inner_seps[prev_item[0]]
+                    if curr_item[0] == prev_item[0] + 1
+                    else "; "
+                )
+                rebuilt_inside += sep + curr_item[1]
+            closing = "]" if depth == 0 else ""
+            rebuilt_wrapper = f"{remaining[start_idx:pos]}{rebuilt_inside}{closing}"
+            remaining = remaining[:start_idx] + rebuilt_wrapper + remaining[end_idx:]
+            search_from = start_idx + len(rebuilt_wrapper)
+        else:
+            before = re.sub(r" ?\| ?$", "", remaining[:start_idx])
+            after = re.sub(r"^ ?\| ?", "", remaining[end_idx:])
+            if before and after:
+                remaining = f"{before} | {after}"
+                search_from = len(before) + 3
+            else:
+                remaining = before or after
+                search_from = len(before) if before else 0
+
+    pipe_re = re.compile(r" ?\| ?")
+    semi_re = re.compile(r" ?; ?")
+    pipe_parts, pipe_seps = _split_by_pattern_with_seps(remaining, pipe_re)
+    kept_pipe_parts: list[tuple[int, str]] = []
+    any_removed = False
+
+    for p_idx, pipe_chunk in enumerate(pipe_parts):
+        semi_parts, semi_seps = _split_by_pattern_with_seps(pipe_chunk, semi_re)
+        kept_semi: list[tuple[int, str]] = []
+        chunk_removed = False
+        for s_idx, seg in enumerate(semi_parts):
+            cleaned_seg = " ".join(seg.split()).strip(" ;|")
+            if not cleaned_seg:
+                kept_semi.append((s_idx, seg))
+                continue
+            key = _provenance_issue_key(cleaned_seg)
+            if key and key in proven_keys:
+                norm_seg = normalize_auto_issue_text(cleaned_seg)
+                norm_seg = re.sub(r"\s*[;|]+\s*", ", ", norm_seg)
+                balanced_seg = _balance_issue_brackets(norm_seg)
+                chunk_removed = True
+                any_removed = True
+                if key not in seen_keys:
+                    seen_keys.add(key)
+                    meta = proven_meta_by_key.get(key) or coerce_structured_issue(balanced_seg)
+                    auto_issues.append(
+                        StructuredIssueStr(
+                            balanced_seg,
+                            code=meta["code"],
+                            severity=meta["severity"],
+                        )
+                    )
+            else:
+                kept_semi.append((s_idx, seg))
+
+        if not chunk_removed:
+            if pipe_chunk:
+                kept_pipe_parts.append((p_idx, pipe_chunk))
+        else:
+            non_empty_semi = [(idx, val) for idx, val in kept_semi if val.strip()]
+            if non_empty_semi:
+                rebuilt_chunk = non_empty_semi[0][1]
+                for prev_item, curr_item in zip(non_empty_semi, non_empty_semi[1:]):
+                    sep = (
+                        semi_seps[prev_item[0]]
+                        if curr_item[0] == prev_item[0] + 1
+                        else "; "
+                    )
+                    rebuilt_chunk += sep + curr_item[1]
+                kept_pipe_parts.append((p_idx, rebuilt_chunk))
+
+    if not any_removed:
+        return remaining, auto_issues
+    if not kept_pipe_parts:
+        return "", auto_issues
+
+    rebuilt_manual = kept_pipe_parts[0][1]
+    for prev_part, curr_part in zip(kept_pipe_parts, kept_pipe_parts[1:]):
+        sep = (
+            pipe_seps[prev_part[0]]
+            if curr_part[0] == prev_part[0] + 1
+            else " | "
+        )
+        rebuilt_manual += sep + curr_part[1]
+    return rebuilt_manual, auto_issues
 
 
 def _truncate_single_issue_preserving_tag(issue_text: str, item_budget: int) -> str:
@@ -894,23 +1361,37 @@ def _is_legacy_lms_duplicate_issue(text: str) -> bool:
 
 def merge_checker_issue_note(
     existing_note: Any,
-    auto_issues: Sequence[str] | None,
+    auto_issues: Sequence[Any] | None,
     *,
     max_length: int = 500,
+    proven_auto_issues: Sequence[Any] | None = None,
+    audit_records: Sequence[Mapping[str, Any]] | None = None,
+    row_identity: Mapping[str, Any] | None = None,
 ) -> str:
     """Merge auto-detected QC issues into a checker note while preserving manual QC notes."""
     limit = max(48, int(max_length))
-    manual_part, _ = split_checker_issue_note(existing_note)
+    manual_part, _ = split_checker_issue_note(
+        existing_note,
+        proven_auto_issues=proven_auto_issues,
+        audit_records=audit_records,
+        row_identity=row_identity,
+    )
+    existing_manual_keys: set[str] = {
+        _provenance_issue_key(seg)
+        for seg in _extract_raw_candidate_segments(manual_part)
+        if _provenance_issue_key(seg)
+    }
     deduped_issues: list[str] = []
-    seen_keys: set[str] = set()
+    seen_keys: set[str] = set(existing_manual_keys)
     for raw_issue in auto_issues or []:
-        cleaned = " ".join(str(raw_issue or "").split()).strip(" ;|")
+        cleaned = " ".join(issue_text(raw_issue).split()).strip(" ;|")
         if not cleaned or _is_legacy_lms_duplicate_issue(cleaned):
             continue
-        cleaned = normalize_auto_issue_text(cleaned)
-        cleaned = re.sub(r"\s*[;|]+\s*", ", ", cleaned)
-        balanced = _balance_issue_brackets(cleaned)
-        key = _normalize_auto_issue_key(balanced)
+        prov_key = _provenance_issue_key(cleaned)
+        norm_cleaned = normalize_auto_issue_text(cleaned)
+        norm_cleaned = re.sub(r"\s*[;|]+\s*", ", ", norm_cleaned)
+        balanced = _balance_issue_brackets(norm_cleaned)
+        key = prov_key or _normalize_auto_issue_key(balanced)
         if key and key not in seen_keys:
             seen_keys.add(key)
             deduped_issues.append(balanced)
@@ -1039,6 +1520,79 @@ async def verify_checker_note_persisted(
     observed_raw = await _read_optional_note_cell(matches[0], note_type="checker")
     if observed_raw is None:
         raise RuntimeError(f"BCNB reload không đọc được ô Mô tả vấn đề cho {class_code}.")
-    observed_clean = clean_bcnb_note_text(observed_raw)
-    expected_clean = clean_bcnb_note_text(expected_note)
-    return (observed_clean == expected_clean, observed_clean)
+    observed_preserved = preserve_bcnb_note_text(observed_raw)
+    expected_preserved = preserve_bcnb_note_text(expected_note)
+    return (observed_preserved == expected_preserved, observed_preserved)
+
+
+async def read_checker_note_by_session(
+    page,
+    *,
+    session_id: str,
+    class_code: str | None = None,
+    lesson: str | None = None,
+) -> tuple[bool, str | None]:
+    """Read the current checker note cell by ``data-session-id`` without reloading.
+
+    Returns ``(row_inspected, observed_note)``:
+    - ``(False, None)`` when ``page`` does not expose a live DOM table (e.g., generic mock).
+    - ``(True, None)`` when the live DOM table is inspected and the row/note is missing or unreadable.
+    - ``(True, note_text)`` when the row's checker note cell is read cleanly.
+    """
+    target_sid = str(session_id or "").strip()
+    if not target_sid or page is None or not hasattr(page, "locator"):
+        return (False, None)
+    try:
+        table_rows_loc = page.locator("table tr")
+        if not hasattr(table_rows_loc, "all"):
+            return (False, None)
+        rows = await table_rows_loc.all()
+        if not isinstance(rows, (list, tuple)) or len(rows) == 0:
+            return (False, None)
+    except Exception:
+        return (False, None)
+
+    try:
+        class_index, lesson_index = await resolve_class_lesson_columns(page)
+        ext_cols = await resolve_extended_bcnb_columns(page)
+    except Exception:
+        return (True, None)
+
+    checker_index = ext_cols.get("checker_note_index")
+    if checker_index is None:
+        return (True, None)
+
+    target_code = _canonical_class_code(class_code or "") if class_code else ""
+    target_lesson = str(lesson).strip() if lesson is not None else None
+    matched_cells = []
+    for row in rows:
+        row_sid = ""
+        if hasattr(row, "get_attribute"):
+            try:
+                row_sid = str((await row.get_attribute("data-session-id")) or "").strip()
+            except Exception:
+                row_sid = ""
+        if row_sid != target_sid:
+            continue
+        cells = await row.locator("td").all()
+        required_index = max(class_index, lesson_index, checker_index)
+        if len(cells) <= required_index:
+            return (True, None)
+        if target_code:
+            observed_code = _canonical_class_code(
+                (await cells[class_index].inner_text()).strip()
+            )
+            if observed_code != target_code:
+                return (True, None)
+        if target_lesson is not None:
+            observed_lesson = (await cells[lesson_index].inner_text()).strip()
+            if observed_lesson != target_lesson:
+                return (True, None)
+        matched_cells.append(cells[checker_index])
+
+    if len(matched_cells) != 1:
+        return (True, None)
+    observed_raw = await _read_optional_note_cell(matched_cells[0], note_type="checker")
+    if observed_raw is None:
+        return (True, None)
+    return (True, preserve_bcnb_note_text(observed_raw))

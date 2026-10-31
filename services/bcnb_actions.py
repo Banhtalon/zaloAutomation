@@ -3,19 +3,28 @@
 import asyncio
 from collections.abc import Callable, Sequence
 import inspect
+import json
 import re
 from typing import Any
 
 from logger_utils import log_message
 from repositories.evidence_repository import EvidenceRepository
 from services.bcnb_safety import (
-    clean_bcnb_note_text,
+    BCNB_CHECKER_NOTE_HEADER_SUBSTRINGS,
+    BCNB_CLASS_HEADER_EXACT,
+    BCNB_CLASS_HEADER_SUBSTRINGS,
+    BCNB_LESSON_HEADER_SUBSTRINGS,
+    _BCNB_NOTE_PLACEHOLDERS,
     dismiss_current_week_notice,
     merge_checker_issue_note,
+    preserve_bcnb_note_text,
+    read_checker_note_by_session,
+    resolve_row_proven_auto_issues,
     split_checker_issue_note,
     verify_checkbox_persisted,
     verify_checker_note_persisted,
 )
+from services.report_status import issue_text
 
 
 class BcnbBeforeWriteError(RuntimeError):
@@ -24,6 +33,10 @@ class BcnbBeforeWriteError(RuntimeError):
 
 class BcnbOutcomeUnknownError(RuntimeError):
     """The click may have happened but hard readback was unavailable."""
+
+
+class BcnbConflictAfterWriteError(BcnbOutcomeUnknownError):
+    """The POST completed, but server readback differed from merged_note."""
 
 
 async def execute_verified_checkbox_action(
@@ -215,8 +228,24 @@ async def execute_verified_checkbox_action(
         raise
 
 
-_UPDATE_CHECKER_NOTE_JS = """
+_UPDATE_CHECKER_NOTE_JS = (
+    """
 async (args) => {
+  const CLASS_HEADER_SUBSTRINGS = """
+    + json.dumps(list(BCNB_CLASS_HEADER_SUBSTRINGS))
+    + """;
+  const CLASS_HEADER_EXACT = """
+    + json.dumps(list(BCNB_CLASS_HEADER_EXACT))
+    + """;
+  const LESSON_HEADER_SUBSTRINGS = """
+    + json.dumps(list(BCNB_LESSON_HEADER_SUBSTRINGS))
+    + """;
+  const CHECKER_NOTE_HEADER_SUBSTRINGS = """
+    + json.dumps(list(BCNB_CHECKER_NOTE_HEADER_SUBSTRINGS))
+    + """;
+  const NOTE_PLACEHOLDERS = """
+    + json.dumps(sorted(_BCNB_NOTE_PLACEHOLDERS))
+    + """;
   const normCode = (val) =>
     String(val || '')
       .trim()
@@ -261,11 +290,15 @@ async (args) => {
           : [];
       const classIndexes = headerCells
         .map((c, idx) => ({ idx, text: foldHeader(c.innerText || c.textContent) }))
-        .filter((x) => x.text.includes('ma lop') || x.text === 'lop')
+        .filter(
+          (x) =>
+            CLASS_HEADER_SUBSTRINGS.some((sub) => x.text.includes(sub)) ||
+            CLASS_HEADER_EXACT.includes(x.text)
+        )
         .map((x) => x.idx);
       const lessonIndexes = headerCells
         .map((c, idx) => ({ idx, text: foldHeader(c.innerText || c.textContent) }))
-        .filter((x) => x.text.includes('buoi'))
+        .filter((x) => LESSON_HEADER_SUBSTRINGS.some((sub) => x.text.includes(sub)))
         .map((x) => x.idx);
       if (classIndexes.length === 1 && classIndexes[0] < rowCells.length) {
         const observedCode = normCode(
@@ -303,6 +336,82 @@ async (args) => {
       if (!tokens.includes(targetCode)) {
         return { ok: false, stage: 'before_write', error: 'SESSION_ROW_CLASS_MISMATCH' };
       }
+    }
+  }
+  const cleanDomNote = (rawVal) => {
+    let txt = String(rawVal ?? '').trim();
+    if (!txt) return '';
+    if (txt.startsWith('"') && txt.endsWith('"')) {
+      try {
+        const parsed = JSON.parse(txt);
+        if (typeof parsed === 'string') txt = parsed.trim();
+      } catch (_e) {}
+    }
+    const folded = foldHeader(txt).replace(/\\s+/g, ' ');
+    if (NOTE_PLACEHOLDERS.includes(folded)) {
+      return '';
+    }
+    return txt;
+  };
+  const preserveDomNote = (rawVal) => {
+    if (rawVal === null || rawVal === undefined) return '';
+    let txt = String(rawVal);
+    if (!txt) return '';
+    let stripped = txt.trim();
+    if (!stripped) return '';
+    if (stripped.startsWith('"') && stripped.endsWith('"')) {
+      try {
+        const parsed = JSON.parse(stripped);
+        if (typeof parsed === 'string') {
+          txt = parsed;
+          stripped = parsed.trim();
+          if (!stripped) return '';
+        }
+      } catch (_e) {}
+    }
+    if (cleanDomNote(stripped) === '') return '';
+    return txt;
+  };
+  if (args && typeof args.expectedExistingNote === 'string') {
+    let observedCurrentNote = null;
+    if (typeof targetRow.querySelector === 'function') {
+      const noteEl = targetRow.querySelector('.note-cell[data-note-type="checker"]');
+      if (noteEl && typeof noteEl.getAttribute === 'function') {
+        const rawAttr = noteEl.getAttribute('data-current-note');
+        if (rawAttr !== null && rawAttr !== undefined) {
+          observedCurrentNote = preserveDomNote(rawAttr);
+        } else {
+          observedCurrentNote = preserveDomNote(noteEl.innerText || noteEl.textContent || '');
+        }
+      }
+    }
+    if (observedCurrentNote === null && rowCells.length > 0) {
+      const headerCells =
+        allTrs.length > 0 && typeof allTrs[0].querySelectorAll === 'function'
+          ? Array.from(allTrs[0].querySelectorAll('th, td'))
+          : [];
+      const checkerIndexes = headerCells
+        .map((c, idx) => ({ idx, text: foldHeader(c.innerText || c.textContent) }))
+        .filter((x) =>
+          CHECKER_NOTE_HEADER_SUBSTRINGS.some((sub) => x.text.includes(sub))
+        )
+        .map((x) => x.idx);
+      if (checkerIndexes.length === 1 && checkerIndexes[0] < rowCells.length) {
+        const cell = rowCells[checkerIndexes[0]];
+        observedCurrentNote = preserveDomNote(cell.innerText || cell.textContent || '');
+      }
+    }"""
+    + """
+    if (
+      observedCurrentNote !== null &&
+      observedCurrentNote !== preserveDomNote(args.expectedExistingNote)
+    ) {
+      return {
+        ok: false,
+        stage: 'before_write',
+        error: 'CONCURRENT_NOTE_EDIT',
+        observed_note: observedCurrentNote,
+      };
     }
   }
   let token = '';
@@ -377,6 +486,7 @@ async (args) => {
   };
 }
 """
+)
 
 
 async def _post_checker_note_update(
@@ -386,6 +496,7 @@ async def _post_checker_note_update(
     note: str,
     class_code: str,
     lesson: str | None = None,
+    expected_existing_note: str | None = None,
 ) -> dict[str, Any]:
     """Execute the Teaching check_nhanxet.php checker-note POST via the live page."""
     if page is None or not hasattr(page, "evaluate"):
@@ -394,15 +505,15 @@ async def _post_checker_note_update(
             "stage": "before_write",
             "error": "PAGE_EVALUATE_UNAVAILABLE",
         }
-    eval_call = page.evaluate(
-        _UPDATE_CHECKER_NOTE_JS,
-        {
-            "sessionId": str(session_id or "").strip(),
-            "note": str(note or ""),
-            "classCode": str(class_code or "").strip(),
-            "lesson": str(lesson or "").strip(),
-        },
-    )
+    payload: dict[str, Any] = {
+        "sessionId": str(session_id or "").strip(),
+        "note": str(note or ""),
+        "classCode": str(class_code or "").strip(),
+        "lesson": str(lesson or "").strip(),
+    }
+    if expected_existing_note is not None:
+        payload["expectedExistingNote"] = str(expected_existing_note)
+    eval_call = page.evaluate(_UPDATE_CHECKER_NOTE_JS, payload)
     raw_result = await eval_call if inspect.isawaitable(eval_call) else eval_call
     if not isinstance(raw_result, dict):
         raise RuntimeError("Phản hồi cập nhật ghi chú BCNB không đúng định dạng dict.")
@@ -429,22 +540,40 @@ async def execute_verified_checker_note_action(
     action_type: str = "BCNB_UPDATE_CHECKER_NOTE",
     settle_seconds: float = 0.3,
     should_halt: Callable[[], bool] | None = None,
+    proven_auto_issues: Sequence[str] | None = None,
 ) -> str:
     """Audited update of ``Mô tả vấn đề (TE/TF/QC)`` with independent server read-back."""
     existing_note_readable = isinstance(existing_note, str)
-    before_note = clean_bcnb_note_text(existing_note) if existing_note_readable else ""
-    merged_note = merge_checker_issue_note(before_note, auto_issues)
+    before_note = preserve_bcnb_note_text(existing_note) if existing_note_readable else ""
+    clean_session_id = str(session_id or "").strip()
+    resolved_proven = (
+        list(proven_auto_issues)
+        if proven_auto_issues is not None
+        else await resolve_row_proven_auto_issues(
+            audit_repo,
+            class_code=class_code,
+            lesson=lesson,
+            week=week,
+            year=year,
+            session_id=clean_session_id or None,
+            class_date_iso=class_date_iso,
+        )
+    )
+    merged_note = merge_checker_issue_note(
+        before_note,
+        auto_issues,
+        proven_auto_issues=resolved_proven,
+    )
     normalized_issues = [
-        " ".join(str(x or "").split()).strip()
+        issue_text(x)
         for x in (auto_issues or [])
-        if str(x or "").strip()
+        if issue_text(x)
     ]
     if existing_note_readable and not normalized_issues and before_note == merged_note:
         return "NO_CHANGE"
     if not existing_note_readable and not normalized_issues:
         return "NO_CHANGE"
 
-    clean_session_id = str(session_id or "").strip()
     before_state = {
         "qc_issue_note": before_note if existing_note_readable else None,
         "bcnb_session_id": clean_session_id or None,
@@ -484,6 +613,21 @@ async def execute_verified_checker_note_action(
                 f"Audit ghi chú BCNB của {class_code} ở trạng thái {audit['outcome']}; "
                 "cần kiểm tra thủ công."
             )
+
+    if before_note == merged_note:
+        outcome = "DRY_RUN" if execution_mode != "production" else "VERIFIED"
+        await audit_repo.complete_action(
+            audit["id"],
+            outcome=outcome,
+            after_state={
+                **before_state,
+                "post_verified": False,
+                "no_change": True,
+            },
+        )
+        return outcome
+
+    if not created:
         persisted, observed_existing = await verify_checker_note_persisted(
             page,
             class_code=class_code,
@@ -501,18 +645,11 @@ async def execute_verified_checker_note_action(
                 after_state={
                     "qc_issue_note": observed_existing,
                     "bcnb_session_id": clean_session_id or None,
+                    "post_verified": False,
+                    "reconciled_from_intent": True,
                 },
             )
             return "VERIFIED"
-
-    if before_note == merged_note:
-        outcome = "DRY_RUN" if execution_mode != "production" else "VERIFIED"
-        await audit_repo.complete_action(
-            audit["id"],
-            outcome=outcome,
-            after_state=before_state,
-        )
-        return outcome
 
     if execution_mode != "production":
         await audit_repo.complete_action(
@@ -550,6 +687,39 @@ async def execute_verified_checker_note_action(
             )
             raise BcnbBeforeWriteError("Batch đã halt trước khi cập nhật ghi chú BCNB.")
 
+        pre_inspected, pre_observed = await read_checker_note_by_session(
+            page,
+            session_id=clean_session_id,
+            class_code=class_code,
+            lesson=lesson,
+        )
+        if pre_inspected:
+            if pre_observed is None:
+                terminal_audit_recorded = True
+                await audit_repo.complete_action(
+                    audit["id"],
+                    outcome="FAILED",
+                    after_state=before_state,
+                    error_message="Không đọc lại được ô Mô tả vấn đề theo session_id trước khi POST.",
+                )
+                raise BcnbBeforeWriteError(
+                    f"Không đọc lại được ô Mô tả vấn đề của {class_code}/{lesson} trước khi POST."
+                )
+            if preserve_bcnb_note_text(pre_observed) != before_note:
+                terminal_audit_recorded = True
+                await audit_repo.complete_action(
+                    audit["id"],
+                    outcome="FAILED",
+                    after_state={
+                        "qc_issue_note": preserve_bcnb_note_text(pre_observed),
+                        "bcnb_session_id": clean_session_id,
+                    },
+                    error_message="QC vừa chỉnh sửa ô Mô tả vấn đề trước khi ghi.",
+                )
+                raise BcnbBeforeWriteError(
+                    f"QC vừa chỉnh sửa ô Mô tả vấn đề của {class_code}/{lesson} trước khi ghi."
+                )
+
         write_started = True
         post_result = await _post_checker_note_update(
             page,
@@ -557,16 +727,30 @@ async def execute_verified_checker_note_action(
             note=merged_note,
             class_code=class_code,
             lesson=lesson,
+            expected_existing_note=before_note,
         )
         if post_result.get("stage") == "before_write":
             write_started = False
             err_code = str(post_result.get("error") or "PRECHECK_FAILED")
+            observed_concurrent = post_result.get("observed_note")
             terminal_audit_recorded = True
+            err_msg = (
+                "QC vừa chỉnh sửa ô Mô tả vấn đề trước khi ghi (CONCURRENT_NOTE_EDIT)."
+                if err_code == "CONCURRENT_NOTE_EDIT"
+                else f"Dừng trước khi gửi update_note: {err_code}"[:500]
+            )
             await audit_repo.complete_action(
                 audit["id"],
                 outcome="FAILED",
-                after_state=before_state,
-                error_message=f"Dừng trước khi gửi update_note: {err_code}"[:500],
+                after_state=(
+                    {
+                        "qc_issue_note": preserve_bcnb_note_text(observed_concurrent),
+                        "bcnb_session_id": clean_session_id,
+                    }
+                    if isinstance(observed_concurrent, str)
+                    else before_state
+                ),
+                error_message=err_msg,
             )
             raise BcnbBeforeWriteError(
                 f"Dừng trước khi gửi update_note cho {class_code}: {err_code}"
@@ -602,9 +786,21 @@ async def execute_verified_checker_note_action(
         if not persisted:
             post_err = str(post_result.get("error") or "").strip()
             detail = f" ({post_err})" if post_err else ""
-            raise RuntimeError(
-                f"Ghi chú Mô tả vấn đề không giữ trạng thái kỳ vọng sau hard reload{detail}."
+            conflict_msg = (
+                f"CONFLICT_AFTER_WRITE: Ghi chú Mô tả vấn đề trên server khác giá trị kỳ vọng sau hard reload{detail}."
             )
+            await audit_repo.complete_action(
+                audit["id"],
+                outcome="UNKNOWN",
+                after_state={
+                    "qc_issue_note": observed_after,
+                    "bcnb_session_id": clean_session_id,
+                    "conflict_status": "CONFLICT_AFTER_WRITE",
+                },
+                error_message=conflict_msg[:500],
+            )
+            terminal_audit_recorded = True
+            raise BcnbConflictAfterWriteError(conflict_msg)
 
         await audit_repo.complete_action(
             audit["id"],
@@ -612,6 +808,7 @@ async def execute_verified_checker_note_action(
             after_state={
                 "qc_issue_note": observed_after,
                 "bcnb_session_id": clean_session_id,
+                "post_verified": True,
             },
         )
         return "VERIFIED"
@@ -649,10 +846,26 @@ async def execute_verified_checker_note_action(
                     after_state={
                         "qc_issue_note": recovered_note,
                         "bcnb_session_id": clean_session_id,
+                        "post_verified": True,
                     },
                 )
                 return "VERIFIED"
             observed_after = recovered_note
+            conflict_msg = (
+                f"CONFLICT_AFTER_WRITE: Ghi chú Mô tả vấn đề của {class_code} khác giá trị kỳ vọng sau lỗi POST."
+            )
+            await audit_repo.complete_action(
+                audit["id"],
+                outcome="UNKNOWN",
+                after_state={
+                    "qc_issue_note": observed_after,
+                    "bcnb_session_id": clean_session_id,
+                    "conflict_status": "CONFLICT_AFTER_WRITE",
+                },
+                error_message=conflict_msg[:500],
+            )
+            terminal_audit_recorded = True
+            raise BcnbConflictAfterWriteError(conflict_msg) from action_error
         if not terminal_audit_recorded:
             await audit_repo.complete_action(
                 audit["id"],
@@ -674,6 +887,7 @@ async def execute_verified_checker_note_action(
 
 __all__ = [
     "BcnbBeforeWriteError",
+    "BcnbConflictAfterWriteError",
     "BcnbOutcomeUnknownError",
     "execute_verified_checkbox_action",
     "execute_verified_checker_note_action",

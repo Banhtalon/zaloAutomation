@@ -111,6 +111,9 @@ class Config:
     MAX_CONCURRENT_JOBS = max(1, int(os.getenv("MAX_CONCURRENT_JOBS", 1)))
     ZALO_SCAN_CONCURRENCY = max(1, min(4, int(os.getenv("ZALO_SCAN_CONCURRENCY", 2))))
     BCNB_WRITE_CONCURRENCY = max(1, min(4, int(os.getenv("BCNB_WRITE_CONCURRENCY", 2))))
+    ZALO_TARGET_TIMEOUT_SECONDS = max(
+        5, int(os.getenv("ZALO_TARGET_TIMEOUT_SECONDS", 180))
+    )
     ZALO_PLAN_MAX_AGE_MINUTES = max(
         1, int(os.getenv("ZALO_PLAN_MAX_AGE_MINUTES", 30))
     )

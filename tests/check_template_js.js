@@ -57,6 +57,10 @@ const requiredIds = [
   'lms-student-class-codes', 'btnFetchLmsStudents',
   'btn-export-weekly-csv', 'history-week-select', 'history-job-select',
   'btn-load-weekly-history', 'weekly-history-status-badge',
+  'count-late', 'btn-discover', 'btn-scan', 'btn-lms-run',
+  'dashboard-compact-strip', 'dashboard-preflight-pill',
+  'dashboard-plan-strip-text', 'dashboard-progress-strip-text',
+  'dashboard-preflight-drawer', 'dashboard-preflight-drawer-checks',
 ];
 for (const id of requiredIds) {
   if (!new RegExp(`id=["']${id}["']`).test(templates)) {
@@ -179,6 +183,27 @@ function createFrontendHarness(fetchImpl) {
   const clipboardWrites = [];
   let nextTimerId = 1;
   let nextUuidId = 0;
+  const sessionStore = new Map();
+  const sessionStorage = {
+    getItem: key => (sessionStore.has(String(key)) ? sessionStore.get(String(key)) : null),
+    setItem: (key, value) => sessionStore.set(String(key), String(value)),
+    removeItem: key => sessionStore.delete(String(key)),
+    clear: () => sessionStore.clear(),
+  };
+  function collectByClassName(root, className, out = []) {
+    if (!root) return out;
+    const rawClass = String(root.className || '');
+    const classTokens = rawClass.split(/\s+/).filter(Boolean);
+    if (classTokens.includes(className) || (root.classList && root.classList.contains(className))) {
+      out.push(root);
+    }
+    if (Array.isArray(root.children)) {
+      for (const child of root.children) {
+        collectByClassName(child, className, out);
+      }
+    }
+    return out;
+  }
   const document = {
     getElementById(id) {
       if (!elements.has(id)) elements.set(id, createFakeElement(id));
@@ -189,12 +214,23 @@ function createFrontendHarness(fetchImpl) {
         ? this.getElementById('scan-button')
         : null;
     },
-    querySelectorAll: () => [],
+    querySelectorAll(selector) {
+      if (typeof selector === 'string' && selector.startsWith('.')) {
+        const className = selector.slice(1).trim();
+        const found = [];
+        for (const el of elements.values()) {
+          collectByClassName(el, className, found);
+        }
+        return found;
+      }
+      return [];
+    },
     createElement: tag => createFakeElement(tag),
     createDocumentFragment: () => createFakeElement('fragment'),
   };
   const context = vm.createContext({
     document,
+    sessionStorage,
     fetch: fetchImpl,
     alert: message => alerts.push(String(message)),
     confirm: () => true,
@@ -223,6 +259,7 @@ function createFrontendHarness(fetchImpl) {
       timers.delete(id);
     },
   });
+  context.window = context;
   context.fetchGoogleFormHistory = () => Promise.resolve();
   return { context, elements, timers, alerts, clipboardWrites };
 }
@@ -1790,6 +1827,29 @@ async function checkWeeklyHistoryAndCsvExport() {
     if (url === '/api/jobs/latest') {
       return { ok: true, status: 200, json: async () => null };
     }
+    if (url.startsWith('/api/reports/weekly-summary') && url.includes('format=csv')) {
+      if (url.includes('week=41') && pendingW41ExportRejecter === 'DEFER_REJECT') {
+        return new Promise((_, reject) => {
+          pendingW41ExportRejecter = reject;
+        });
+      }
+      if (url.includes('week=40')) {
+        return {
+          ok: true,
+          status: 200,
+          text: async () =>
+            '\uFEFFMã lớp,Giáo viên,Buổi học,Ngày học,Trạng thái Zalo,Trạng thái LMS,Tình trạng đánh giá,Mô tả vấn đề (TE/TF/QC),Thời gian kiểm chứng\r\n',
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        text: async () =>
+          '\uFEFFMã lớp,Giáo viên,Buổi học,Ngày học,Trạng thái Zalo,Trạng thái LMS,Tình trạng đánh giá,Mô tả vấn đề (TE/TF/QC),Thời gian kiểm chứng\r\n' +
+          "VT-JSB16,'=Trần Thị B,4,11/10/2026,✅ Đã nộp – Có minh chứng,✅ Đã nhận xét & Tích BCNB,✅ Đã hoàn thành nhận xét,,2026-10-11T14:00:00Z\r\n" +
+          'VT-C4K-GI35,Nguyễn Văn A,1,10/10/2026,❌ Chưa tìm thấy báo cáo,❌ Chưa nhận xét (Trễ 3 ngày),⏳ Chưa nhận xét Zalo & LMS,[Zalo] Chưa gửi báo cáo nhận xét trên nhóm Zalo,2026-10-11T14:02:00Z\r\n',
+      };
+    }
     if (url.startsWith('/api/reports/weekly-summary?week=41') && pendingW41ExportRejecter === 'DEFER_REJECT') {
       return new Promise((_, reject) => {
         pendingW41ExportRejecter = reject;
@@ -1918,7 +1978,7 @@ async function checkWeeklyHistoryAndCsvExport() {
   );
   assertFrontend(
     vm.runInContext(
-      `isFailedWeeklySummaryRow({
+      `resolveRowIsFailed({
         class_code: 'VT-C4K-PTB16',
         zalo_status: '✅ Đã nộp – Có minh chứng',
         lms_status: '✅ Đã nộp LMS',
@@ -1927,7 +1987,7 @@ async function checkWeeklyHistoryAndCsvExport() {
       })`,
       harness.context,
     ) === true,
-    'isFailedWeeklySummaryRow must flag rows with quality issue_description even when Zalo and LMS are submitted',
+    'resolveRowIsFailed must flag rows with FAIL quality issue_description even when Zalo and LMS are submitted',
   );
   assertFrontend(
     vm.runInContext(
@@ -2082,7 +2142,7 @@ async function checkWeeklyHistoryAndCsvExport() {
     'Stale out-of-order weekly history response must not overwrite newer week selection',
   );
 
-  // 6. Export in-flight week switch + offline fallback must use pre-captured W41 snapshot, never W42 rows
+  // 6. Export in-flight week switch + server CSV error must fail closed without client-side fallback or W42 row leak
   harness.elements.get('history-week-select').value = '2026-W41';
   pendingW41ExportRejecter = 'DEFER_REJECT';
   const inflightExportPromise = vm.runInContext('exportWeeklySummaryCsv()', harness.context);
@@ -2094,8 +2154,10 @@ async function checkWeeklyHistoryAndCsvExport() {
   rejectW41Export(new Error('network offline during W41 export'));
   const fallbackW41Csv = await inflightExportPromise;
   assertFrontend(
-    fallbackW41Csv.includes('VT-JSB16') && !fallbackW41Csv.includes('VT-ONLY-W42'),
-    'Offline fallback during in-flight export must use immutable pre-captured W41 rows and never leak W42 rows',
+    fallbackW41Csv === '' &&
+      harness.alerts.at(-1).includes('Không thể kết nối máy chủ để xuất CSV báo cáo tuần') &&
+      !fallbackW41Csv.includes('VT-ONLY-W42'),
+    'Failed in-flight server CSV export must alert error and never synthesize client-side CSV or leak W42 rows',
   );
 
   // 7. Viewing history then returning to live week must NOT stamp current plan snapshot_id
@@ -2212,14 +2274,14 @@ async function checkWeeklyHistoryAndCsvExport() {
       return {
         normStatus: normalizeZaloStatusDisplay(legacyRow.status, legacyRow),
         normDetail: normalizeZaloStatusDetailDisplay(legacyRow.status_detail, legacyRow),
-        isWarn: isUnreportedOrWarningZaloStatus(legacyRow.status, legacyRow),
+        category: resolveRowCategory(legacyRow),
         evalStatus: resolveDashboardRowEvaluationStatus(legacyRow),
-        isFailedSummary: isFailedWeeklySummaryRow(legacyRow),
-        isFailedChuaNxRed: isFailedWeeklySummaryRow({
+        isFailedSummary: resolveRowIsFailed(legacyRow),
+        isFailedChuaNxRed: resolveRowIsFailed({
           ...legacyRow,
           evaluation_status: '❌ Chưa nhận xét Zalo'
         }),
-        isFailedChuaNxWarn: isFailedWeeklySummaryRow({
+        isFailedChuaNxWarn: resolveRowIsFailed({
           ...legacyRow,
           evaluation_status: '⚠️ Chưa nhận xét Zalo'
         })
@@ -2230,12 +2292,597 @@ async function checkWeeklyHistoryAndCsvExport() {
   assertFrontend(
     l14Check.normStatus === '✅ Miễn báo cáo (Buổi 14)' &&
       l14Check.normDetail === 'Buổi 14 – miễn báo cáo theo quy tắc nghiệp vụ.' &&
-      l14Check.isWarn === false &&
+      l14Check.category === 'EXEMPT' &&
       l14Check.evalStatus === '✅ Đã hoàn thành nhận xét' &&
       l14Check.isFailedSummary === false &&
       l14Check.isFailedChuaNxRed === false &&
       l14Check.isFailedChuaNxWarn === false,
-    'Lesson 14 legacy row must normalize to ✅ Miễn báo cáo (Buổi 14) and ✅ Đã hoàn thành nhận xét without warning/error flags',
+    'Lesson 14 legacy row must normalize to ✅ Miễn báo cáo (Buổi 14), category EXEMPT, and ✅ Đã hoàn thành nhận xét without warning/error flags',
+  );
+
+  // 11. Structured issue objects {code, severity, text} in quality_issues/lms_quality_issues/zalo_content_issues must render plain text
+  const structuredIssueDesc = vm.runInContext(
+    `resolveDashboardRowIssueDescription({
+      lms_quality_issues: [
+        { code: 'LMS_MANUAL_CHECK', severity: 'NOTE', text: '[LMS] Không tải được đầy đủ dữ liệu buổi học từ LMS, cần kiểm tra thủ công' }
+      ],
+      zalo_content_issues: [
+        { code: 'ZALO_REPORT_NO_DATE', severity: 'NOTE', text: '[Zalo] Báo cáo không ghi ngày/buổi' }
+      ]
+    })`,
+    harness.context,
+  );
+  assertFrontend(
+    structuredIssueDesc ===
+      '[LMS] Không tải được đầy đủ dữ liệu buổi học từ LMS, cần kiểm tra thủ công; [Zalo] Báo cáo không ghi ngày/buổi' &&
+      !structuredIssueDesc.includes('[object Object]'),
+    'Structured issue objects must render plain text in resolveDashboardRowIssueDescription',
+  );
+
+  // 12. Phase 5.6: Pending deadline verification displays ⏳ and renderZaloScanPlan admits exempt_target_count and shows dropped_rows
+  const pendingStatusDisplay = vm.runInContext(
+    `normalizeZaloStatusDisplay('✅ Đã nộp – Có minh chứng', {
+      status: '✅ Đã nộp – Có minh chứng',
+      evidence_state: 'SUBMITTED_VERIFIED',
+      evidence: { date_context: { deadline_verification: 'PENDING' } }
+    })`,
+    harness.context,
+  );
+  assertFrontend(
+    pendingStatusDisplay === '⏳ Đã nộp – Có minh chứng (chờ kiểm tra deadline BCNB)',
+    'Pending BCNB deadline verification must display ⏳ instead of ✅',
+  );
+  const pendingLateStatusDisplay = vm.runInContext(
+    `normalizeZaloStatusDisplay('🟡 Đã báo cáo (Nộp trễ)', {
+      status: '🟡 Đã báo cáo (Nộp trễ)',
+      evidence_state: 'SUBMITTED_LATE_VERIFIED',
+      evidence: { date_context: { deadline_verification: 'PENDING' } }
+    })`,
+    harness.context,
+  );
+  assertFrontend(
+    pendingLateStatusDisplay === '⏳ Đã báo cáo – Minh chứng hợp lệ (chờ kiểm tra deadline BCNB)',
+    'Pending BCNB deadline verification must display ⏳ instead of 🟡 for provisional late reports',
+  );
+
+  vm.runInContext(
+    `renderZaloScanPlan({
+      available: true,
+      snapshot_id: 105,
+      target_count: 0,
+      exempt_target_count: 1,
+      required_week: { week: 42, year: 2026 },
+      latest_week: { week: 43, year: 2026 },
+      selected_weeks: [{ week: 42, year: 2026 }, { week: 43, year: 2026 }],
+      dropped_rows: { counts: { total: 2, missing_zalo: 2 } }
+    })`,
+    harness.context,
+  );
+  const planBannerText = harness.elements.get('zalo-scan-plan').textContent;
+  assertFrontend(
+    planBannerText.includes('1 lớp Buổi 14 miễn báo cáo') &&
+      planBannerText.includes('2 dòng bị loại cần rà soát'),
+    'renderZaloScanPlan must display exempt_target_count and dropped_rows summary',
+  );
+}
+
+async function checkPhase57FrontendHardening() {
+  const requestedUrls = [];
+  let latestJobPayload = {
+    id: 501,
+    job_type: 'LMS_AUTOMATION',
+    status: 'SUCCESS',
+    finished_at: '2020-01-01T00:00:00Z',
+    results: {
+      kind: 'lms_preview',
+      confirmation_token: 'tok-old',
+      plan: { can_confirm: true, classes_to_tick: ['VT-JSB16'] },
+    },
+  };
+  let latestScanJobPayload = {
+    id: 500,
+    job_type: 'ZALO_SCAN',
+    status: 'SUCCESS',
+    finished_at: '2020-01-01T00:00:00Z',
+    snapshot_id: 88,
+    request_payload: { selective_rescan: true },
+    results: [
+      {
+        group: 'VT-JSB16',
+        person: 'GV 1',
+        status: '✅ Đã nộp – Có minh chứng',
+        category: 'ON_TIME',
+        is_failed: false,
+        snapshot_id: 88,
+        scan_target: {
+          week: 42,
+          year: 2026,
+          class_code: 'VT-JSB16',
+          lesson: '4',
+          class_date: '18/10/2026',
+          class_date_iso: '2026-10-18',
+        },
+      },
+    ],
+  };
+  const fullServerWeek42Summary = {
+    week: 42,
+    year: 2026,
+    period_key: '2026-W42',
+    selected_job_id: 500,
+    available_weeks: [{ week: 42, year: 2026, period_key: '2026-W42', label: 'W42/2026' }],
+    jobs: [{ job_id: 500, status: 'SUCCESS', execution_mode: 'dry-run', selective_rescan: true, target_count: 1 }],
+    summary: { total: 3 },
+    lms_summary: { has_lms_data: true, ticked_count: 1, dry_run_count: 0, missing_count: 1 },
+    rows: [],
+    items: [
+      {
+        group: 'VT-JSB16',
+        person: 'GV 1',
+        status: '✅ Đã nộp – Có minh chứng',
+        category: 'ON_TIME',
+        is_failed: false,
+        snapshot_id: 88,
+        scan_target: {
+          week: 42,
+          year: 2026,
+          class_code: 'VT-JSB16',
+          lesson: '4',
+          class_date: '18/10/2026',
+          class_date_iso: '2026-10-18',
+        },
+      },
+      {
+        group: 'VT-LATE-02',
+        person: 'GV 2',
+        status: '🟡 Đã báo cáo (Nộp trễ)',
+        category: 'LATE',
+        is_failed: false,
+        snapshot_id: 88,
+        zalo_content_issues: [
+          { code: 'ZALO_REPORT_NO_DATE', severity: 'NOTE', text: '[Zalo] Báo cáo không ghi ngày/buổi' },
+        ],
+        scan_target: {
+          week: 42,
+          year: 2026,
+          class_code: 'VT-LATE-02',
+          lesson: '5',
+          class_date: '17/10/2026',
+          class_date_iso: '2026-10-17',
+        },
+        evidence: {
+          scanned_at: '2026-10-18T10:00:00Z',
+          messages_checked: 6,
+          match_strategy: 'SAME_DAY_FALLBACK',
+          images: {
+            report: {
+              path: 'runtime/screenshots/zalo/late_report.png',
+              evidence_status: 'AVAILABLE',
+              sha256: 'abc123',
+              size_bytes: 512,
+              capture_type: 'VIEWPORT',
+            },
+          },
+        },
+      },
+      {
+        group: 'VT-MISS-03',
+        person: 'GV 3',
+        status: '❌ Chưa tìm thấy báo cáo',
+        category: 'MISSING',
+        is_failed: true,
+        snapshot_id: 88,
+        source_job_id: 500,
+        scan_target: {
+          week: 42,
+          year: 2026,
+          class_code: 'VT-MISS-03',
+          lesson: '2',
+          class_date: '16/10/2026',
+          class_date_iso: '2026-10-16',
+        },
+        evidence: {
+          scanned_at: '2026-10-18T10:05:00Z',
+          messages_checked: 4,
+          images: {
+            latest: {
+              path: 'runtime/screenshots/zalo/miss_latest.png',
+              evidence_status: 'AVAILABLE',
+              sha256: 'def456',
+              size_bytes: 256,
+              capture_type: 'VIEWPORT',
+            },
+          },
+        },
+      },
+    ],
+  };
+
+  let preflightMockPayload = {
+    status: 'GREEN',
+    run_allowed: true,
+    requires_confirmation: false,
+    execution_mode: 'dry-run',
+    checks: [],
+  };
+  let job510Payload = {
+    id: 510,
+    job_type: 'ZALO_SCAN',
+    status: 'RUNNING',
+    message: 'Đang quét...',
+  };
+  let confirmPrompts = [];
+  let lmsModalShownCount = 0;
+  const harness = createFrontendHarness(async (url, options = {}) => {
+    requestedUrls.push(url);
+    if (url === '/api/jobs/latest') {
+      return { ok: true, status: 200, json: async () => latestJobPayload };
+    }
+    if (url === '/api/jobs/latest?job_type=ZALO_SCAN') {
+      return { ok: true, status: 200, json: async () => latestScanJobPayload };
+    }
+    if (url.startsWith('/api/reports/weekly-summary')) {
+      return { ok: true, status: 200, json: async () => fullServerWeek42Summary };
+    }
+    if (url === '/api/zalo-scan-plan') {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          available: true,
+          snapshot_id: 88,
+          target_count: 3,
+          required_week: { week: 42, year: 2026 },
+          latest_week: { week: 43, year: 2026 },
+          selected_weeks: [
+            { week: 42, year: 2026 },
+            { week: 43, year: 2026 },
+          ],
+        }),
+      };
+    }
+    if (url.startsWith('/api/zalo-scan-preflight')) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => preflightMockPayload,
+      };
+    }
+    if (url === '/run-scan') {
+      return { ok: true, status: 200, json: async () => ({ job_id: 510, status: 'PENDING', message: 'Đã bắt đầu quét.' }) };
+    }
+    if (url === '/api/zalo-manual-approve') {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          job_id: 511,
+          dry_run: true,
+          message: 'Đã tạo job mô phỏng duyệt & tích.',
+        }),
+      };
+    }
+    if (url === '/api/jobs/510') {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => job510Payload,
+      };
+    }
+    if (url.startsWith('/api/jobs/') && url.endsWith('/targets')) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          worker_count: 2,
+          summary: {
+            total: 3,
+            scan: { COMPLETED: 2, RUNNING: 1 },
+            write: { VERIFIED: 1, DRY_RUN: 1 },
+          },
+          report: {
+            checked: 2,
+            submitted_verified: 1,
+          },
+          targets: [],
+        }),
+      };
+    }
+    if (url.startsWith('/api/logs')) {
+      return { ok: true, status: 200, json: async () => ({ lines: [] }) };
+    }
+    throw new Error(`Unexpected URL in Phase 5.7 harness: ${url}`);
+  });
+
+  harness.context.confirm = msg => {
+    confirmPrompts.push(String(msg));
+    return true;
+  };
+  harness.context.showLmsReview = () => {
+    lmsModalShownCount += 1;
+  };
+
+  vm.runInContext(scriptSourceByPath.get('/static/js/state.js'), harness.context);
+  vm.runInContext(jobsSource, harness.context);
+  await flushAsyncWork();
+  harness.timers.clear();
+
+  // 5.7.2 + 5.7.4: On page load (F5), old terminal LMS job must NOT pop modal,
+  // /api/jobs/latest?job_type=ZALO_SCAN is queried, and full 3-row table is rebuilt from /api/reports/weekly-summary
+  assertFrontend(
+    lmsModalShownCount === 0 && harness.alerts.length === 0,
+    '5.7.4: Terminal job finished before pageLoadAtMs must not re-trigger modal or alert on F5 reload',
+  );
+  assertFrontend(
+    requestedUrls.includes('/api/jobs/latest?job_type=ZALO_SCAN') &&
+      requestedUrls.some(u => u.startsWith('/api/reports/weekly-summary?week=42&year=2026')),
+    '5.7.2: Page load with non-ZALO_SCAN latest job must query /api/jobs/latest?job_type=ZALO_SCAN and weekly-summary',
+  );
+  assertFrontend(
+    vm.runInContext('latestZaloResults.length', harness.context) === 3 &&
+      vm.runInContext('isHistoricalWeekViewActive()', harness.context) === false,
+    '5.7.2: F5 after selective rescan must rebuild all 3 server rows in live mode without in-memory baseline',
+  );
+
+  // 5.7.7: KPI separates count-late (neutral) from count-failed, NOTE issues render neutral Ghi chú QC, dead CSV builders removed
+  assertFrontend(
+    harness.elements.get('count-total').innerText === 3 &&
+      harness.elements.get('count-success').innerText === 1 &&
+      harness.elements.get('count-late').innerText === 1 &&
+      harness.elements.get('count-failed').innerText === 1,
+    '5.7.7: KPI must separate count-late (1) from count-failed (1) and count-success (1)',
+  );
+  const lateRowCell = harness.elements.get('results-table').children[1].children[3];
+  const lateRowTexts = lateRowCell.children.map(ch => ch.textContent || ch.innerText || '').join(' | ');
+  assertFrontend(
+    lateRowTexts.includes('Ghi chú QC: [Zalo] Báo cáo không ghi ngày/buổi') &&
+      !lateRowTexts.includes('Vấn đề:'),
+    '5.7.7: Row with only NOTE severity issues must render neutral Ghi chú QC instead of Vấn đề',
+  );
+  const lateEvidenceTooltip = harness.elements.get('results-table').children[1].children[4].children[0].children[0].title || '';
+  assertFrontend(
+    lateEvidenceTooltip.includes('\n') && !lateEvidenceTooltip.includes('\\n'),
+    '5.7.7: Evidence tooltip must join lines with real newline instead of literal \\n',
+  );
+  assertFrontend(
+    vm.runInContext(
+      'typeof buildWeeklySummaryCsv === "undefined" && typeof WEEKLY_CSV_HEADERS === "undefined" && typeof isFailedWeeklySummaryRow === "undefined"',
+      harness.context,
+    ) === true,
+    '5.7.7: Dead client-side CSV builders and duplicate status helpers must be removed',
+  );
+
+  // 5.7.1: Stale plan preserves required_week, renders "Kế hoạch đã cũ — Dò lại" + observed_at, and disables scan button
+  vm.runInContext(
+    `renderZaloScanPlan({
+      available: false,
+      stale: true,
+      reason_code: 'SCAN_PLAN_STALE',
+      observed_at: '2026-10-18T08:30:00Z',
+      required_week: { week: 42, year: 2026 },
+      latest_week: { week: 43, year: 2026 },
+      selected_weeks: [{ week: 42, year: 2026 }, { week: 43, year: 2026 }]
+    })`,
+    harness.context,
+  );
+  assertFrontend(
+    vm.runInContext('zaloScanPlan && zaloScanPlan.required_week && zaloScanPlan.required_week.week', harness.context) === 42 &&
+      harness.elements.get('zalo-scan-plan').textContent.includes('Kế hoạch đã cũ — Dò lại') &&
+      harness.elements.get('zalo-scan-plan').textContent.includes('2026-10-18T08:30:00Z') &&
+      harness.elements.get('scan-button').disabled === true,
+    '5.7.1: Stale plan must preserve required_week, show "Kế hoạch đã cũ — Dò lại" + observed_at, and disable scan button',
+  );
+
+  // 5.7.5: Row rescan button is disabled when plan is stale, and enabled when plan + preflight are runnable;
+  // currentJobActive = true locks all primary and row-level action buttons.
+  vm.runInContext('renderZaloResults(latestZaloResults, true)', harness.context);
+  const missRowRescanBtnWhenStale = harness.context.document.querySelectorAll('.btn-row-rescan')[0];
+  assertFrontend(
+    Boolean(missRowRescanBtnWhenStale) && missRowRescanBtnWhenStale.disabled === true,
+    '5.7.5: Row rescan button must be disabled when scan plan is stale',
+  );
+  vm.runInContext(
+    `renderZaloPreflight({
+      status: 'GREEN',
+      run_allowed: true,
+      requires_confirmation: false,
+      execution_mode: 'dry-run',
+      checks: []
+    });
+    renderZaloScanPlan({
+      available: true,
+      snapshot_id: 88,
+      target_count: 3,
+      required_week: { week: 42, year: 2026 },
+      latest_week: { week: 43, year: 2026 },
+      selected_weeks: [{ week: 42, year: 2026 }, { week: 43, year: 2026 }]
+    })`,
+    harness.context,
+  );
+  const missRowRescanBtnWhenRunnable = harness.context.document.querySelectorAll('.btn-row-rescan')[0];
+  assertFrontend(
+    Boolean(missRowRescanBtnWhenRunnable) && missRowRescanBtnWhenRunnable.disabled === false,
+    '5.7.5: Row rescan button must enable when scan plan and preflight become runnable',
+  );
+  vm.runInContext('currentJobActive = true; applyZaloRunState();', harness.context);
+  assertFrontend(
+    harness.elements.get('btn-discover').disabled === true &&
+      harness.elements.get('btn-scan').disabled === true &&
+      harness.elements.get('btn-lms-run').disabled === true &&
+      harness.elements.get('btn-rescan-failed').disabled === true &&
+      missRowRescanBtnWhenRunnable.disabled === true,
+    '5.7.5: currentJobActive = true must lock primary buttons and row-level action buttons',
+  );
+  vm.runInContext('currentJobActive = false; applyZaloRunState();', harness.context);
+
+  // 5.7.5: Dry-run manual approve hides "✅ Duyệt & Tích" button after simulation, even after weekly-summary reload
+  assertFrontend(
+    harness.context.document.querySelectorAll('.btn-row-manual-approve').length === 1,
+    '5.7.5: Unsimulated MISSING row with evidence must initially show "✅ Duyệt & Tích" button',
+  );
+  vm.runInContext(
+    `applyManualApprovePayload({
+      kind: 'zalo_manual_approve',
+      target_key: '2026-W42|VT-MISS-03|2|2026-10-16',
+      dry_run: true,
+      outcome: 'SKIPPED_DRY_RUN',
+      source_job_id: 500
+    })`,
+    harness.context,
+  );
+  await vm.runInContext('refreshZaloRequiredWeekSummary(zaloScanPlan, { keepLiveMode: true, silent: true })', harness.context);
+  const manualApproveBtnsAfterDryRun = harness.context.document.querySelectorAll('.btn-row-manual-approve');
+  assertFrontend(
+    manualApproveBtnsAfterDryRun.length === 0,
+    '5.7.5: Dry-run manual approve must hide "✅ Duyệt & Tích" button for the simulated target even after server summary reload',
+  );
+
+  // 5.7.6: YELLOW preflight confirmation lists warning messages/actions, and compact strip updates on main tab
+  preflightMockPayload = {
+    status: 'YELLOW',
+    run_allowed: true,
+    requires_confirmation: true,
+    mode: 'production',
+    execution_mode: 'production',
+    checks: [
+      { code: 'SCAN_PLAN_DROPPED_ROWS', status: 'YELLOW', message: 'Có 2 dòng bị loại khỏi kế hoạch', action: 'Kiểm tra danh sách dòng rơi' },
+      { code: 'ZALO_SESSION_WARN', status: 'YELLOW', message: 'Phiên Zalo sắp hết hạn', action: 'Mở lại trình duyệt nếu cần' },
+    ],
+  };
+  await vm.runInContext('refreshCurrentZaloPreflight()', harness.context);
+  harness.elements.get('dashboard-progress-strip-text').classList.add('hidden');
+  await vm.runInContext('refreshZaloTargetProgress({ id: 510, job_type: "ZALO_SCAN", status: "RUNNING" })', harness.context);
+  assertFrontend(
+    harness.elements.get('dashboard-preflight-pill').textContent.includes('Có cảnh báo — cần xác nhận') &&
+      harness.elements.get('dashboard-preflight-drawer').classList.contains('hidden') === false &&
+      harness.elements.get('dashboard-preflight-drawer-checks').children.length === 2 &&
+      harness.elements.get('dashboard-progress-strip-text').classList.contains('hidden') === false &&
+      harness.elements.get('dashboard-progress-strip-text').textContent.includes('Tiến độ: 2/3 đã kiểm tra'),
+    '5.7.6: Main dashboard compact strip must display preflight pill, drawer checks, and unhide batch progress',
+  );
+  confirmPrompts = [];
+  await vm.runInContext('startScan()', harness.context);
+  assertFrontend(
+    confirmPrompts.length === 1 &&
+      confirmPrompts[0].includes('• Có 2 dòng bị loại khỏi kế hoạch — Kiểm tra danh sách dòng rơi') &&
+      confirmPrompts[0].includes('• Phiên Zalo sắp hết hạn — Mở lại trình duyệt nếu cần'),
+    '5.7.6: YELLOW confirmation prompt must list all warning messages and actions',
+  );
+
+  // 5.7.2 (P1 regression): Active selective ZALO_SCAN job 510 transitioning RUNNING -> SUCCESS with 1 row
+  // must await refreshZaloRequiredWeekSummary AFTER renderZaloResults and end with all 3 server rows
+  await vm.runInContext('updateDashboardData()', harness.context);
+  job510Payload = {
+    id: 510,
+    job_type: 'ZALO_SCAN',
+    status: 'SUCCESS',
+    message: 'Đã quét xong 1 lớp.',
+    results: {
+      selective_rescan: true,
+      snapshot_id: 88,
+      items: [fullServerWeek42Summary.items[0]],
+    },
+  };
+  await vm.runInContext('updateDashboardData()', harness.context);
+  await flushAsyncWork();
+  assertFrontend(
+    vm.runInContext('latestZaloResults.length', harness.context) === 3,
+    '5.7.2: Terminal selective ZALO_SCAN must await server weekly-summary after renderZaloResults and keep all 3 rows',
+  );
+
+  // 5.7.7 (P2 regression): Row with category DONE or EXEMPT but is_failed=true (LMS/QC FAIL issue) must count in count-failed
+  vm.runInContext(
+    `renderZaloResults([
+      {
+        group: 'VT-DONE-FAIL',
+        person: 'GV 4',
+        status: '✅ Đã nộp – Có minh chứng',
+        category: 'DONE',
+        is_failed: true,
+        lms_quality_issues: [{ code: 'LMS_MISSING_CONTENT', severity: 'FAIL', text: '[LMS] Chưa ghi nội dung bài học' }],
+        scan_target: { week: 42, year: 2026, class_code: 'VT-DONE-FAIL', lesson: '3', class_date: '18/10/2026', class_date_iso: '2026-10-18' }
+      },
+      {
+        group: 'VT-EXEMPT-FAIL',
+        person: 'GV 5',
+        status: '✅ Miễn báo cáo (Buổi 14)',
+        category: 'EXEMPT',
+        is_failed: true,
+        lms_status: '❌ Chưa nhận xét LMS',
+        scan_target: { week: 42, year: 2026, class_code: 'VT-EXEMPT-FAIL', lesson: '14', class_date: '18/10/2026', class_date_iso: '2026-10-18' }
+      }
+    ], true)`,
+    harness.context,
+  );
+  assertFrontend(
+    harness.elements.get('count-failed').innerText === 2 &&
+      harness.elements.get('count-success').innerText === 0 &&
+      harness.elements.get('count-exempt').innerText === 0,
+    '5.7.7: Rows with category DONE or EXEMPT and is_failed=true must increment count-failed, matching filter',
+  );
+  vm.runInContext(
+    `renderZaloResults([
+      {
+        group: 'VT-NOT-SCANNED',
+        person: 'GV 6',
+        status: '⏳ Chưa quét Zalo',
+        category: 'NOT_SCANNED',
+        is_failed: false,
+        scan_target: { week: 42, year: 2026, class_code: 'VT-NOT-SCANNED', lesson: '1', class_date: '18/10/2026', class_date_iso: '2026-10-18' }
+      }
+    ], true)`,
+    harness.context,
+  );
+  assertFrontend(
+    harness.elements.get('count-failed').innerText === 0 &&
+      harness.elements.get('count-total').innerText === 1,
+    '5.7.7: Row with category NOT_SCANNED and is_failed=false must not increment count-failed',
+  );
+
+  // 5.7.3: Clicking ⟳ (loadWeeklyHistorySummary()) preserves live mode when in live mode,
+  // and preserves historical mode when in historical mode; polling does not clear historical mode.
+  harness.elements.get('history-week-select').value = '';
+  await vm.runInContext('loadWeeklyHistorySummary()', harness.context);
+  assertFrontend(
+    vm.runInContext('isHistoricalWeekViewActive()', harness.context) === false,
+    '5.7.3: Clicking ⟳ in live mode must keep live mode active',
+  );
+  harness.elements.get('history-week-select').value = '2026-W42';
+  await vm.runInContext('loadWeeklyHistorySummary()', harness.context);
+  assertFrontend(
+    vm.runInContext('isHistoricalWeekViewActive()', harness.context) === true,
+    '5.7.3: Clicking ⟳ with selected historical week must keep historical mode active',
+  );
+  await vm.runInContext('updateDashboardData()', harness.context);
+  assertFrontend(
+    vm.runInContext('isHistoricalWeekViewActive()', harness.context) === true,
+    '5.7.3: Polling updateDashboardData() must not clear historical week view',
+  );
+
+  // 5.8.5: System-wide LMS outage flag (lms_fetch_unavailable=true) shows general UI warning on status badge
+  vm.runInContext(
+    `renderZaloResults([
+      {
+        group: 'VT-OUTAGE-01',
+        person: 'GV Outage',
+        status: '✅ Đã báo cáo – Minh chứng hợp lệ',
+        category: 'DONE',
+        is_failed: false,
+        lms_fetch_unavailable: true,
+        lms_quality_issues: [{ code: 'LMS_MANUAL_CHECK', severity: 'NOTE', text: '[LMS] Không tải được đầy đủ dữ liệu buổi học từ LMS, cần kiểm tra thủ công' }],
+        scan_target: { week: 42, year: 2026, class_code: 'VT-OUTAGE-01', lesson: '1', class_date: '18/10/2026', class_date_iso: '2026-10-18', lms_fetch_unavailable: true }
+      }
+    ], true, { lmsFetchUnavailable: true })`,
+    harness.context,
+  );
+  assertFrontend(
+    harness.elements.get('weekly-history-status-badge').textContent.includes('Không tải được dữ liệu LMS toàn hệ thống'),
+    '5.8.5: Status badge must display general LMS outage warning when lms_fetch_unavailable is true',
+  );
+  assertFrontend(
+    harness.elements.get('count-failed').innerText === 0 &&
+      harness.elements.get('count-success').innerText === 1,
+    '5.8.5: Row with LMS_MANUAL_CHECK NOTE must stay is_failed=false and count as success',
   );
 }
 
@@ -2252,7 +2899,8 @@ async function runFrontendBehaviorChecks() {
   await checkLmsPreviewDetailAndClassSelection();
   await checkGoogleFormFetchLmsStudentsAndIdempotency();
   await checkWeeklyHistoryAndCsvExport();
-  console.log(`template-js-contract-ok scripts=${scriptSources.length} handlers=${handlerNames.size} behavior=12`);
+  await checkPhase57FrontendHardening();
+  console.log(`template-js-contract-ok scripts=${scriptSources.length} handlers=${handlerNames.size} behavior=13`);
 }
 
 runFrontendBehaviorChecks().catch(error => {

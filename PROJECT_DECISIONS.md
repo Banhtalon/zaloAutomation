@@ -1094,3 +1094,52 @@
 - Consequences: Quản lý nhận được bảng báo cáo đầy đủ trạng thái Zalo, LMS, Tình trạng đánh giá và chi tiết vấn đề chất lượng nội dung bài học/nhận xét học viên của từng giáo viên trên cả trang Teaching, Dashboard, CSV và Email mà vẫn giữ nguyên mọi chốt an toàn fail-closed và bảo vệ PII học viên.
 - Evidence: Backup `.backups/pre-wave4-20261029/` (`restore_drill_ok=true`); bộ unit test `tests/test_lms_quality_service.py`, `tests/test_bcnb_actions.py`, `tests/test_bcnb_columns.py`, `tests/test_api_routes_unit.py` + `node tests/check_template_js.js` + `.\CHECK_QUALITY.ps1 -Isolated` (`616/616 OK`); Independent Review `gpt-6.1-sol (xhigh)` đạt `VERDICT: PASS`.
 - Supersedes: Mở rộng Phase 3.2 và chức năng Xuất CSV lỗi & Gửi Mail Quản lý.
+
+## DEC-039 — Wave 5 (Chặng 5.2): Rủi ro còn lại của cơ chế chống ghi đè lạc quan trên `check_nhanxet.php` (`action=update_note`)
+
+- Date: 2026-10-30
+- Status: Accepted for local implementation (Wave 5 — Chặng 5.2).
+- Context: Khi cập nhật ô `Mô tả vấn đề (TE/TF/QC)` (`note_type="checker"`) qua
+  `POST /check_nhanxet.php` (`services/bcnb_actions.py`), qua rà soát source và
+  fixture DOM/endpoint hiện có (`tests/test_bcnb_dom_contract.py`,
+  `services/bcnb_actions.py`), endpoint `action=update_note` chỉ nhận
+  `csrf_token`, `action`, `session_id`, `note_type`, `note` và không có bằng
+  chứng hỗ trợ tham số điều kiện phía server (ETag / `If-Match` / `old_note` /
+  compare-and-swap nguyên tử).
+- Decision:
+  1. Thực thi kiểm tra lạc quan (optimistic pre-read) ngay trước lệnh `POST`
+     (sau bước hard-reload của thao tác tick checkbox) bằng
+     `read_checker_note_by_session` và kiểm tra trực tiếp trên DOM trong
+     `_UPDATE_CHECKER_NOTE_JS`: nếu giá trị hiện tại trên trang khác
+     `existing_note` ban đầu, dừng ngay với `FAILED_BEFORE_WRITE`
+     (`CONCURRENT_NOTE_EDIT` — "QC vừa chỉnh sửa") và không gửi `POST`.
+  2. Sau `POST` và hard-reload readback (`verify_checker_note_persisted`), nếu
+     giá trị trên server khác `merged_note`, ghi nhận audit `UNKNOWN` kèm
+     `conflict_status="CONFLICT_AFTER_WRITE"` và trả trạng thái
+     `CONFLICT_AFTER_WRITE` / `OUTCOME_UNKNOWN` để QC kiểm tra lại, tuyệt đối
+     không tự động ghi đè lại.
+- Residual Risk: Do thiếu compare-and-swap nguyên tử phía server, vẫn còn một
+  cửa sổ đua hẹp tính bằng mili-giây giữa lúc đọc kiểm tra trên trang và lúc
+  server xử lý `POST`; nếu QC lưu đúng vào khoảng mili-giây đó, bước readback
+  sau `POST` sẽ phát hiện sai khác hoặc bảo vệ không trọn vẹn nhưng không thể
+  ngăn chặn nguyên tử trên server.
+- Supersedes: Bổ sung cơ chế bảo vệ chống ghi đè và phân tách provenance ghi chú
+  auto/manual cho DEC-038 mục 3.
+- Bổ sung tổng kết Wave 5 (`Chặng 5.0 → 5.8`, 2026-10-31):
+  1. **Quyết định D1–D6 của Owner**:
+     - **D1**: Báo cáo Zalo nộp trễ hợp lệ (`SUBMITTED_LATE_VERIFIED`, `category="LATE"`) vẫn được tích `NX Zalo` trên BCNB và **không** tính là lỗi (`is_failed=False`), tách ô KPI `Nộp trễ` riêng trên giao diện.
+     - **D2**: Báo cáo Zalo gửi đúng ngày học của target (`ui_sent_at.date() == target.class_date.date()`), không có 2 buổi học BCNB trùng ngày trong cùng nhóm và không ghi số buổi mâu thuẫn thì vẫn khớp (`SUBMITTED_*`) khi nội dung không ghi ngày/buổi (`ZALO_REPORT_NO_DATE`: `[Zalo] Báo cáo không ghi ngày/buổi`) hoặc ghi sai ngày (`ZALO_REPORT_WRONG_DATE`: `[Zalo] Báo cáo ghi sai ngày (dd/mm)`), kèm ghi chú QC mức `NOTE`.
+     - **D3**: Mở rộng parser vòng đời lớp (`services/class_lifecycle.py`, `CLASS_LIFECYCLE.md`) hỗ trợ các track `ROB4`, `SEMI`, `PRE`, `ARM`, `PT`, `JS`, `CS`, `G`, `S` với chuỗi lên cấp `B → A → I` trong cùng track (so khớp toàn bộ token `fullmatch`, bỏ qua hậu tố `HB`); tương thích đọc/ghi với `cohort_key` cũ của `JS`/`CS` (`VT-J|S|NN`, `VT-C|S|NN`) và dừng fail-closed khi va chạm alias.
+     - **D4**: Kết quả đối chiếu LMS không xác định (`[LMS] … cần kiểm tra thủ công`) dùng mã có cấu trúc `LMS_MANUAL_CHECK` mức `NOTE`, được ghi lên cột `Mô tả vấn đề (TE/TF/QC)` của đúng dòng mà không tính là lỗi trong email; nếu LMS lỗi toàn hệ thống (`is_lms_fetch_unavailable`) thì tạm ngưng ghi note `LMS_MANUAL_CHECK` hàng loạt, bảo toàn các issue `[LMS]` mức `FAIL` cũ đã verified và bật cờ `lms_fetch_unavailable=True`.
+     - **D5**: Khi bật `ZALO_AI_ASSIST_CLASSIFIER=true` (mặc định `false` và cô lập trong gate), tin nhắn ứng viên được gửi nguyên văn tới Gemini để chấm phụ, nhưng tuyệt đối không ghi nguyên văn tin nhắn vào log, `classification_logs` hay kết quả job ngoài các trường chuẩn hiện có.
+     - **D6**: Xóa thân luồng quét Zalo tuần tự chết trong `services/zalo_service.py` (chuyển hoàn toàn sang `run_and_finalize_parallel_zalo_batch` và chuyển các cổng invariant sang kiểm tra implementation song song) và xóa phần CSV builder chết phía JS (`static/js/jobs.js`).
+  2. **Mức độ issue `FAIL` / `NOTE` (`services/report_status.py`)**:
+     - Mọi issue QC mang cấu trúc `{code, severity, text}` (hoặc tiền tố chuẩn hóa `[NOTE:CODE]`/`[FAIL:CODE]`): mức `NOTE` gồm đúng 2 nhóm `LMS_MANUAL_CHECK` (D4) và `ZALO_REPORT_NO_DATE` / `ZALO_REPORT_WRONG_DATE` (D2); các issue chất lượng khác mang mức `FAIL` (kèm một bộ chuyển đổi tương thích ngược duy nhất `_adapt_legacy_issue`).
+  3. **Taxonomy `category` và `is_failed` một nguồn sự thật (`services/report_status.py`)**:
+     - `categorize_row(row)` trả một trong 6 giá trị `DONE | LATE | MISSING | REVIEW | EXEMPT | NOT_SCANNED`; `is_failed(row)` chỉ trả `True` khi `category ∈ {MISSING, REVIEW}`, trạng thái thực thi ledger lỗi, LMS xác nhận chưa nộp/chưa đánh giá, hoặc có ít nhất một issue mức `FAIL`. Giao diện (`static/js/jobs.js`), weekly summary (`repositories/report_repository.py`), job API (`api/job_routes.py`) và email (`services/report_email_service.py`) đều đọc từ nguồn duy nhất này.
+  4. **Giới hạn của cơ chế bảo vệ ghi chú `Mô tả vấn đề (TE/TF/QC)`**:
+     - Endpoint `POST /check_nhanxet.php` (`action=update_note`) trên BCNB không hỗ trợ compare-and-swap nguyên tử phía server; hệ thống kết hợp đọc kiểm tra lạc quan ngay trước `POST` (`CONCURRENT_NOTE_EDIT`), đối chiếu provenance 5 điều kiện từ `external_action_audit` (`preserve_bcnb_note_text`) và đọc ngược sau hard reload (`CONFLICT_AFTER_WRITE`).
+  5. **Chọn slot LMS theo ngày học và số buổi (`select_matching_lms_slot`)**:
+     - Truy vấn GraphQL lấy `_id`, `index`, `date`, `startTime`, `endTime`; đổi mốc thời gian slot về múi giờ `Asia/Ho_Chi_Minh` và chỉ chọn khi có đúng 1 slot không bị hủy khớp đồng thời ngày học (`slot_date_iso == target_date_iso`) và số buổi (`index + 1 == lesson_num`), bỏ hoàn toàn việc lấy theo vị trí `class_slots[lesson_num - 1]`.
+  6. **Quy trình Review độc lập Wave 5**:
+     - Toàn bộ các chặng `5.0 → 5.8` và diff tổng thể của Wave 5 được kiểm định độc lập bằng `codex exec -m gpt-6.1-sol -c model_reasoning_effort="high" -s read-only -` đạt `VERDICT: PASS`.

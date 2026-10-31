@@ -34,6 +34,7 @@
 | September 2026 fixes | Zalo sync gap, login/lock, Form dropdown và ảnh bằng chứng |
 | October 2026 Wave 1–3 | Quét trực tiếp Web LMS, Quét chọn lọc, Duyệt tay BCNB 1-Click, AI gợi ý ca mơ hồ, Tra cứu Lịch sử Tuần & Giao diện Tactile 3D |
 | October 2026 Wave 4 (`DEC-038`) | Đọc mở rộng bảng Teaching (`check_nhanxet.php`), Kiểm định chất lượng nội dung bài học & nhận xét học viên LMS (Buổi thường 3 ý vs Checkpoint Coding B5/B9, Robotics B4/B8), Tự động ghi `Mô tả vấn đề (TE/TF/QC)` có kiểm chứng đọc ngược, và Bảng Email Quản lý 9 cột (`HTML Table` + `Clipboard Rich Table` + `Unicode Table`) |
+| October 2026 Wave 5 (`DEC-039`) | Hardening toàn diện luồng kiểm tra báo cáo (`5.0` → `5.8`): cô lập lỗi tick checkbox và ghi chú QC kèm bảo vệ lạc quan & provenance 5 điều kiện; chọn slot LMS theo ngày học + số buổi; một nguồn sự thật `services/report_status.py` (`DONE/LATE/MISSING/REVIEW/EXEMPT/NOT_SCANNED`, mức `FAIL/NOTE`, quyết định D1–D6); thống kê `dropped_rows` và miễn trừ Buổi 14 trực tiếp từ BCNB; mở rộng parser vòng đời lớp (`ROB4/SEMI/PRE/ARM/PT/JS/CS/G/S`) kèm tương thích `cohort_key` cũ; giao diện bám dữ liệu server sau F5 và chốt an toàn khi LMS lỗi toàn hệ thống |
 
 ## Cách tạo phiên bản tiếp theo
 

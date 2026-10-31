@@ -12,6 +12,8 @@ Evaluates:
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
+from datetime import datetime
 import asyncio
 import contextlib
 import html
@@ -21,7 +23,24 @@ import re
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
+from core.time_utils import BUSINESS_TIMEZONE
 from services.bcnb_safety import fold_text, normalize_auto_issue_text
+from services.report_status import (
+    ISSUE_CODE_LMS_MANUAL_CHECK,
+    ISSUE_CODE_ZALO_REPORT_NO_DATE,
+    ISSUE_CODE_ZALO_REPORT_WRONG_DATE,
+    SEVERITY_NOTE,
+    SUBMITTED_EVIDENCE_STATES,
+    VERIFIED_EVIDENCE_STATES,
+    StructuredIssueStr,
+    is_lesson_14,
+    issue_code,
+    issue_text,
+    make_structured_issue,
+    normalize_class_code,
+    normalize_lesson_number,
+)
+from services.zalo_safety import parse_class_date
 
 MAX_LMS_QUALITY_CLASSES_PER_BATCH = 60
 MAX_LMS_SLOTS_PER_CLASS = 20
@@ -241,21 +260,7 @@ def _strip_html(raw: str | None) -> str:
 
 
 def _parse_lesson_number(lesson: str | int | None) -> int | None:
-    if lesson is None:
-        return None
-    if isinstance(lesson, int) and not isinstance(lesson, bool):
-        return lesson if lesson > 0 else None
-    text = str(lesson).strip()
-    if not text:
-        return None
-    if text.isdigit():
-        val = int(text)
-        return val if val > 0 else None
-    m = re.search(r"(\d+)", text)
-    if m:
-        val = int(m.group(1))
-        return val if val > 0 else None
-    return None
+    return normalize_lesson_number(lesson)
 
 
 def _is_robotics_class(class_code: str, khoi: str = "") -> bool:
@@ -313,7 +318,7 @@ def is_checkpoint_session(
 ) -> bool:
     """Return True when a session is a Checkpoint session (Coding B5/B9, Robotics B4/B8, or Rubric)."""
     lesson_num = _parse_lesson_number(lesson)
-    if lesson_num == 14:
+    if is_lesson_14(lesson):
         return False
     if lesson_num is not None:
         if _is_robotics_class(class_code, khoi):
@@ -457,8 +462,7 @@ def evaluate_lms_student_comments(
     lesson: str | int | None = "",
 ) -> dict[str, Any]:
     """Evaluate per-student LMS comments for attended students without exposing PII (Requirement #4)."""
-    lesson_num = _parse_lesson_number(lesson)
-    if lesson_num == 14:
+    if is_lesson_14(lesson):
         return {
             "is_exempt": True,
             "is_checkpoint": False,
@@ -480,7 +484,10 @@ def evaluate_lms_student_comments(
             "failed_count": 0,
             "duplicate_count": 0,
             "issues": [
-                "[LMS] Chưa kiểm tra được danh sách học viên trên LMS, cần kiểm tra thủ công"
+                make_structured_issue(
+                    ISSUE_CODE_LMS_MANUAL_CHECK,
+                    "[LMS] Chưa kiểm tra được danh sách học viên trên LMS, cần kiểm tra thủ công",
+                )
             ],
         }
 
@@ -496,12 +503,18 @@ def evaluate_lms_student_comments(
 
     attended_count = len(attended_entries)
     if attended_count == 0:
-        no_attended_issues = [
-            "[LMS] Chưa có học viên điểm danh có mặt trên LMS, cần kiểm tra thủ công"
+        no_attended_issues: list[Any] = [
+            make_structured_issue(
+                ISSUE_CODE_LMS_MANUAL_CHECK,
+                "[LMS] Chưa có học viên điểm danh có mặt trên LMS, cần kiểm tra thủ công",
+            )
         ]
         if overflow_records:
             no_attended_issues.append(
-                f"[LMS] Danh sách học viên vượt giới hạn kiểm tra ({raw_total_records} > {MAX_LMS_STUDENTS_PER_SLOT} HS), cần kiểm tra thủ công"
+                make_structured_issue(
+                    ISSUE_CODE_LMS_MANUAL_CHECK,
+                    f"[LMS] Danh sách học viên vượt giới hạn kiểm tra ({raw_total_records} > {MAX_LMS_STUDENTS_PER_SLOT} HS), cần kiểm tra thủ công",
+                )
             )
         return {
             "is_exempt": False,
@@ -553,7 +566,7 @@ def evaluate_lms_student_comments(
             shallow_count += 1
 
     failed_count = missing_count + shallow_count
-    issues: list[str] = []
+    issues: list[Any] = []
 
     if is_checkpoint:
         if missing_count == attended_count:
@@ -592,7 +605,10 @@ def evaluate_lms_student_comments(
 
     if overflow_records:
         issues.append(
-            f"[LMS] Danh sách học viên vượt giới hạn kiểm tra ({raw_total_records} > {MAX_LMS_STUDENTS_PER_SLOT} HS), cần kiểm tra thủ công"
+            make_structured_issue(
+                ISSUE_CODE_LMS_MANUAL_CHECK,
+                f"[LMS] Danh sách học viên vượt giới hạn kiểm tra ({raw_total_records} > {MAX_LMS_STUDENTS_PER_SLOT} HS), cần kiểm tra thủ công",
+            )
         )
 
     return {
@@ -615,8 +631,7 @@ def evaluate_lms_slot_quality(
     lesson: str | int | None = "",
 ) -> dict[str, Any]:
     """Evaluate both lesson summary and student comments for one LMS slot."""
-    lesson_num = _parse_lesson_number(lesson)
-    if lesson_num == 14:
+    if is_lesson_14(lesson):
         return {
             "is_exempt": True,
             "is_checkpoint": False,
@@ -635,7 +650,10 @@ def evaluate_lms_slot_quality(
             "attended_count": 0,
             "failed_comment_count": 0,
             "issues": [
-                "[LMS] Chưa kiểm tra được dữ liệu buổi học trên LMS, cần kiểm tra thủ công"
+                make_structured_issue(
+                    ISSUE_CODE_LMS_MANUAL_CHECK,
+                    "[LMS] Chưa kiểm tra được dữ liệu buổi học trên LMS, cần kiểm tra thủ công",
+                )
             ],
         }
 
@@ -648,7 +666,10 @@ def evaluate_lms_slot_quality(
             "attended_count": 0,
             "failed_comment_count": 0,
             "issues": [
-                "[LMS] Vượt giới hạn số lớp kiểm tra LMS trong một đợt, cần kiểm tra thủ công"
+                make_structured_issue(
+                    ISSUE_CODE_LMS_MANUAL_CHECK,
+                    "[LMS] Vượt giới hạn số lớp kiểm tra LMS trong một đợt, cần kiểm tra thủ công",
+                )
             ],
         }
     if bool(slot_data.get("duplicate_class")):
@@ -660,7 +681,10 @@ def evaluate_lms_slot_quality(
             "attended_count": 0,
             "failed_comment_count": 0,
             "issues": [
-                "[LMS] Phát hiện trùng mã lớp trên LMS, cần kiểm tra thủ công"
+                make_structured_issue(
+                    ISSUE_CODE_LMS_MANUAL_CHECK,
+                    "[LMS] Phát hiện trùng mã lớp trên LMS, cần kiểm tra thủ công",
+                )
             ],
         }
     if bool(slot_data.get("missing_class")):
@@ -672,7 +696,10 @@ def evaluate_lms_slot_quality(
             "attended_count": 0,
             "failed_comment_count": 0,
             "issues": [
-                "[LMS] Không tìm thấy dữ liệu lớp trên LMS, cần kiểm tra thủ công"
+                make_structured_issue(
+                    ISSUE_CODE_LMS_MANUAL_CHECK,
+                    "[LMS] Không tìm thấy dữ liệu lớp trên LMS, cần kiểm tra thủ công",
+                )
             ],
         }
     if bool(slot_data.get("fetch_error")):
@@ -684,7 +711,10 @@ def evaluate_lms_slot_quality(
             "attended_count": 0,
             "failed_comment_count": 0,
             "issues": [
-                "[LMS] Không tải được đầy đủ dữ liệu buổi học từ LMS, cần kiểm tra thủ công"
+                make_structured_issue(
+                    ISSUE_CODE_LMS_MANUAL_CHECK,
+                    "[LMS] Không tải được đầy đủ dữ liệu buổi học từ LMS, cần kiểm tra thủ công",
+                )
             ],
         }
     checkpoint = is_checkpoint_session(
@@ -699,15 +729,18 @@ def evaluate_lms_slot_quality(
         is_checkpoint=checkpoint,
         lesson=lesson,
     )
-    issues: list[str] = []
+    issues: list[Any] = []
     if summary_eval["issue"]:
         issues.append(summary_eval["issue"])
     issues.extend(comments_eval["issues"])
     if bool(slot_data.get("truncated")) and not any(
-        "vượt giới hạn" in item for item in issues
+        "vượt giới hạn" in issue_text(item) for item in issues
     ):
         issues.append(
-            "[LMS] Dữ liệu buổi học trên LMS vượt giới hạn kiểm tra, cần kiểm tra thủ công"
+            make_structured_issue(
+                ISSUE_CODE_LMS_MANUAL_CHECK,
+                "[LMS] Dữ liệu buổi học trên LMS vượt giới hạn kiểm tra, cần kiểm tra thủ công",
+            )
         )
     return {
         "is_exempt": False,
@@ -756,30 +789,13 @@ def evaluate_zalo_content_issues(
     """Inspect a Zalo scan result for wrong date, wrong lesson number, or wrong lesson title."""
     if not isinstance(item, dict):
         return []
-    if (
-        "Miễn" in str(item.get("status") or "")
-        or str(item.get("evidence_state") or "").strip() == "LESSON_14_EXEMPTION"
-    ):
-        return []
-    raw_st_check = item.get("scan_target")
-    st_check: dict[str, Any] = raw_st_check if isinstance(raw_st_check, dict) else {}
-    raw_ev_check = item.get("evidence")
-    ev_check: dict[str, Any] = raw_ev_check if isinstance(raw_ev_check, dict) else {}
-    raw_ctx_check = ev_check.get("date_context")
-    ctx_check: dict[str, Any] = raw_ctx_check if isinstance(raw_ctx_check, dict) else {}
-    if (
-        _parse_lesson_number(
-            st_check.get("lesson")
-            or ctx_check.get("target_lesson")
-            or item.get("lesson")
-        )
-        == 14
-    ):
+    evidence_state = str(item.get("evidence_state") or "").strip().upper()
+    if is_lesson_14(item) or evidence_state not in SUBMITTED_EVIDENCE_STATES:
         return []
     issues: list[str] = []
     seen: set[str] = set()
 
-    def _add(msg: str) -> None:
+    def _add(msg: str, *, code: str = "", severity: str = "") -> None:
         cleaned = " ".join(str(msg or "").split()).strip(" ;")
         if not cleaned:
             return
@@ -790,7 +806,9 @@ def evaluate_zalo_content_issues(
         norm = fold_text(re.sub(r"^\[[^\]]+\]\s*", "", cleaned))
         if norm and norm not in seen:
             seen.add(norm)
-            issues.append(cleaned)
+            issues.append(
+                StructuredIssueStr(cleaned, code=code, severity=severity)
+            )
 
     raw_st = item.get("scan_target")
     st: dict[str, Any] = raw_st if isinstance(raw_st, dict) else {}
@@ -802,30 +820,54 @@ def evaluate_zalo_content_issues(
     clf: dict[str, Any] = raw_clf if isinstance(raw_clf, dict) else {}
     raw_cands = clf.get("candidates")
     candidates: list[Any] = raw_cands if isinstance(raw_cands, list) else []
-    last_cand: dict[str, Any] = (
-        candidates[-1]
-        if candidates and isinstance(candidates[-1], dict)
+    matched_cand: dict[str, Any] = {}
+    for cand in reversed(candidates):
+        if not isinstance(cand, dict):
+            continue
+        raw_cand_tm = cand.get("target_match")
+        if isinstance(raw_cand_tm, dict):
+            if raw_cand_tm.get("matches") is True:
+                matched_cand = cand
+                break
+            continue
+        if str(cand.get("decision") or "").strip().upper().startswith("SUBMITTED"):
+            matched_cand = cand
+            break
+    raw_tm = matched_cand.get("target_match")
+    tm: dict[str, Any] = (
+        raw_tm
+        if isinstance(raw_tm, dict) and raw_tm.get("matches") is True
         else {}
     )
-    raw_tm = last_cand.get("target_match")
-    tm: dict[str, Any] = raw_tm if isinstance(raw_tm, dict) else {}
 
+    target_match_decision = str(
+        ctx.get("target_match_decision")
+        or tm.get("decision")
+        or ""
+    ).strip().upper()
     target_match_note = str(
         ctx.get("target_match_note")
         or tm.get("note")
         or ""
     ).strip()
     if target_match_note:
-        _add(target_match_note)
+        note_code = ""
+        note_sev = ""
+        if target_match_decision == "TARGET_SAME_DAY_NO_DATE":
+            note_code = ISSUE_CODE_ZALO_REPORT_NO_DATE
+            note_sev = SEVERITY_NOTE
+        elif target_match_decision == "TARGET_SAME_DAY_WRONG_DATE":
+            note_code = ISSUE_CODE_ZALO_REPORT_WRONG_DATE
+            note_sev = SEVERITY_NOTE
+        _add(target_match_note, code=note_code, severity=note_sev)
 
-    expected_lesson = _parse_lesson_number(
-        st.get("lesson") or ctx.get("target_lesson") or item.get("lesson")
-    )
-    if expected_lesson == 14:
+    raw_lesson = st.get("lesson") or ctx.get("target_lesson") or item.get("lesson")
+    if is_lesson_14(raw_lesson):
         return []
+    expected_lesson = _parse_lesson_number(raw_lesson)
     content_lesson = _parse_lesson_number(
         ctx.get("content_lesson")
-        or last_cand.get("content_lesson")
+        or matched_cand.get("content_lesson")
         or item.get("content_lesson")
     )
     folded_match_note = fold_text(target_match_note)
@@ -850,7 +892,7 @@ def evaluate_zalo_content_issues(
 
     reported_title = str(
         ctx.get("reported_lesson_title")
-        or last_cand.get("reported_lesson_title")
+        or matched_cand.get("reported_lesson_title")
         or item.get("reported_lesson_title")
         or extract_report_lesson_title(item.get("raw_content"))
         or ""
@@ -1130,6 +1172,11 @@ async def fetch_lms_class_slots_via_page(
                     data {
                         name
                         slots {
+                            _id
+                            index
+                            date
+                            startTime
+                            endTime
                             summary
                             studentAttendance {
                                 student {
@@ -1154,6 +1201,14 @@ async def fetch_lms_class_slots_via_page(
                 const rawAtt = Array.isArray(s && s.studentAttendance) ? s.studentAttendance : null;
                 const attTruncated = Array.isArray(rawAtt) && rawAtt.length > maxStudents;
                 return {
+                    _id: (s && s._id != null) ? String(s._id).slice(0, 64) : '',
+                    index: (s && typeof s.index === 'number' && Number.isFinite(s.index)) ? s.index : null,
+                    date: (s && typeof s.date === 'string') ? s.date.slice(0, 64) : '',
+                    startTime: (s && typeof s.startTime === 'string') ? s.startTime.slice(0, 64) : '',
+                    endTime: (s && typeof s.endTime === 'string') ? s.endTime.slice(0, 64) : '',
+                    ...(s && typeof s.status === 'string' ? { status: s.status.slice(0, 64) } : {}),
+                    ...(s && typeof s.cancelled === 'boolean' ? { cancelled: s.cancelled } : {}),
+                    ...(s && typeof s.isCancelled === 'boolean' ? { isCancelled: s.isCancelled } : {}),
                     summary: (s && typeof s.summary === 'string') ? s.summary.slice(0, 6000) : '',
                     truncated: Boolean(slotsTruncated || attTruncated),
                     studentAttendance: Array.isArray(rawAtt)
@@ -1456,6 +1511,247 @@ async def fetch_lms_class_slots_via_page(
                 await temp_page.close()
 
 
+def _slot_timestamp_to_hcm_date_iso(raw_val: Any) -> str | None:
+    """Convert an LMS slot date/startTime string to Asia/Ho_Chi_Minh YYYY-MM-DD."""
+    if not isinstance(raw_val, str):
+        return None
+    text = raw_val.strip()
+    if not text:
+        return None
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+        try:
+            return datetime.strptime(text, "%Y-%m-%d").date().isoformat()
+        except ValueError:
+            return None
+    iso_text = text[:-1] + "+00:00" if text.endswith(("Z", "z")) else text
+    try:
+        dt = datetime.fromisoformat(iso_text)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        return None
+    return dt.astimezone(BUSINESS_TIMEZONE).date().isoformat()
+
+
+def _extract_lms_slot_date_iso(slot: Mapping[str, Any]) -> str | None:
+    """Return the slot's YYYY-MM-DD in Asia/Ho_Chi_Minh, or None if missing/conflicting."""
+    parsed_dates: set[str] = set()
+    has_raw_date = False
+    for key in ("date", "startTime", "start_time", "class_date_iso", "slot_date"):
+        raw = slot.get(key)
+        if raw is not None and str(raw).strip():
+            has_raw_date = True
+            converted = _slot_timestamp_to_hcm_date_iso(raw)
+            if converted is None:
+                return None
+            parsed_dates.add(converted)
+    if not has_raw_date or len(parsed_dates) != 1:
+        return None
+    return next(iter(parsed_dates))
+
+
+def _extract_lms_slot_lesson_number(slot: Mapping[str, Any]) -> tuple[bool, int | None]:
+    """Return (has_lesson_field, 1-based lesson number) for a ClassSlot."""
+    if "index" in slot and slot.get("index") is not None:
+        raw_idx = slot.get("index")
+        if isinstance(raw_idx, int) and not isinstance(raw_idx, bool) and raw_idx >= 0:
+            return True, raw_idx + 1
+        return True, None
+    if "lesson" in slot and slot.get("lesson") is not None:
+        return True, _parse_lesson_number(slot.get("lesson"))
+    return False, None
+
+
+def _is_lms_slot_cancelled(slot: Mapping[str, Any]) -> bool:
+    """Return True only when a slot carries an explicit verified cancellation marker."""
+    if (
+        slot.get("cancelled") is True
+        or slot.get("isCancelled") is True
+        or slot.get("is_cancelled") is True
+    ):
+        return True
+    status_val = str(slot.get("status") or "").strip().upper()
+    return status_val in {"CANCELLED", "CANCELED", "CANCEL", "HUY", "ĐÃ HỦY", "DA HUY"}
+
+
+def _resolve_target_class_date_iso(
+    result: Mapping[str, Any],
+    st_dict: Mapping[str, Any] | None,
+    ctx: Mapping[str, Any],
+) -> str | None:
+    """Resolve the authoritative BCNB target date (YYYY-MM-DD) for LMS slot matching."""
+    for candidate in (
+        st_dict.get("class_date_iso") if st_dict else None,
+        st_dict.get("ngay_hoc_iso") if st_dict else None,
+        ctx.get("target_class_date"),
+        ctx.get("bcnb_class_date_iso"),
+        result.get("ngay_hoc_iso"),
+        result.get("class_date_iso"),
+    ):
+        iso_val = _slot_timestamp_to_hcm_date_iso(candidate)
+        if iso_val is not None:
+            return iso_val
+    raw_year = (
+        (st_dict.get("year") if st_dict else None)
+        or ctx.get("target_year")
+        or result.get("year")
+    )
+    default_year: int | None = None
+    with contextlib.suppress(TypeError, ValueError):
+        parsed_year = int(str(raw_year).strip())
+        if 2000 <= parsed_year <= 2100:
+            default_year = parsed_year
+    for raw_date in (
+        st_dict.get("class_date") if st_dict else None,
+        st_dict.get("ngay_hoc") if st_dict else None,
+        ctx.get("bcnb_class_date"),
+        result.get("ngay_hoc"),
+        result.get("class_date"),
+    ):
+        text = str(raw_date or "").strip()
+        if not text:
+            continue
+        iso_direct = _slot_timestamp_to_hcm_date_iso(text)
+        if iso_direct is not None:
+            return iso_direct
+        if default_year is not None or re.search(r"\b\d{4}\b", text):
+            parsed = parse_class_date(
+                text,
+                default_year=default_year or 2026,
+                timezone_info=BUSINESS_TIMEZONE,
+            )
+            if parsed is not None:
+                return parsed.date().isoformat()
+    return None
+
+
+def select_matching_lms_slot(
+    class_slots: Sequence[Mapping[str, Any]],
+    *,
+    target_date_iso: str | None,
+    lesson_num: int,
+) -> tuple[dict[str, Any] | None, dict[str, str] | None]:
+    """Select the unique LMS slot matching target_date_iso and lesson_num.
+
+    Returns ``(matched_slot, None)`` when exactly 1 active slot matches, or
+    ``(None, manual_check_issue)`` in all other cases (never falls back by position).
+    """
+    if lesson_num > MAX_LMS_SLOTS_PER_CLASS:
+        return (
+            None,
+            make_structured_issue(
+                ISSUE_CODE_LMS_MANUAL_CHECK,
+                f"[LMS] Buổi {lesson_num} vượt giới hạn kiểm tra LMS ({MAX_LMS_SLOTS_PER_CLASS} buổi), cần kiểm tra thủ công",
+            ),
+        )
+    if not target_date_iso:
+        return (
+            None,
+            make_structured_issue(
+                ISSUE_CODE_LMS_MANUAL_CHECK,
+                f"[LMS] Thiếu ngày học của Buổi {lesson_num} để đối chiếu LMS, cần kiểm tra thủ công",
+            ),
+        )
+    dict_slots = [dict(s) for s in class_slots if isinstance(s, Mapping)]
+    if not dict_slots:
+        return (
+            None,
+            make_structured_issue(
+                ISSUE_CODE_LMS_MANUAL_CHECK,
+                "[LMS] Chưa kiểm tra được dữ liệu buổi học trên LMS, cần kiểm tra thủ công",
+            ),
+        )
+    active_slots = [s for s in dict_slots if not _is_lms_slot_cancelled(s)]
+    if not active_slots:
+        return (
+            None,
+            make_structured_issue(
+                ISSUE_CODE_LMS_MANUAL_CHECK,
+                f"[LMS] Slot ngày {target_date_iso} (Buổi {lesson_num}) trên LMS đã bị huỷ, cần kiểm tra thủ công",
+            ),
+        )
+    matched_slots: list[dict[str, Any]] = []
+    wrong_lesson_on_date: list[dict[str, Any]] = []
+    missing_lesson_on_date: list[dict[str, Any]] = []
+    has_any_valid_date = False
+    cancelled_on_target_date = any(
+        _is_lms_slot_cancelled(s) and _extract_lms_slot_date_iso(s) == target_date_iso
+        for s in dict_slots
+    )
+    for slot in active_slots:
+        slot_date_iso = _extract_lms_slot_date_iso(slot)
+        if slot_date_iso is not None:
+            has_any_valid_date = True
+        if slot_date_iso != target_date_iso:
+            continue
+        has_lesson, slot_lesson = _extract_lms_slot_lesson_number(slot)
+        if not has_lesson:
+            missing_lesson_on_date.append(slot)
+        elif slot_lesson == lesson_num:
+            matched_slots.append(slot)
+        else:
+            wrong_lesson_on_date.append(slot)
+
+    if len(matched_slots) == 1 and not missing_lesson_on_date:
+        return matched_slots[0], None
+    if len(matched_slots) > 1 or (matched_slots and missing_lesson_on_date):
+        total_ambiguous = len(matched_slots) + len(missing_lesson_on_date)
+        return (
+            None,
+            make_structured_issue(
+                ISSUE_CODE_LMS_MANUAL_CHECK,
+                f"[LMS] Phát hiện {total_ambiguous} slot trùng ngày {target_date_iso} cho Buổi {lesson_num} trên LMS, cần kiểm tra thủ công",
+            ),
+        )
+    if missing_lesson_on_date:
+        return (
+            None,
+            make_structured_issue(
+                ISSUE_CODE_LMS_MANUAL_CHECK,
+                f"[LMS] Thiếu thông tin số buổi của slot ngày {target_date_iso} (Buổi {lesson_num}) trên LMS, cần kiểm tra thủ công",
+            ),
+        )
+    if wrong_lesson_on_date:
+        return (
+            None,
+            make_structured_issue(
+                ISSUE_CODE_LMS_MANUAL_CHECK,
+                f"[LMS] Slot ngày {target_date_iso} trên LMS lệch số buổi so với Buổi {lesson_num}, cần kiểm tra thủ công",
+            ),
+        )
+    if cancelled_on_target_date:
+        return (
+            None,
+            make_structured_issue(
+                ISSUE_CODE_LMS_MANUAL_CHECK,
+                f"[LMS] Slot ngày {target_date_iso} (Buổi {lesson_num}) trên LMS đã bị huỷ, cần kiểm tra thủ công",
+            ),
+        )
+    if any(bool(s.get("truncated")) for s in dict_slots):
+        return (
+            None,
+            make_structured_issue(
+                ISSUE_CODE_LMS_MANUAL_CHECK,
+                f"[LMS] Buổi {lesson_num} vượt giới hạn kiểm tra LMS ({MAX_LMS_SLOTS_PER_CLASS} buổi), cần kiểm tra thủ công",
+            ),
+        )
+    if not has_any_valid_date:
+        return (
+            None,
+            make_structured_issue(
+                ISSUE_CODE_LMS_MANUAL_CHECK,
+                f"[LMS] Thiếu thông tin ngày học của Buổi {lesson_num} trên LMS, cần kiểm tra thủ công",
+            ),
+        )
+    return (
+        None,
+        make_structured_issue(
+            ISSUE_CODE_LMS_MANUAL_CHECK,
+            f"[LMS] Không tìm thấy slot khớp ngày {target_date_iso} (Buổi {lesson_num}) trên LMS, cần kiểm tra thủ công",
+        ),
+    )
+
+
 def inspect_and_attach_quality_issues(
     scan_results: list[dict[str, Any]],
     *,
@@ -1475,12 +1771,12 @@ def inspect_and_attach_quality_issues(
         ev_dict: dict[str, Any] = ev if isinstance(ev, dict) else {}
         raw_ctx = ev_dict.get("date_context")
         ctx: dict[str, Any] = raw_ctx if isinstance(raw_ctx, dict) else {}
-        class_code = str(
+        class_code = normalize_class_code(
             (st_dict.get("class_code") if st_dict else "")
             or ctx.get("target_class_code")
             or result.get("class_code")
             or ""
-        ).strip().upper()
+        )
         lesson_str = str(
             (st_dict.get("lesson") if st_dict else "")
             or ctx.get("target_lesson")
@@ -1493,45 +1789,45 @@ def inspect_and_attach_quality_issues(
             or ""
         ).strip()
         lesson_num = _parse_lesson_number(lesson_str)
-        if lesson_num == 14 or "Miễn" in str(result.get("status") or ""):
+        if is_lesson_14(result, st_dict):
             continue
 
         lms_summary_clean = str(result.get("lms_lesson_summary") or "").strip()
-        lms_issues: list[str] = []
+        lms_issues: list[Any] = []
         existing_lms_issues = result.get("lms_quality_issues")
         if isinstance(existing_lms_issues, list):
-            lms_issues.extend(str(x).strip() for x in existing_lms_issues if str(x).strip())
+            lms_issues.extend(
+                dict(x) if isinstance(x, Mapping) else str(x).strip()
+                for x in existing_lms_issues
+                if issue_text(x)
+            )
 
         slot_evaluated = False
         if has_lms_map:
             slot_evaluated = True
             if not class_code or lesson_num is None:
                 lms_issues = [
-                    "[LMS] Thiếu mã lớp hoặc số buổi để kiểm tra LMS, cần kiểm tra thủ công"
+                    make_structured_issue(
+                        ISSUE_CODE_LMS_MANUAL_CHECK,
+                        "[LMS] Thiếu mã lớp hoặc số buổi để kiểm tra LMS, cần kiểm tra thủ công",
+                    )
                 ]
             elif class_code not in slots_map:
                 lms_issues = [
-                    "[LMS] Chưa kiểm tra được dữ liệu LMS của lớp, cần kiểm tra thủ công"
+                    make_structured_issue(
+                        ISSUE_CODE_LMS_MANUAL_CHECK,
+                        "[LMS] Chưa kiểm tra được dữ liệu LMS của lớp, cần kiểm tra thủ công",
+                    )
                 ]
             else:
                 class_slots = slots_map[class_code]
-                slot_idx = lesson_num - 1
                 if not isinstance(class_slots, list) or len(class_slots) == 0:
                     lms_issues = [
-                        "[LMS] Chưa kiểm tra được dữ liệu buổi học trên LMS, cần kiểm tra thủ công"
+                        make_structured_issue(
+                            ISSUE_CODE_LMS_MANUAL_CHECK,
+                            "[LMS] Chưa kiểm tra được dữ liệu buổi học trên LMS, cần kiểm tra thủ công",
+                        )
                     ]
-                elif 0 <= slot_idx < len(class_slots):
-                    slot_eval = evaluate_lms_slot_quality(
-                        class_slots[slot_idx],
-                        class_code=class_code,
-                        khoi=khoi_str,
-                        lesson=lesson_num,
-                    )
-                    lms_summary_clean = str(slot_eval.get("summary_clean") or "").strip()
-                    lms_issues = list(slot_eval.get("issues") or [])
-                    result["lms_is_checkpoint"] = bool(slot_eval.get("is_checkpoint"))
-                    if st_dict is not None:
-                        st_dict["lms_is_checkpoint"] = bool(slot_eval.get("is_checkpoint"))
                 else:
                     first_slot = class_slots[0] if isinstance(class_slots[0], dict) else {}
                     if any(
@@ -1550,31 +1846,129 @@ def inspect_and_attach_quality_issues(
                             lesson=lesson_num,
                         )
                         lms_issues = list(slot_eval.get("issues") or [])
-                    elif slot_idx >= MAX_LMS_SLOTS_PER_CLASS or any(
-                        isinstance(s, dict) and s.get("truncated") for s in class_slots
-                    ):
-                        lms_issues = [
-                            f"[LMS] Buổi {lesson_num} vượt giới hạn kiểm tra LMS ({MAX_LMS_SLOTS_PER_CLASS} buổi), cần kiểm tra thủ công"
-                        ]
                     else:
-                        lms_issues = [
-                            f"[LMS] Chưa kiểm tra được dữ liệu Buổi {lesson_num} trên LMS, cần kiểm tra thủ công"
-                        ]
+                        target_date_iso = _resolve_target_class_date_iso(
+                            result, st_dict, ctx
+                        )
+                        matched_slot, slot_issue = select_matching_lms_slot(
+                            class_slots,
+                            target_date_iso=target_date_iso,
+                            lesson_num=lesson_num,
+                        )
+                        if matched_slot is not None:
+                            slot_eval = evaluate_lms_slot_quality(
+                                matched_slot,
+                                class_code=class_code,
+                                khoi=khoi_str,
+                                lesson=lesson_num,
+                            )
+                            lms_summary_clean = str(
+                                slot_eval.get("summary_clean") or ""
+                            ).strip()
+                            lms_issues = list(slot_eval.get("issues") or [])
+                            result["lms_is_checkpoint"] = bool(
+                                slot_eval.get("is_checkpoint")
+                            )
+                            if st_dict is not None:
+                                st_dict["lms_is_checkpoint"] = bool(
+                                    slot_eval.get("is_checkpoint")
+                                )
+                        else:
+                            lms_issues = [slot_issue] if slot_issue else []
 
         if slot_evaluated or lms_summary_clean:
             result["lms_lesson_summary"] = lms_summary_clean
             if st_dict is not None:
                 st_dict["lms_lesson_summary"] = lms_summary_clean
 
+        prior_zalo_issues: list[Any] = []
+        prior_lms_issues: list[Any] = []
+        seen_prior_zalo: set[str] = set()
+        seen_prior_lms: set[str] = set()
+        for src_obj in (result, st_dict or {}):
+            if not isinstance(src_obj, Mapping):
+                continue
+            for list_key in (
+                "zalo_content_issues",
+                "lms_quality_issues",
+                "quality_issues",
+            ):
+                for item in src_obj.get(list_key) or []:
+                    txt = issue_text(item)
+                    if not txt:
+                        continue
+                    upper_txt = txt.upper()
+                    if (
+                        upper_txt.startswith("[ZALO]")
+                        and "cần kiểm tra thủ công" not in txt
+                        and txt not in seen_prior_zalo
+                    ):
+                        seen_prior_zalo.add(txt)
+                        prior_zalo_issues.append(item)
+                    elif (
+                        upper_txt.startswith("[LMS]")
+                        and issue_code(item) != ISSUE_CODE_LMS_MANUAL_CHECK
+                        and txt not in seen_prior_lms
+                    ):
+                        seen_prior_lms.add(txt)
+                        prior_lms_issues.append(item)
+
+        lms_eval_indeterminate = (not slot_evaluated) or any(
+            issue_code(x) == ISSUE_CODE_LMS_MANUAL_CHECK
+            for x in lms_issues
+        )
+        if lms_eval_indeterminate and prior_lms_issues:
+            seen_lms = {issue_text(x) for x in lms_issues if issue_text(x)}
+            for prior_l in prior_lms_issues:
+                pt = issue_text(prior_l)
+                if pt and pt not in seen_lms:
+                    seen_lms.add(pt)
+                    lms_issues.append(prior_l)
+
         if slot_evaluated or lms_issues:
             result["lms_quality_issues"] = list(lms_issues)
             if st_dict is not None:
                 st_dict["lms_quality_issues"] = list(lms_issues)
 
-        zalo_issues = evaluate_zalo_content_issues(
-            result,
-            lms_summary_text=lms_summary_clean,
+        zalo_issues = list(
+            evaluate_zalo_content_issues(
+                result,
+                lms_summary_text=lms_summary_clean,
+            )
         )
+        ev_state = str(result.get("evidence_state") or "").strip().upper()
+        ev = result.get("evidence")
+        clf = ev.get("classifier_result") if isinstance(ev, Mapping) else None
+        decision = (
+            str((clf.get("decision") if isinstance(clf, Mapping) else "") or "")
+            .strip()
+            .upper()
+        )
+        zalo_eval_indeterminate = (
+            bool(str(result.get("error_code") or "").strip())
+            or str(result.get("scan_status") or "").strip().upper() == "FAILED"
+            or (not ev_state or ev_state not in VERIFIED_EVIDENCE_STATES)
+            or decision
+            in {
+                "SCAN_FAILED",
+                "NOT_EVALUATED",
+                "ZALO_SYNC_INCOMPLETE",
+                "GROUP_IDENTITY_MISMATCH",
+                "MESSAGE_CAP_REACHED",
+                "AI_SUGGESTED_REPORT_NEEDS_REVIEW",
+                "TARGET_SESSION_AMBIGUOUS",
+                "UI_SENT_AT_UNREADABLE",
+            }
+            or any("cần kiểm tra thủ công" in issue_text(x) for x in zalo_issues)
+        )
+        if zalo_eval_indeterminate and prior_zalo_issues:
+            seen_zalo = {issue_text(x) for x in zalo_issues if issue_text(x)}
+            for prior_z in prior_zalo_issues:
+                pt = issue_text(prior_z)
+                if pt and pt not in seen_zalo:
+                    seen_zalo.add(pt)
+                    zalo_issues.append(prior_z)
+
         if zalo_issues or "zalo_content_issues" in result or (
             st_dict is not None and "zalo_content_issues" in st_dict
         ):
@@ -1594,3 +1988,144 @@ def inspect_and_attach_quality_issues(
             result["quality_issues"] = combined_quality
             if st_dict is not None:
                 st_dict["quality_issues"] = list(combined_quality)
+        if has_lms_map and is_lms_fetch_unavailable(slots_map):
+            result["lms_fetch_unavailable"] = True
+            if st_dict is not None:
+                st_dict["lms_fetch_unavailable"] = True
+
+
+def is_lms_fetch_unavailable(
+    lms_slots_by_class: Mapping[str, Any] | None,
+    requested_classes: Sequence[str] | None = None,
+) -> bool:
+    """Return True when LMS fetch failed system-wide (every requested class had fetch_error or exception)."""
+    if not isinstance(lms_slots_by_class, Mapping):
+        return False
+    if bool(lms_slots_by_class.get("__lms_fetch_unavailable__")):
+        return True
+    raw_keys = (
+        requested_classes
+        if requested_classes is not None
+        else [k for k in lms_slots_by_class.keys() if not str(k).startswith("__")]
+    )
+    class_keys = [
+        normalize_class_code(k)
+        for k in raw_keys
+        if normalize_class_code(k)
+    ]
+    if not class_keys:
+        return False
+    inspected = 0
+    for code in class_keys:
+        slots = lms_slots_by_class.get(code)
+        if (
+            not isinstance(slots, Sequence)
+            or isinstance(slots, (str, bytes))
+            or len(slots) == 0
+        ):
+            return False
+        inspected += 1
+        if not all(
+            isinstance(s, Mapping) and bool(s.get("fetch_error")) for s in slots
+        ):
+            return False
+    return inspected > 0
+
+
+async def fetch_and_evaluate_lms_quality(
+    page: Any,
+    scan_results: list[dict[str, Any]],
+    *,
+    lms_slots_by_class: dict[str, list[dict[str, Any]]] | None = None,
+    lms_quality_gateway: Any = None,
+    allow_page_fallback: bool = False,
+) -> dict[str, list[dict[str, Any]]] | None:
+    """Shared helper to fetch LMS class slots (if needed) and attach quality issues onto scan_results."""
+    resolved_lms_slots: dict[str, list[dict[str, Any]]] | None = (
+        dict(lms_slots_by_class) if isinstance(lms_slots_by_class, dict) else None
+    )
+    active_gateway = lms_quality_gateway
+    if (
+        os.getenv("ZALO_QUALITY_ISOLATED") == "1"
+        and resolved_lms_slots is None
+        and type(active_gateway).__name__ == "PlaywrightLmsQualityGateway"
+    ):
+        active_gateway = None
+    if (
+        active_gateway is None
+        and resolved_lms_slots is None
+        and not allow_page_fallback
+        and os.getenv("ZALO_QUALITY_ISOLATED") != "1"
+        and page is not None
+        and hasattr(page, "evaluate")
+    ):
+        try:
+            from services.external_gateways import ExternalGateways
+
+            active_gateway = getattr(
+                ExternalGateways.production(), "lms_quality", None
+            )
+        except Exception:
+            active_gateway = None
+
+    if resolved_lms_slots is None:
+        candidate_codes = sorted(
+            {
+                normalize_class_code(
+                    (r.get("scan_target") or {}).get("class_code")
+                    if isinstance(r.get("scan_target"), dict)
+                    else r.get("class_code") or ""
+                )
+                for r in scan_results
+                if isinstance(r, dict)
+            }
+            - {""}
+        )
+        if active_gateway is not None:
+            if candidate_codes and hasattr(active_gateway, "fetch_class_slots"):
+                try:
+                    fetched = await active_gateway.fetch_class_slots(
+                        page, candidate_codes
+                    )
+                    if isinstance(fetched, dict):
+                        resolved_lms_slots = fetched
+                    else:
+                        resolved_lms_slots = {
+                            code: [{"fetch_error": True}]
+                            for code in candidate_codes
+                        }
+                except Exception:
+                    resolved_lms_slots = {
+                        code: [{"fetch_error": True}] for code in candidate_codes
+                    }
+            else:
+                resolved_lms_slots = {}
+        elif (
+            allow_page_fallback
+            and os.getenv("ZALO_QUALITY_ISOLATED") != "1"
+            and candidate_codes
+            and page is not None
+            and hasattr(page, "evaluate")
+        ):
+            try:
+                fetched_slots = await fetch_lms_class_slots_via_page(
+                    page, class_names=candidate_codes
+                )
+                if isinstance(fetched_slots, dict) and fetched_slots:
+                    resolved_lms_slots = fetched_slots
+            except Exception:
+                resolved_lms_slots = {
+                    code: [{"fetch_error": True}] for code in candidate_codes
+                }
+
+    inspect_and_attach_quality_issues(
+        scan_results,
+        lms_slots_by_class=resolved_lms_slots,
+    )
+    if is_lms_fetch_unavailable(resolved_lms_slots):
+        for r in scan_results:
+            if isinstance(r, dict):
+                r["lms_fetch_unavailable"] = True
+                if isinstance(r.get("scan_target"), dict):
+                    r["scan_target"]["lms_fetch_unavailable"] = True
+    return resolved_lms_slots

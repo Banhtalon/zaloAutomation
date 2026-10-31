@@ -18,7 +18,7 @@ from urllib.parse import urlsplit
 
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
-from core.time_utils import now_utc, parse_timestamp
+from core.time_utils import now_utc, parse_timestamp, utc_iso
 from db.backup import backup_job
 from googleform_autosubmit.config import Config
 from logger_utils import log_message
@@ -27,16 +27,28 @@ from repositories.zalo_batch_repository import (
     ZaloBatchRepository,
     canonical_target_key,
 )
-from services.bcnb_safety import verify_checkbox_persisted
+from services.bcnb_safety import (
+    resolve_row_proven_auto_issues,
+    verify_checkbox_persisted,
+)
 from services.lms_quality_service import (
-    fetch_lms_class_slots_via_page,
+    fetch_and_evaluate_lms_quality,
     inspect_and_attach_quality_issues,
+    is_lms_fetch_unavailable,
+)
+from services.report_status import (
+    ISSUE_CODE_LMS_MANUAL_CHECK,
+    is_lesson_14,
+    issue_code,
 )
 from services.zalo_bcnb_service import get_evidence_reference, update_bcnb_reports
 from services.zalo_discovery_service import _login_bcnb_if_needed
 from services.zalo_evidence import apply_lesson_14_exemption
 from services.zalo_safety import open_chat_matches
 from services.zalo_scan_evidence import (
+    DEFAULT_BATCH_MAX_MESSAGES,
+    EvidenceBoundsExceeded,
+    MESSAGE_CAP_REACHED_REASON,
     attach_zalo_sync_result,
     build_empty_evidence_result,
     ensure_zalo_history_synced,
@@ -169,6 +181,10 @@ TARGET_SEARCH_FILL_TIMEOUT_SECONDS = 5.0
 TARGET_SEARCH_RESULT_TIMEOUT_SECONDS = 5.0
 TARGET_SEARCH_IDLE_SECONDS = 2.0
 MAX_TARGET_RETRY_ATTEMPTS = 2
+TARGET_TIMEOUT = "TARGET_TIMEOUT"
+ZALO_TARGET_TIMEOUT_SECONDS = float(
+    getattr(Config, "ZALO_TARGET_TIMEOUT_SECONDS", 180)
+)
 
 ZALO_JOB_PHASE = "ZALO_SCAN"
 ZALO_JOB_REASON_QUEUED = "QUEUED"
@@ -735,6 +751,11 @@ async def prepare_frozen_scan_execution(
 
     admitted_targets = list(plan.get("targets") or [])
     previously_deferred = list(plan.get("deferred_targets") or [])
+    exempt_targets = [
+        target
+        for target in (plan.get("exempt_targets") or [])
+        if isinstance(target, dict)
+    ]
     selected_keys_raw = plan.get("selected_target_keys")
     if isinstance(selected_keys_raw, list):
         selected_key_set = {
@@ -752,6 +773,11 @@ async def prepare_frozen_scan_execution(
             if isinstance(target, dict)
             and canonical_target_key(target) in selected_key_set
         ]
+        exempt_targets = [
+            target
+            for target in exempt_targets
+            if canonical_target_key(target) in selected_key_set
+        ]
     ready_targets, newly_deferred = split_scan_targets_for_execution(
         admitted_targets,
         latest_week=plan.get("latest_week"),
@@ -759,6 +785,7 @@ async def prepare_frozen_scan_execution(
     )
     plan["targets"] = ready_targets
     plan["deferred_targets"] = [*previously_deferred, *newly_deferred]
+    plan["exempt_targets"] = exempt_targets
     if newly_deferred:
         log_message(
             f"Hoãn {len(newly_deferred)} lớp chưa đến giờ học; không quét và không tick BCNB.",
@@ -774,7 +801,7 @@ async def prepare_frozen_scan_execution(
         for target in ready_targets
         if isinstance(target, dict) and str(target.get("group_name", "")).strip()
     ]
-    if not groups and not reconciliation_only:
+    if not groups and not exempt_targets and not reconciliation_only:
         if newly_deferred:
             await job_repo.update_job(
                 job_id,
@@ -820,6 +847,41 @@ def _page_close_timeout_seconds() -> float:
             float(SETUP_PAGE_CLOSE_TIMEOUT_SECONDS),
         ),
     )
+
+
+class TargetTimeoutError(TimeoutError):
+    """Raised when one target exceeds the per-target scan timeout budget."""
+
+
+def _target_timeout_seconds(runtime: Any = None) -> float:
+    candidates: list[float] = []
+    for raw in (
+        getattr(runtime, "zalo_target_timeout_seconds", None)
+        if runtime is not None
+        else None,
+        ZALO_TARGET_TIMEOUT_SECONDS,
+        getattr(Config, "ZALO_TARGET_TIMEOUT_SECONDS", None),
+    ):
+        if raw is not None and not isinstance(raw, bool):
+            try:
+                val = float(raw)
+                if val > 0:
+                    candidates.append(val)
+            except (TypeError, ValueError):
+                continue
+    return max(0.001, min(candidates)) if candidates else 180.0
+
+
+async def _await_with_target_timeout(awaitable, *, timeout_seconds: float):
+    try:
+        return await asyncio.wait_for(
+            awaitable,
+            timeout=max(0.001, float(timeout_seconds)),
+        )
+    except (JobCancelledError, TargetSearchError, ZaloSetupError):
+        raise
+    except (asyncio.TimeoutError, TimeoutError) as exc:
+        raise TargetTimeoutError(TARGET_TIMEOUT) from exc
 
 
 async def _new_scan_page(session):
@@ -1302,6 +1364,8 @@ def build_zalo_job_progress(
     batch_summary: Mapping[str, Mapping[str, int]],
     halt_reason: str | None,
     dry_run: bool,
+    checker_note_failures: int = 0,
+    lms_fetch_unavailable: bool = False,
 ) -> dict[str, object]:
     """Build the stable job payload/message outcome envelope.
 
@@ -1434,6 +1498,14 @@ def build_zalo_job_progress(
         "items": list(scan_results),
         "scan_counts": dict(scan_counts),
         "write_counts": dict(write_counts),
+        "checker_note_failures": max(0, int(checker_note_failures)),
+        "lms_fetch_unavailable": bool(
+            lms_fetch_unavailable
+            or any(
+                isinstance(r, Mapping) and bool(r.get("lms_fetch_unavailable"))
+                for r in scan_results
+            )
+        ),
     }
 
 
@@ -1553,7 +1625,7 @@ async def _scan_one_target(
     group_name = str(target.get("group_name") or "").strip()
     person = str(target.get("person") or "Chưa xác định").strip()
     class_code = str(target.get("class_code") or "").strip()
-    if str(target.get("lesson") or "").strip() == "14":
+    if is_lesson_14(target.get("lesson")):
         result = _empty_result(
             target,
             today=today,
@@ -1745,25 +1817,44 @@ async def _scan_one_target(
     scan_extra_kwargs: dict[str, Any] = {}
     if ai_report_classifier is not None:
         scan_extra_kwargs["ai_report_classifier"] = ai_report_classifier
-    result = await scan_open_zalo_chat(
-        page,
-        job_id=job_id,
-        screenshots_dir=screenshots_dir,
-        group_name=group_name,
-        actual_group_name=header_text,
-        person=person,
-        class_date_str=str(target.get("class_date") or ""),
-        scan_target=target,
-        today=today,
-        ensure_not_cancelled=lambda: job_repo.ensure_not_cancelled(job_id),
-        worker_id=worker_id,
-        attempt=attempt,
-        capture_max_scrolls=capture_max_scrolls,
-        capture_max_messages=capture_max_messages,
-        capture_window_start=capture_window_start,
-        capture_window_end=capture_window_end,
-        **scan_extra_kwargs,
+    effective_max_messages = (
+        capture_max_messages
+        if capture_max_messages is not None
+        else DEFAULT_BATCH_MAX_MESSAGES
     )
+    try:
+        result = await _await_with_target_timeout(
+            scan_open_zalo_chat(
+                page,
+                job_id=job_id,
+                screenshots_dir=screenshots_dir,
+                group_name=group_name,
+                actual_group_name=header_text,
+                person=person,
+                class_date_str=str(target.get("class_date") or ""),
+                scan_target=target,
+                today=today,
+                ensure_not_cancelled=lambda: job_repo.ensure_not_cancelled(job_id),
+                worker_id=worker_id,
+                attempt=attempt,
+                capture_max_scrolls=capture_max_scrolls,
+                capture_max_messages=effective_max_messages,
+                capture_window_start=capture_window_start,
+                capture_window_end=capture_window_end,
+                **scan_extra_kwargs,
+            ),
+            timeout_seconds=_target_timeout_seconds(),
+        )
+    except EvidenceBoundsExceeded:
+        result = build_empty_evidence_result(
+            group=group_name,
+            person=person,
+            actual_group_name=header_text or None,
+            scanned_at=now_utc(),
+            today=today,
+            reason=MESSAGE_CAP_REACHED_REASON,
+            classifier_decision="MESSAGE_CAP_REACHED",
+        )
     context = result.setdefault("evidence", {}).setdefault("date_context", {})
     context.update(
         {
@@ -1823,14 +1914,32 @@ async def run_parallel_zalo_batch(
     targets = [
         item for item in scan_plan.get("targets", []) if isinstance(item, dict)
     ]
+    exempt_targets = [
+        item
+        for item in scan_plan.get("exempt_targets", [])
+        if isinstance(item, dict)
+    ]
     existing = await repository.list_for_job(job_id)
     if existing:
         await repository.recover_interrupted(job_id)
         existing = await repository.list_for_job(job_id)
     else:
-        await repository.seed_targets(job_id, targets)
+        if not targets and not exempt_targets:
+            await repository.seed_targets(job_id, targets)
+        else:
+            if targets:
+                await repository.seed_targets(job_id, targets)
+            if exempt_targets and hasattr(repository, "seed_exempt_targets"):
+                await repository.seed_exempt_targets(
+                    job_id,
+                    exempt_targets,
+                    applied_at=(
+                        utc_iso(scan_started_at) if scan_started_at else None
+                    ),
+                )
+            existing = await repository.list_for_job(job_id)
     policy = BatchFailurePolicy(
-        total_targets=len(targets),
+        total_targets=len(targets) + len(exempt_targets),
         systemic_limit=runtime.batch_systemic_failure_limit,
         abnormal_percent_limit=runtime.batch_abnormal_percent_limit,
     )
@@ -2080,26 +2189,29 @@ async def run_parallel_zalo_batch(
                 assert page is not None
                 assert sync_result is not None
                 try:
-                    retried = await _scan_one_target(
-                        page,
-                        job_id=job_id,
-                        target=source,
-                        sync_result=sync_result,
-                        screenshots_dir=screenshots_dir,
-                        today=today,
-                        job_repo=job_repo,
-                        worker_id=owner,
-                        attempt=2,
-                        **(
-                            {
-                                "ai_report_classifier": getattr(
-                                    runtime.external, "zalo_ai_classifier", None
-                                )
-                            }
-                            if getattr(runtime.external, "zalo_ai_classifier", None)
-                            is not None
-                            else {}
+                    retried = await _await_with_target_timeout(
+                        _scan_one_target(
+                            page,
+                            job_id=job_id,
+                            target=source,
+                            sync_result=sync_result,
+                            screenshots_dir=screenshots_dir,
+                            today=today,
+                            job_repo=job_repo,
+                            worker_id=owner,
+                            attempt=2,
+                            **(
+                                {
+                                    "ai_report_classifier": getattr(
+                                        runtime.external, "zalo_ai_classifier", None
+                                    )
+                                }
+                                if getattr(runtime.external, "zalo_ai_classifier", None)
+                                is not None
+                                else {}
+                            ),
                         ),
+                        timeout_seconds=_target_timeout_seconds(runtime),
                     )
                 except JobCancelledError:
                     raise
@@ -2224,69 +2336,104 @@ async def run_parallel_zalo_batch(
                         return
                     source = dict(claimed.get("source") or {})
                     try:
-                        result = await _scan_one_target(
-                            page,
-                            job_id=job_id,
-                            target=source,
-                            sync_result=sync_result,
-                            screenshots_dir=screenshots_dir,
-                            today=today,
-                            job_repo=job_repo,
-                            worker_id=owner,
-                            attempt=1,
-                            **(
-                                {
-                                    "ai_report_classifier": getattr(
-                                        runtime.external, "zalo_ai_classifier", None
-                                    )
-                                }
-                                if getattr(runtime.external, "zalo_ai_classifier", None)
-                                is not None
-                                else {}
-                            ),
-                        )
-                    except TargetSearchError as first_error:
-                        retry_result, terminal_error = await retry_target_once(source)
-                        if terminal_error is not None:
-                            result = _target_search_failure_result(
-                                source,
-                                today=today,
-                                error=terminal_error,
+                        if page is None:
+                            refresh_error = await setup_fresh_retry_page()
+                            if refresh_error is not None:
+                                result = _setup_failure_result(
+                                    source,
+                                    today=today,
+                                    setup_error=refresh_error,
+                                )
+                                await repository.complete_scan(
+                                    claimed["id"],
+                                    status="FAILED",
+                                    result=result,
+                                    error_code=refresh_error.code,
+                                    error_message=refresh_error.safe_message,
+                                )
+                                await remember_result(claimed, result)
+                                await retire_scan_worker(owner, refresh_error.code)
+                                await policy.record(
+                                    abnormal=True,
+                                    systemic=False,
+                                    reason=refresh_error.code,
+                                )
+                                return
+                        try:
+                            result = await _await_with_target_timeout(
+                                _scan_one_target(
+                                    page,
+                                    job_id=job_id,
+                                    target=source,
+                                    sync_result=sync_result,
+                                    screenshots_dir=screenshots_dir,
+                                    today=today,
+                                    job_repo=job_repo,
+                                    worker_id=owner,
+                                    attempt=1,
+                                    **(
+                                        {
+                                            "ai_report_classifier": getattr(
+                                                runtime.external,
+                                                "zalo_ai_classifier",
+                                                None,
+                                            )
+                                        }
+                                        if getattr(
+                                            runtime.external,
+                                            "zalo_ai_classifier",
+                                            None,
+                                        )
+                                        is not None
+                                        else {}
+                                    ),
+                                ),
+                                timeout_seconds=_target_timeout_seconds(runtime),
                             )
-                            await repository.complete_scan(
-                                claimed["id"],
-                                status="FAILED",
-                                result=result,
-                                error_code=terminal_error.code,
-                                error_message=terminal_error.safe_message,
+                        except TargetSearchError as first_error:
+                            retry_result, terminal_error = await retry_target_once(
+                                source
                             )
-                            await remember_result(claimed, result)
-                            await retire_scan_worker(owner, terminal_error.code)
-                            await policy.record(
-                                abnormal=True,
-                                systemic=False,
-                                reason=terminal_error.code,
-                            )
-                            return
-                        if retry_result is None:
-                            # Defensive guard: a retry either returns a result
-                            # or a terminal typed error, never a sticky state.
-                            result = _target_search_failure_result(
-                                source,
-                                today=today,
-                                error=first_error,
-                            )
-                            await repository.complete_scan(
-                                claimed["id"],
-                                status="FAILED",
-                                result=result,
-                                error_code=first_error.code,
-                                error_message=first_error.safe_message,
-                            )
-                            await remember_result(claimed, result)
-                            await retire_scan_worker(owner, first_error.code)
-                            return
-                        result = retry_result
+                            if terminal_error is not None:
+                                result = _target_search_failure_result(
+                                    source,
+                                    today=today,
+                                    error=terminal_error,
+                                )
+                                await repository.complete_scan(
+                                    claimed["id"],
+                                    status="FAILED",
+                                    result=result,
+                                    error_code=terminal_error.code,
+                                    error_message=terminal_error.safe_message,
+                                )
+                                await remember_result(claimed, result)
+                                await retire_scan_worker(owner, terminal_error.code)
+                                await policy.record(
+                                    abnormal=True,
+                                    systemic=False,
+                                    reason=terminal_error.code,
+                                )
+                                return
+                            if retry_result is None:
+                                # Defensive guard: a retry either returns a result
+                                # or a terminal typed error, never a sticky state.
+                                result = _target_search_failure_result(
+                                    source,
+                                    today=today,
+                                    error=first_error,
+                                )
+                                await repository.complete_scan(
+                                    claimed["id"],
+                                    status="FAILED",
+                                    result=result,
+                                    error_code=first_error.code,
+                                    error_message=first_error.safe_message,
+                                )
+                                await remember_result(claimed, result)
+                                await retire_scan_worker(owner, first_error.code)
+                                return
+                            result = retry_result
                     except JobCancelledError:
                         result = _empty_result(
                             source,
@@ -2305,6 +2452,44 @@ async def run_parallel_zalo_batch(
                         )
                         await remember_result(claimed, result)
                         raise
+                    except TargetTimeoutError:
+                        result = _empty_result(
+                            source,
+                            today=today,
+                            reason="Quá thời gian xử lý target Zalo.",
+                            decision="SCAN_FAILED",
+                        )
+                        result["error_code"] = TARGET_TIMEOUT
+                        result["error_message"] = "Quá thời gian xử lý target Zalo."
+                        await repository.complete_scan(
+                            claimed["id"],
+                            status="FAILED",
+                            result=result,
+                            error_code=TARGET_TIMEOUT,
+                            error_message="Quá thời gian xử lý target Zalo.",
+                        )
+                        await policy.record(
+                            abnormal=True,
+                            systemic=False,
+                            reason=TARGET_TIMEOUT,
+                        )
+                        await remember_result(claimed, result)
+                        timeout_close_started_at = asyncio.get_running_loop().time()
+                        timeout_close_error = await close_page_once(page)
+                        page = None
+                        if timeout_close_error is not None:
+                            _emit_setup_telemetry(
+                                job_id=job_id,
+                                worker_id=owner,
+                                started_at=timeout_close_started_at,
+                                page_state=timeout_close_error.page_state,
+                                selector_count=timeout_close_error.selector_count,
+                                selector_ready=timeout_close_error.selector_ready,
+                                error_code=timeout_close_error.code,
+                            )
+                            await retire_scan_worker(owner, timeout_close_error.code)
+                            return
+                        continue
                     except Exception as exc:
                         result = _empty_result(
                             source,
@@ -2379,7 +2564,11 @@ async def run_parallel_zalo_batch(
                 # retry path retires a worker from this set.
 
         workers = scan_worker_count
-        if not reconciliation_only:
+        has_scan_work = bool(targets) and (
+            not existing
+            or any(item.get("scan_status") == "PENDING" for item in existing)
+        )
+        if not reconciliation_only and has_scan_work:
             await _gather_workers(scan_worker(index) for index in range(workers))
         await halt_unclaimed_if_needed()
 
@@ -2504,6 +2693,7 @@ async def run_parallel_zalo_batch(
                         TARGET_SEARCH_FILL_ERROR,
                         TARGET_SEARCH_RESULT_TIMEOUT,
                         TARGET_SEARCH_RESULT_ERROR,
+                        TARGET_TIMEOUT,
                         "SCAN_FAILED",
                     }
                     or result_error_code == SELECTOR_READINESS_TIMEOUT
@@ -2560,6 +2750,7 @@ async def run_parallel_zalo_batch(
             if isinstance(item, dict) and item.get("week") and item.get("year")
         ]
         summaries: list[dict[str, Any]] = []
+        notes_only_sync_failures = 0
 
         async def write_worker(index: int, assigned: list[tuple[int, int]]) -> None:
             if not assigned:
@@ -2650,6 +2841,8 @@ async def run_parallel_zalo_batch(
                         break
                     claimed.append(claimed_target)
                 async def record_row_outcome(outcome: dict[str, Any]) -> None:
+                    if str(outcome.get("action_type") or "") == "BCNB_UPDATE_CHECKER_NOTE":
+                        return
                     status = str(outcome.get("status") or "")
                     error = str(outcome.get("error") or "")
                     abnormal = status in {
@@ -2677,73 +2870,29 @@ async def run_parallel_zalo_batch(
                             in assigned_set
                         ]
                         if scoped_unclaimed:
-                            unclaimed_codes = sorted(
-                                {
-                                    str(r["scan_target"].get("class_code") or "")
-                                    .strip()
-                                    .upper()
-                                    for r in scoped_unclaimed
-                                }
-                                - {""}
-                            )
-                            resolved_slots: dict[str, list[dict[str, Any]]] | None = (
-                                prefetched_lms_slots
-                            )
-                            gw = getattr(runtime.external, "lms_quality", None)
-                            if (
-                                resolved_slots is None
-                                and gw is not None
-                                and hasattr(gw, "fetch_class_slots")
-                            ):
-                                try:
-                                    fetched_slots = await gw.fetch_class_slots(
-                                        page, unclaimed_codes
-                                    )
-                                    resolved_slots = (
-                                        fetched_slots
-                                        if isinstance(fetched_slots, dict)
-                                        else {
-                                            c: [{"fetch_error": True}]
-                                            for c in unclaimed_codes
-                                        }
-                                    )
-                                except Exception:
-                                    resolved_slots = {
-                                        c: [{"fetch_error": True}]
-                                        for c in unclaimed_codes
-                                    }
-                            elif (
-                                resolved_slots is None
-                                and page is not None
-                                and hasattr(page, "evaluate")
-                            ):
-                                try:
-                                    fetched_slots = await fetch_lms_class_slots_via_page(
-                                        page, class_names=unclaimed_codes
-                                    )
-                                    if isinstance(fetched_slots, dict) and fetched_slots:
-                                        resolved_slots = fetched_slots
-                                except Exception:
-                                    resolved_slots = {
-                                        c: [{"fetch_error": True}]
-                                        for c in unclaimed_codes
-                                    }
-                            inspect_and_attach_quality_issues(
+                            resolved_slots = await fetch_and_evaluate_lms_quality(
+                                page,
                                 scoped_unclaimed,
-                                lms_slots_by_class=resolved_slots,
+                                lms_slots_by_class=prefetched_lms_slots,
+                                lms_quality_gateway=getattr(
+                                    runtime.external, "lms_quality", None
+                                ),
+                                allow_page_fallback=True,
                             )
                             has_verifiable_note_issues = any(
-                                "cần kiểm tra thủ công" not in str(issue)
+                                (
+                                    issue_code(issue) != ISSUE_CODE_LMS_MANUAL_CHECK
+                                    or not is_lms_fetch_unavailable(resolved_slots)
+                                )
                                 for r in scoped_unclaimed
                                 for issue in (
                                     *(r.get("lms_quality_issues") or []),
                                     *(r.get("zalo_content_issues") or []),
                                     *(r.get("quality_issues") or []),
                                 )
-                            ) or (
-                                resolved_slots is not None
-                                and any(
-                                    "[auto qc:"
+                            ) or any(
+                                any(
+                                    marker
                                     in str(
                                         r.get("qc_issue_note")
                                         or (r.get("scan_target") or {}).get(
@@ -2751,9 +2900,51 @@ async def run_parallel_zalo_batch(
                                         )
                                         or ""
                                     ).lower()
-                                    for r in scoped_unclaimed
+                                    for marker in ("[auto qc:", "[lms]", "[zalo]")
                                 )
+                                for r in scoped_unclaimed
                             )
+                            if (
+                                not has_verifiable_note_issues
+                                and audit_repo is not None
+                            ):
+                                for r in scoped_unclaimed:
+                                    raw_st_item = r.get("scan_target")
+                                    st: dict[str, Any] = (
+                                        raw_st_item
+                                        if isinstance(raw_st_item, dict)
+                                        else {}
+                                    )
+                                    row_proven = await resolve_row_proven_auto_issues(
+                                        audit_repo,
+                                        class_code=str(
+                                            st.get("class_code")
+                                            or r.get("class_code")
+                                            or ""
+                                        ),
+                                        lesson=str(
+                                            st.get("lesson")
+                                            or r.get("lesson")
+                                            or ""
+                                        ),
+                                        week=int(st.get("week") or 0),
+                                        year=int(st.get("year") or 0),
+                                        session_id=str(
+                                            r.get("bcnb_session_id")
+                                            or st.get("bcnb_session_id")
+                                            or ""
+                                        ).strip()
+                                        or None,
+                                        class_date_iso=str(
+                                            st.get("class_date")
+                                            or r.get("class_date")
+                                            or ""
+                                        ).strip()
+                                        or None,
+                                    )
+                                    if row_proven:
+                                        has_verifiable_note_issues = True
+                                        break
                             if (
                                 has_verifiable_note_issues
                                 and audit_repo is not None
@@ -2765,6 +2956,26 @@ async def run_parallel_zalo_batch(
                                 )
                             ):
                                 try:
+                                    update_sig_params = inspect.signature(
+                                        update_bcnb_reports
+                                    ).parameters
+                                    accepts_var_kw = any(
+                                        p.kind == inspect.Parameter.VAR_KEYWORD
+                                        for p in update_sig_params.values()
+                                    )
+                                    extra_note_kwargs: dict[str, Any] = {}
+                                    if (
+                                        "notes_only" in update_sig_params
+                                        or accepts_var_kw
+                                    ):
+                                        extra_note_kwargs["notes_only"] = True
+                                    if resolved_slots is not None and (
+                                        "lms_slots_by_class" in update_sig_params
+                                        or accepts_var_kw
+                                    ):
+                                        extra_note_kwargs["lms_slots_by_class"] = (
+                                            resolved_slots
+                                        )
                                     note_summary = await update_bcnb_reports(
                                         page,
                                         job_id=job_id,
@@ -2778,25 +2989,23 @@ async def run_parallel_zalo_batch(
                                         period_filter=set(assigned),
                                         should_halt=policy.halted.is_set,
                                         on_target_outcome=record_row_outcome,
-                                        **(
-                                            {"lms_slots_by_class": resolved_slots}
-                                            if resolved_slots is not None
-                                            and "lms_slots_by_class"
-                                            in inspect.signature(
-                                                update_bcnb_reports
-                                            ).parameters
-                                            else {}
-                                        ),
+                                        **extra_note_kwargs,
                                     )
                                     summaries.append(note_summary)
                                 except JobCancelledError:
                                     raise
                                 except Exception as note_sync_err:
-                                    await policy.record(
-                                        abnormal=True,
-                                        systemic=_is_systemic_error(note_sync_err),
-                                        reason=str(note_sync_err),
-                                    )
+                                    nonlocal notes_only_sync_failures
+                                    notes_only_sync_failures += 1
+                                    with contextlib.suppress(Exception):
+                                        log_message(
+                                            "BCNB notes-only sync failed without halting batch",
+                                            level="WARNING",
+                                            event="bcnb.notes_only_sync_failed",
+                                            job_id=job_id,
+                                            worker_id=owner,
+                                            error_type=type(note_sync_err).__name__,
+                                        )
                             if hasattr(repository, "update_target_result"):
                                 for key, res in scan_results_by_key.items():
                                     if (
@@ -2976,10 +3185,31 @@ async def run_parallel_zalo_batch(
         await halt_unclaimed_if_needed()
 
     summary = await repository.summary(job_id)
+    checker_note_failure_count = int(notes_only_sync_failures)
+    for s in summaries:
+        if isinstance(s, dict):
+            raw_cnt = s.get("checker_note_failure_count")
+            if isinstance(raw_cnt, int):
+                checker_note_failure_count += raw_cnt
+            else:
+                checker_note_failure_count += len(s.get("checker_note_failures") or [])
+    lms_fetch_unavailable = bool(
+        is_lms_fetch_unavailable(prefetched_lms_slots)
+        or any(
+            isinstance(s, dict) and bool(s.get("lms_fetch_unavailable"))
+            for s in summaries
+        )
+        or any(
+            isinstance(r, dict) and bool(r.get("lms_fetch_unavailable"))
+            for r in scan_results_by_key.values()
+        )
+    )
     return {
         "scan_results": list(scan_results_by_key.values()),
         "batch_summary": summary,
         "bcnb_summaries": summaries,
+        "checker_note_failures": checker_note_failure_count,
+        "lms_fetch_unavailable": lms_fetch_unavailable,
         "halted": policy.halted.is_set(),
         "halt_reason": policy.halt_reason,
         "abnormal_targets": policy.abnormal_targets,
@@ -3049,6 +3279,8 @@ async def run_and_finalize_parallel_zalo_batch(
         batch_summary=batch_summary,
         halt_reason=result.get("halt_reason"),
         dry_run=dry_run,
+        checker_note_failures=int(result.get("checker_note_failures") or 0),
+        lms_fetch_unavailable=bool(result.get("lms_fetch_unavailable")),
     )
     if scan_plan.get("snapshot_id") is not None:
         progress["snapshot_id"] = scan_plan.get("snapshot_id")

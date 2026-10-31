@@ -15,11 +15,10 @@ from pathlib import Path
 import tempfile
 from typing import Any
 
-from core.time_utils import now_utc, parse_timestamp
+from core.time_utils import now_utc
 from db.backup import backup_database
-from repositories.zalo_batch_repository import canonical_target_key
 from services.observability import ready_status
-from services.zalo_target_eligibility import split_scan_targets_for_execution
+from services.report_status import validate_two_week_plan
 
 
 GREEN = "GREEN"
@@ -139,108 +138,42 @@ async def _check_production_backup(settings: Any, runtime: Any) -> dict[str, str
     )
 
 
-def _plan_snapshot(snapshot: dict[str, Any] | None, max_age_minutes: int) -> tuple[dict[str, Any] | None, dict[str, str] | None]:
-    if snapshot is None:
-        return None, _check(
-            "SCAN_PLAN_REQUIRED",
-            RED,
-            "Chưa có kế hoạch hai tuần BCNB.",
-            "Bấm Dò tìm trước khi quét.",
-        )
-    if snapshot.get("status") not in {"OBSERVED_ONLY", "PROMOTED"}:
-        return None, _check(
-            "SCAN_PLAN_NOT_TRUSTED",
-            RED,
-            "Kế hoạch BCNB chưa đủ tin cậy để quét.",
-            "Bấm Dò tìm lại.",
-        )
-    plan = snapshot.get("plan") or {}
-    week_plan = plan.get("bcnb_week_plan") or {}
-    selected_weeks = week_plan.get("selected_weeks") or []
-    candidate_targets = [
-        *(plan.get("scan_targets") or []),
-        *(plan.get("deferred_targets") or []),
-    ]
-    periods: set[tuple[int, int]] = set()
-    for item in selected_weeks:
-        if isinstance(item, dict):
-            try:
-                periods.add((int(item["week"]), int(item["year"])))
-            except (KeyError, TypeError, ValueError):
-                continue
-    latest_period: tuple[int, int] | None
-    required_period: tuple[int, int] | None
-    try:
-        latest_period = (
-            int(week_plan["latest_week"]["week"]),
-            int(week_plan["latest_week"]["year"]),
-        )
-        required_period = (
-            int(week_plan["required_week"]["week"]),
-            int(week_plan["required_week"]["year"]),
-        )
-    except (KeyError, TypeError, ValueError):
-        latest_period = required_period = None
-    if (
-        len(selected_weeks) != 2
-        or len(periods) != 2
-        or latest_period is None
-        or required_period is None
-        or periods != {latest_period, required_period}
-        or latest_period == required_period
-        or not candidate_targets
-    ):
-        return None, _check(
-            "SCAN_PLAN_INCOMPLETE",
-            RED,
-            "Kế hoạch BCNB chưa có đủ hai tuần và target quét.",
-            "Bấm Dò tìm lại.",
-        )
-    try:
-        target_keys = [canonical_target_key(item) for item in candidate_targets]
-    except (AttributeError, TypeError, ValueError):
-        return None, _check(
-            "SCAN_PLAN_INVALID_TARGET",
-            RED,
-            "Kế hoạch có target thiếu mã định danh ổn định.",
-            "Kiểm tra lớp mơ hồ rồi Dò tìm lại.",
-        )
-    if len(target_keys) != len(set(target_keys)):
-        return None, _check(
-            "SCAN_PLAN_DUPLICATE_TARGET",
-            RED,
-            "Kế hoạch có target trùng.",
-            "Bấm Dò tìm lại trước khi chạy.",
-        )
-    observed_at = parse_timestamp(snapshot.get("observed_at"))
-    if observed_at is None or (now_utc() - observed_at).total_seconds() > max(1, max_age_minutes) * 60:
-        return None, _check(
-            "SCAN_PLAN_STALE",
-            RED,
-            "Kế hoạch đã quá hạn hoặc thiếu thời điểm quan sát.",
-            "Bấm Dò tìm lại ngay trước khi quét.",
-        )
-    scan_targets, deferred_targets = split_scan_targets_for_execution(
-        candidate_targets,
-        latest_week=week_plan.get("latest_week"),
+def _plan_snapshot(
+    snapshot: dict[str, Any] | None, max_age_minutes: int
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None, dict[str, Any]]:
+    validation = validate_two_week_plan(
+        snapshot,
+        max_age_minutes=max_age_minutes,
+        now=now_utc(),
     )
-    if not scan_targets:
-        return None, _check(
-            "SCAN_TARGETS_DEFERRED",
+    dropped_rows = validation.get("dropped_rows") or {}
+    if not validation["valid"]:
+        red_check: dict[str, Any] = _check(
+            str(validation["error_code"] or "SCAN_PLAN_INCOMPLETE"),
             RED,
-            "Chưa có lớp đủ giờ học để quét.",
-            "Chờ sau giờ kết thúc buổi học rồi Dò tìm lại.",
+            str(validation["message"]),
+            str(validation["remediation"]),
         )
-    return {
-        "snapshot_id": snapshot.get("snapshot_id"),
-        "observed_at": snapshot.get("observed_at"),
-        "latest_week": week_plan.get("latest_week"),
-        "required_week": week_plan.get("required_week"),
-        "selected_weeks": selected_weeks,
-        "target_count": len(scan_targets),
-        "deferred_target_count": len(deferred_targets),
-        "candidate_target_count": len(candidate_targets),
-    }, None
+        if int((dropped_rows.get("counts") or {}).get("total") or 0) > 0:
+            red_check["details"] = dropped_rows
+        return None, red_check, dropped_rows
+    return (
+        {
+            "snapshot_id": validation["snapshot_id"],
+            "observed_at": validation["observed_at"],
+            "latest_week": validation["latest_week"],
+            "required_week": validation["required_week"],
+            "selected_weeks": validation["selected_weeks"],
+            "target_count": validation["target_count"],
+            "deferred_target_count": validation["deferred_target_count"],
+            "exempt_target_count": validation["exempt_target_count"],
+            "candidate_target_count": validation["candidate_target_count"],
+            "exempt_targets": validation["exempt_targets"],
+            "dropped_rows": dropped_rows,
+        },
+        None,
+        dropped_rows,
+    )
 
 
 async def assess_zalo_scan_preflight(
@@ -253,14 +186,14 @@ async def assess_zalo_scan_preflight(
     settings = getattr(container, "settings", None)
     dry_run = bool(getattr(settings, "bcnb_dry_run", True))
     execution_mode = "dry-run" if dry_run else "production"
-    checks: list[dict[str, str]] = []
+    checks: list[dict[str, Any]] = []
 
     snapshot = (
         await container.group_repo.get_discovery_snapshot(snapshot_id)
         if snapshot_id is not None
         else await container.group_repo.get_latest_discovery_snapshot()
     )
-    plan, plan_check = _plan_snapshot(
+    plan, plan_check, dropped_rows = _plan_snapshot(
         snapshot,
         int(getattr(settings, "zalo_plan_max_age_minutes", 30)),
     )
@@ -272,6 +205,20 @@ async def assess_zalo_scan_preflight(
             "Kế hoạch hai tuần và target hợp lệ.",
         )
     )
+    dropped_counts = dropped_rows.get("counts") or {}
+    dropped_total = int(dropped_counts.get("total") or 0)
+    if dropped_total > 0:
+        dropped_check: dict[str, Any] = _check(
+            "SCAN_PLAN_DROPPED_ROWS",
+            YELLOW,
+            (
+                f"Có {dropped_total} dòng BCNB bị loại khỏi lượt quét tự động "
+                "(chuyển khóa/thiếu nhóm/mơ hồ/ngày lỗi/rỗng/trùng)."
+            ),
+            "Kiểm tra danh sách dòng bị loại trước khi chạy.",
+        )
+        dropped_check["details"] = dropped_rows
+        checks.append(dropped_check)
 
     job_repo = getattr(container, "job_repo", None)
     active_job = None
@@ -390,4 +337,10 @@ async def assess_zalo_scan_preflight(
         "snapshot_id": plan.get("snapshot_id") if plan else None,
         "target_count": plan.get("target_count", 0) if plan else 0,
         "deferred_target_count": plan.get("deferred_target_count", 0) if plan else 0,
+        "exempt_target_count": plan.get("exempt_target_count", 0) if plan else 0,
+        "dropped_rows": (
+            plan.get("dropped_rows")
+            if plan
+            else (dropped_rows if dropped_total > 0 else None)
+        ),
     }

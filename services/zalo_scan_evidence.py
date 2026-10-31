@@ -35,9 +35,19 @@ from services.zalo_safety import (
     parse_class_date,
     report_delay_days,
 )
-from services.lms_quality_service import extract_report_lesson_title
+from services.lms_quality_service import (
+    evaluate_zalo_content_issues,
+    extract_report_lesson_title,
+)
+from services.report_status import (
+    ISSUE_CODE_ZALO_REPORT_NO_DATE,
+    ISSUE_CODE_ZALO_REPORT_WRONG_DATE,
+    make_structured_issue,
+)
 from services.zalo_target_matching import (
     BcnbScanTarget,
+    TARGET_SAME_DAY_NO_DATE,
+    TARGET_SAME_DAY_WRONG_DATE,
     TARGET_SESSION_AMBIGUOUS,
     TargetMatch,
     parse_bcnb_scan_target,
@@ -52,6 +62,11 @@ MAX_EVIDENCE_SCROLLS = 12
 # messages; the normal batch path keeps its historical 12-scroll default.
 MAX_CANARY_SCROLLS = 60
 MAX_CANARY_MESSAGES = 1000
+DEFAULT_BATCH_MAX_MESSAGES = 500
+MESSAGE_CAP_REACHED_REASON = (
+    "Đã chạm trần số lượng tin nhắn kiểm tra tối đa (capture_max_messages); "
+    "cần kiểm tra thủ công."
+)
 # Kept as a compatibility export for callers that imported the old constant.
 # Tick eligibility is no longer decided by a fixed number of days; the exact
 # BCNB deadline is resolved per row in the service layer.
@@ -60,22 +75,48 @@ _AI_ASSIST_GROUP_BUDGET_LOCK = asyncio.Lock()
 _AI_ASSIST_GROUP_COUNTS: dict[int, dict[str, int]] = {}
 
 
-async def _try_claim_ai_assist_group_slot(job_id: int, group_name: str) -> bool:
-    """Enforce MAX_AI_ASSIST_CANDIDATES per group across all targets in one job."""
-    group_key = (
+def _resolve_ai_assist_budget_key(
+    group_name: str,
+    target: BcnbScanTarget | None = None,
+    scan_target: Mapping[str, Any] | None = None,
+) -> str:
+    if target is not None:
+        return (
+            f"{target.year:04d}-W{target.week:02d}|"
+            f"{target.class_code.strip().upper()}|"
+            f"{target.lesson.strip()}|"
+            f"{target.class_date_iso.strip()}"
+        )
+    raw_tk = (
+        str(scan_target.get("target_key") or "").strip()
+        if isinstance(scan_target, Mapping)
+        else ""
+    )
+    return raw_tk or (
         unicodedata.normalize("NFC", str(group_name or "")).strip().casefold()
         or "__unnamed_group__"
+    )
+
+
+async def _try_claim_ai_assist_target_slot(job_id: int, budget_key: str) -> bool:
+    """Enforce MAX_AI_ASSIST_CANDIDATES per target_key (with group fallback) in one job."""
+    normalized_key = (
+        unicodedata.normalize("NFC", str(budget_key or "")).strip().casefold()
+        or "__unnamed_target__"
     )
     async with _AI_ASSIST_GROUP_BUDGET_LOCK:
         if len(_AI_ASSIST_GROUP_COUNTS) >= 128 and int(job_id) not in _AI_ASSIST_GROUP_COUNTS:
             oldest_job_id = next(iter(_AI_ASSIST_GROUP_COUNTS))
             _AI_ASSIST_GROUP_COUNTS.pop(oldest_job_id, None)
         job_counts = _AI_ASSIST_GROUP_COUNTS.setdefault(int(job_id), {})
-        used = job_counts.get(group_key, 0)
+        used = job_counts.get(normalized_key, 0)
         if used >= MAX_AI_ASSIST_CANDIDATES:
             return False
-        job_counts[group_key] = used + 1
+        job_counts[normalized_key] = used + 1
         return True
+
+
+_try_claim_ai_assist_group_slot = _try_claim_ai_assist_target_slot
 
 ZALO_INCOMPLETE_SYNC_BANNERS = (
     "Zalo Web của bạn hiện chưa có đầy đủ tin nhắn gần đây",
@@ -175,6 +216,7 @@ def _capture_diagnostic(
         "label": safe_label,
         "phase": safe_phase,
         "error_code": safe_code,
+        "attempt": safe_attempt,
         "elapsed_ms": elapsed_ms,
     }
     if diagnostics is not None:
@@ -549,6 +591,47 @@ async def _capture_zalo_evidence(
     return evidence
 
 
+async def _bounded_message_count(message_locator) -> int | None:
+    count_fn = getattr(message_locator, "count", None)
+    if callable(count_fn):
+        return await count_fn()
+    return None
+
+
+async def _capture_report_evidence_with_retry(
+    page,
+    target_message,
+    *,
+    job_id: int,
+    screenshots_dir: str,
+    diagnostics: list[dict[str, Any]],
+    worker_id: str,
+    attempt: int,
+) -> dict[str, Any] | None:
+    max_attempts = max(1, int(MAX_CAPTURE_ATTEMPTS))
+    for capture_try in range(1, max_attempts + 1):
+        effective_attempt = (
+            capture_try
+            if int(attempt or 1) <= 1
+            else _safe_capture_attempt(attempt)
+        )
+        report_date_header = await _message_date_header_from_zalo_ui(target_message)
+        captured = await _capture_zalo_evidence(
+            page,
+            target_message,
+            job_id=job_id,
+            screenshots_dir=screenshots_dir,
+            label="report",
+            date_header=report_date_header,
+            diagnostics=diagnostics,
+            worker_id=worker_id,
+            attempt=effective_attempt,
+        )
+        if captured is not None:
+            return captured
+    return None
+
+
 def build_empty_evidence_result(
     *,
     group: str,
@@ -870,20 +953,38 @@ async def scan_open_zalo_chat(
     stable_coverage_observations = 0
     previous_coverage_observation: tuple[int, str] | None = None
     max_scrolls = capture_max_scrolls or MAX_EVIDENCE_SCROLLS
+    effective_max_messages = (
+        capture_max_messages
+        if capture_max_messages is not None
+        else DEFAULT_BATCH_MAX_MESSAGES
+    )
+    message_cap_reached = False
     message_locator = page.locator('[data-component="bubble-message"]')
     for _scroll_idx in range(max_scrolls):
         await ensure_not_cancelled()
         if capture_max_messages is not None:
-            loaded_count = await message_locator.count()
-            if (
+            loaded_count = await _bounded_message_count(message_locator)
+            if loaded_count is not None and (
                 isinstance(loaded_count, bool)
                 or not isinstance(loaded_count, int)
                 or loaded_count > capture_max_messages
             ):
                 raise EvidenceBoundsExceeded
+        else:
+            loaded_count = await _bounded_message_count(message_locator)
+            if loaded_count is not None and (
+                isinstance(loaded_count, bool)
+                or not isinstance(loaded_count, int)
+                or loaded_count > effective_max_messages
+            ):
+                message_cap_reached = True
+                break
         loaded_messages = await message_locator.all()
         if capture_max_messages is not None and len(loaded_messages) > capture_max_messages:
             raise EvidenceBoundsExceeded
+        if len(loaded_messages) >= effective_max_messages:
+            message_cap_reached = True
+            break
         oldest_loaded_date = (
             await _message_date_from_zalo_ui(loaded_messages[0], today) if loaded_messages else None
         )
@@ -916,16 +1017,32 @@ async def scan_open_zalo_chat(
             continue
 
     if capture_max_messages is not None:
-        final_count = await message_locator.count()
-        if (
+        final_count = await _bounded_message_count(message_locator)
+        if final_count is not None and (
             isinstance(final_count, bool)
             or not isinstance(final_count, int)
             or final_count > capture_max_messages
         ):
             raise EvidenceBoundsExceeded
-    messages = await message_locator.all()
-    if capture_max_messages is not None and len(messages) > capture_max_messages:
-        raise EvidenceBoundsExceeded
+        messages = await message_locator.all()
+        if len(messages) > capture_max_messages:
+            raise EvidenceBoundsExceeded
+    else:
+        final_count = await _bounded_message_count(message_locator)
+        if final_count is not None and (
+            isinstance(final_count, bool)
+            or not isinstance(final_count, int)
+            or final_count > effective_max_messages
+        ):
+            message_cap_reached = True
+            messages = []
+        else:
+            messages = await message_locator.all()
+            if len(messages) > effective_max_messages:
+                message_cap_reached = True
+                messages = messages[-effective_max_messages:]
+    if len(messages) >= effective_max_messages:
+        message_cap_reached = True
     messages_checked = len(messages)
     oldest_message_date = await _message_date_from_zalo_ui(messages[0], today) if messages else None
     newest_message_date = (
@@ -951,8 +1068,7 @@ async def scan_open_zalo_chat(
     ai_candidate_pool: list[tuple[Any, str, dict[str, Any]]] = []
     verified_report_state = SUBMITTED_VERIFIED
     warnings: list[str] = []
-    target_info_notes: list[str] = []
-    target_unresolved_notes: list[str] = []
+    has_ambiguous_target_candidate = False
 
     for message in reversed(messages):
         await ensure_not_cancelled()
@@ -983,9 +1099,9 @@ async def scan_open_zalo_chat(
             classifier_result["candidates"].append(candidate)
             continue
 
-        if content_dates and ui_sent_at.date().isoformat() not in content_dates:
-            candidate["warning"] = "CONTENT_DATE_MISMATCH"
-            warnings.append("CONTENT_DATE_MISMATCH: ngày trong nội dung khác ngày gửi trên Zalo.")
+        has_content_date_mismatch = bool(
+            content_dates and ui_sent_at.date().isoformat() not in content_dates
+        )
 
         delay = None
         date_reference = "no_class_date"
@@ -997,11 +1113,27 @@ async def scan_open_zalo_chat(
         if reported_lesson_title:
             candidate["reported_lesson_title"] = reported_lesson_title
         claimed_lesson_date: datetime | None = None
+        pending_lesson_date: datetime | None = None
+        pending_lesson_source: str | None = None
+        pending_prev_lesson_iso: str | None = None
         inferred_lesson_date = infer_report_lesson_date(
             classification["content_dates"],
             raw_content,
             message_date=ui_sent_at,
         )
+        if (
+            inferred_lesson_date is None
+            and target is not None
+            and ui_sent_at.date() == target.class_date.date()
+            and classification["content_dates"]
+        ):
+            inferred_lesson_date = infer_report_lesson_date(
+                classification["content_dates"],
+                raw_content,
+                message_date=max(
+                    classification["content_dates"], key=lambda d: d.date()
+                ),
+            )
         if inferred_lesson_date is not None:
             claimed_lesson_date = inferred_lesson_date
             delay = (ui_sent_at.date() - inferred_lesson_date.date()).days
@@ -1018,19 +1150,9 @@ async def scan_open_zalo_chat(
                 date_reference = "previous_lesson_date_from_content"
                 candidate["lesson_date_source"] = date_reference
                 candidate["previous_lesson_date"] = inferred_lesson_date.date().isoformat()
-                date_context.update(
-                    {
-                        "previous_lesson_date": inferred_lesson_date.date().isoformat(),
-                        "previous_lesson_source": "report_content_date",
-                        "reference": date_reference,
-                    }
-                )
-            _set_lesson_date_context(
-                date_context,
-                inferred_lesson_date,
-                source=date_reference,
-                reported_lesson=reported_lesson,
-            )
+                pending_prev_lesson_iso = inferred_lesson_date.date().isoformat()
+            pending_lesson_date = inferred_lesson_date
+            pending_lesson_source = date_reference
         elif (previous_lesson_date_str or "").strip():
             delay = report_delay_days(
                 previous_lesson_date_str,
@@ -1045,12 +1167,8 @@ async def scan_open_zalo_chat(
             )
             if previous_lesson is not None:
                 claimed_lesson_date = previous_lesson
-                _set_lesson_date_context(
-                    date_context,
-                    previous_lesson,
-                    source=date_reference,
-                    reported_lesson=reported_lesson,
-                )
+                pending_lesson_date = previous_lesson
+                pending_lesson_source = date_reference
         elif reference_class_date_str:
             delay = report_delay_days(
                 reference_class_date_str,
@@ -1078,19 +1196,9 @@ async def scan_open_zalo_chat(
                 claimed_lesson_date = inferred_previous
                 date_reference = "previous_lesson_date_from_content"
                 candidate["previous_lesson_date"] = inferred_previous.date().isoformat()
-                date_context.update(
-                    {
-                        "previous_lesson_date": inferred_previous.date().isoformat(),
-                        "previous_lesson_source": "report_content_date",
-                        "reference": date_reference,
-                    }
-                )
-                _set_lesson_date_context(
-                    date_context,
-                    inferred_previous,
-                    source=date_reference,
-                    reported_lesson=reported_lesson,
-                )
+                pending_prev_lesson_iso = inferred_previous.date().isoformat()
+                pending_lesson_date = inferred_previous
+                pending_lesson_source = date_reference
 
         target_match: TargetMatch | None = None
         if target is not None:
@@ -1113,37 +1221,11 @@ async def scan_open_zalo_chat(
             }
             if not target_match.matches:
                 _set_bcnb_target_context(date_context, target)
-                date_context.update(
-                    {
-                        "target_match_decision": target_match.decision,
-                        "target_match_note": target_match.note,
-                        "reported_lesson_date": (
-                            claimed_lesson_date.date().isoformat()
-                            if claimed_lesson_date is not None
-                            else None
-                        ),
-                        "reported_lesson": reported_lesson,
-                    }
-                )
                 candidate["decision"] = target_match.decision
                 classifier_result["candidates"].append(candidate)
-                if target_match.note:
-                    if target_match.decision == TARGET_SESSION_AMBIGUOUS:
-                        target_unresolved_notes.append(target_match.note)
-                    else:
-                        target_info_notes.append(target_match.note)
+                if target_match.decision == TARGET_SESSION_AMBIGUOUS:
+                    has_ambiguous_target_candidate = True
                 continue
-            _apply_target_match_context(
-                date_context,
-                target=target,
-                match=target_match,
-                claimed_lesson_date=claimed_lesson_date,
-                claimed_lesson=reported_lesson,
-            )
-            if content_lesson is not None:
-                date_context["content_lesson"] = content_lesson
-            if reported_lesson_title:
-                date_context["reported_lesson_title"] = reported_lesson_title
             delay = (ui_sent_at.date() - target.class_date.date()).days
             date_reference = "bcnb_target_date"
 
@@ -1195,13 +1277,56 @@ async def scan_open_zalo_chat(
                 classifier_result["candidates"].append(candidate)
                 continue
 
-        if target_match is not None and target_match.corrected_teacher_date:
-            candidate["decision"] = "SUBMITTED_DATE_TYPO"
+        if target is not None and target_match is not None:
+            _apply_target_match_context(
+                date_context,
+                target=target,
+                match=target_match,
+                claimed_lesson_date=claimed_lesson_date,
+                claimed_lesson=reported_lesson,
+            )
+            if content_lesson is not None:
+                date_context["content_lesson"] = content_lesson
+            if reported_lesson_title:
+                date_context["reported_lesson_title"] = reported_lesson_title
+        elif target is None:
+            if pending_prev_lesson_iso is not None:
+                date_context.update(
+                    {
+                        "previous_lesson_date": pending_prev_lesson_iso,
+                        "previous_lesson_source": "report_content_date",
+                        "reference": pending_lesson_source or date_reference,
+                    }
+                )
+            if pending_lesson_date is not None and pending_lesson_source is not None:
+                _set_lesson_date_context(
+                    date_context,
+                    pending_lesson_date,
+                    source=pending_lesson_source,
+                    reported_lesson=reported_lesson,
+                )
+            if content_lesson is not None:
+                date_context["content_lesson"] = content_lesson
+            if reported_lesson_title:
+                date_context["reported_lesson_title"] = reported_lesson_title
+
+        if has_content_date_mismatch:
+            candidate["warning"] = "CONTENT_DATE_MISMATCH"
+            mismatch_warning = (
+                "CONTENT_DATE_MISMATCH: ngày trong nội dung khác ngày gửi trên Zalo."
+            )
+            if mismatch_warning not in warnings:
+                warnings.append(mismatch_warning)
+
+        if target_match is not None:
+            if target_match.corrected_teacher_date:
+                candidate["decision"] = "SUBMITTED_DATE_TYPO"
             if target_match.note:
                 report_detail = f"{report_detail}; {target_match.note}"
 
         report_found = True
         matched_message = message
+        date_context["deadline_verification"] = "PENDING"
         candidate["delay_days"] = delay
         candidate["date_reference"] = date_reference
         classifier_result["candidates"].append(candidate)
@@ -1227,9 +1352,14 @@ async def scan_open_zalo_chat(
         else:
             use_ai_assist = bool(ai_assist_enabled)
         if use_ai_assist:
+            ai_budget_key = _resolve_ai_assist_budget_key(
+                group_name,
+                target=target,
+                scan_target=scan_target,
+            )
+            classifier_result["ai_assist_budget_key"] = ai_budget_key
+            classifier_result["ai_assist_budget_exhausted"] = False
             for ai_msg, ai_raw, ai_cls in ai_candidate_pool:
-                if classifier_result["ai_assist_evaluated"] >= MAX_AI_ASSIST_CANDIDATES:
-                    break
                 await ensure_not_cancelled()
                 ai_sent_at = await _message_date_from_zalo_ui(ai_msg, today)
                 if ai_sent_at is None or ai_sent_at.date() > today.date():
@@ -1264,7 +1394,11 @@ async def scan_open_zalo_chat(
                     if ai_delay < 0 or ai_delay > BCNB_TICK_MAX_DELAY_DAYS:
                         continue
 
-                if not await _try_claim_ai_assist_group_slot(job_id, group_name):
+                if (
+                    classifier_result["ai_assist_evaluated"] >= MAX_AI_ASSIST_CANDIDATES
+                    or not await _try_claim_ai_assist_target_slot(job_id, ai_budget_key)
+                ):
+                    classifier_result["ai_assist_budget_exhausted"] = True
                     break
                 classifier_result["ai_assist_evaluated"] += 1
                 try:
@@ -1281,11 +1415,17 @@ async def scan_open_zalo_chat(
                 except asyncio.CancelledError:
                     raise
                 except Exception:
+                    classifier_result["ai_assist_error"] = "AI_CLASSIFIER_ERROR"
                     ai_verdict = {
                         "is_likely_report": False,
                         "confidence": 0.0,
                         "reason": "AI_CLASSIFIER_ERROR",
                     }
+                if (
+                    isinstance(ai_verdict, Mapping)
+                    and str(ai_verdict.get("reason") or "").strip() == "AI_CLASSIFIER_ERROR"
+                ):
+                    classifier_result["ai_assist_error"] = "AI_CLASSIFIER_ERROR"
                 is_likely = bool(
                     isinstance(ai_verdict, Mapping)
                     and ai_verdict.get("is_likely_report") is True
@@ -1353,28 +1493,22 @@ async def scan_open_zalo_chat(
     }
     capture_diagnostics: list[dict[str, Any]] = []
     if report_found:
-        report_date_header = await _message_date_header_from_zalo_ui(matched_message)
-        images["report"] = await _capture_zalo_evidence(
+        images["report"] = await _capture_report_evidence_with_retry(
             page,
             matched_message,
             job_id=job_id,
             screenshots_dir=screenshots_dir,
-            label="report",
-            date_header=report_date_header,
             diagnostics=capture_diagnostics,
             worker_id=worker_id,
             attempt=attempt,
         )
     else:
         if ai_suggested_message is not None:
-            ai_date_header = await _message_date_header_from_zalo_ui(ai_suggested_message)
-            images["report"] = await _capture_zalo_evidence(
+            images["report"] = await _capture_report_evidence_with_retry(
                 page,
                 ai_suggested_message,
                 job_id=job_id,
                 screenshots_dir=screenshots_dir,
-                label="report",
-                date_header=ai_date_header,
                 diagnostics=capture_diagnostics,
                 worker_id=worker_id,
                 attempt=attempt,
@@ -1418,13 +1552,20 @@ async def scan_open_zalo_chat(
         )
 
     extra_reasons = []
+    if not report_found and message_cap_reached:
+        extra_reasons.append(MESSAGE_CAP_REACHED_REASON)
+        if classifier_result.get("decision") == "NOT_FOUND":
+            classifier_result["decision"] = "MESSAGE_CAP_REACHED"
     if not report_found and classifier_result["undated_report_candidates"]:
         extra_reasons.append("Có tin nhắn giống báo cáo nhưng không đọc được ngày gửi.")
-    if not report_found and target_unresolved_notes:
-        extra_reasons.append(target_unresolved_notes[0])
+    if not report_found and has_ambiguous_target_candidate:
+        extra_reasons.append(
+            "Có tin nhắn giống báo cáo nhưng chưa đủ căn cứ xác nhận thuộc buổi học target."
+        )
     if not report_found and target_date is not None and messages:
         distinct_dates: list[datetime] = []
         for msg in messages:
+            await ensure_not_cancelled()
             msg_date = await _message_date_from_zalo_ui(msg, today)
             if msg_date is not None:
                 if not distinct_dates or msg_date.date() != distinct_dates[-1].date():
@@ -1436,6 +1577,8 @@ async def scan_open_zalo_chat(
                 f"Phát hiện khoảng trống tin nhắn quanh ngày học ({d_prev.strftime('%d/%m')} → {d_curr.strftime('%d/%m')}, cách {gap_days} ngày); lịch sử Zalo có thể chưa đồng bộ đầy đủ."
             )
 
+    extra_reasons = list(dict.fromkeys(extra_reasons))
+    warnings = list(dict.fromkeys(warnings))
     result = build_scan_result(
         group=group_name,
         person=person,
@@ -1457,9 +1600,24 @@ async def scan_open_zalo_chat(
         date_context=date_context,
     )
     result.setdefault("evidence", {})["capture_diagnostics"] = capture_diagnostics
-    if not report_found and target_info_notes:
-        note = target_info_notes[0]
-        old_detail = str(result.get("status_detail") or "").strip()
-        result["status_detail"] = f"{old_detail}; {note}" if old_detail else note
-        result.setdefault("evidence", {}).setdefault("warnings", []).append(note)
+    if report_found:
+        match_decision = str(date_context.get("target_match_decision") or "").strip()
+        match_note = str(date_context.get("target_match_note") or "").strip()
+        if match_decision == TARGET_SAME_DAY_NO_DATE and match_note:
+            d2_issue = make_structured_issue(
+                ISSUE_CODE_ZALO_REPORT_NO_DATE, match_note
+            )
+            result["zalo_content_issues"] = [d2_issue]
+            result["quality_issues"] = [d2_issue]
+        elif match_decision == TARGET_SAME_DAY_WRONG_DATE and match_note:
+            d2_issue = make_structured_issue(
+                ISSUE_CODE_ZALO_REPORT_WRONG_DATE, match_note
+            )
+            result["zalo_content_issues"] = [d2_issue]
+            result["quality_issues"] = [d2_issue]
+        else:
+            zalo_issues = evaluate_zalo_content_issues(result)
+            if zalo_issues:
+                result["zalo_content_issues"] = list(zalo_issues)
+                result["quality_issues"] = list(zalo_issues)
     return result

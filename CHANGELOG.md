@@ -4,6 +4,35 @@ Tài liệu này ghi lại toàn bộ quá trình hình thành, phát triển ki
 
 ---
 
+## [2026-10-31] — Wave 5 (`5.0` → `5.8`): Hardening Toàn Diện Luồng Kiểm Tra Báo Cáo Zalo/BCNB/LMS (`DEC-036`, `DEC-039`)
+
+### 🛡️ Củng cố độ bền, tính đúng đắn bằng chứng & Một nguồn sự thật (`UPGRADE_PROGRESS.md` — `Wave 5: 59/59 ✅`)
+- **Chặng 5.0 — Baseline & Sao lưu trước Wave 5 (`.backups/db/pre-wave5-20261030-20261030-095820.sqlite3`)**:
+  - Sao lưu nóng SQLite (`integrity="ok"`, `foreign_key_errors=[]`), diễn tập khôi phục `.backups/restore-drill.sqlite3` và khóa baseline manifest.
+- **Chặng 5.1 — Độ bền vòng quét Zalo (`services/zalo_parallel_service.py`, `services/zalo_scan_evidence.py`)**:
+  - Bọc `retry_target_once` và `setup_fresh_retry_page()` trong khối xử lý lỗi của từng target, thêm timeout cứng mỗi target (`ZALO_TARGET_TIMEOUT_SECONDS = 180`), kiểm tra hủy trong vòng quét khoảng trống lịch sử, áp trần mặc định `DEFAULT_BATCH_MAX_MESSAGES = 500` trả `INSUFFICIENT_EVIDENCE` (`MESSAGE_CAP_REACHED`) thay vì `NOT_FOUND_VERIFIED`, và retry chụp ảnh minh chứng báo cáo 1 lần (`MAX_CAPTURE_ATTEMPTS = 2`).
+- **Chặng 5.2 — Cô lập ghi BCNB: Tick Checkbox vs Ghi chú `Mô tả vấn đề` (`services/zalo_bcnb_service.py`, `services/bcnb_actions.py`, `services/bcnb_safety.py`, `repositories/audit_repository.py`)**:
+  - Tách hoàn toàn lỗi ghi chú `BCNB_UPDATE_CHECKER_NOTE` khỏi `BatchFailurePolicy.record` và kết quả tick `NX Zalo`; truyền `notes_only=True` cho dòng không nằm trong tập claim checkbox và ghi `SKIPPED_TICK_FAILED` khi tick checkbox lỗi.
+  - Bảo vệ lạc quan chống ghi đè chỉnh sửa của QC (`read_checker_note_by_session` trước `POST` $\rightarrow$ `CONCURRENT_NOTE_EDIT`, đọc ngược sau hard reload $\rightarrow$ `CONFLICT_AFTER_WRITE`), phân tách đoạn auto và đoạn ghi tay theo 5 điều kiện provenance từ `external_action_audit` (`preserve_bcnb_note_text`, bảo toàn byte-for-byte phần ghi tay).
+- **Chặng 5.3 — Đúng đắn bằng chứng & QC: Slot LMS theo ngày học + số buổi, Chống rò rỉ note, Trạng thái không xác định (`services/lms_quality_service.py`, `services/zalo_scan_evidence.py`, `services/zalo_bcnb_service.py`)**:
+  - Bổ sung `_id`, `index`, `date`, `startTime`, `endTime` vào truy vấn GraphQL LMS và thay thế việc lấy slot theo vị trí `lesson_num - 1` bằng `select_matching_lms_slot` (đổi về múi giờ `Asia/Ho_Chi_Minh`, chỉ chọn khi đúng 1 slot khớp đồng thời ngày học và `index + 1 == lesson_num`).
+  - Chỉ ghi `target_match_note` vào `date_context` khi candidate được match; chỉ chạy `evaluate_zalo_content_issues` khi `evidence_state ∈ SUBMITTED_*`; giữ nguyên các issue `[Zalo]` đang có trên BCNB khi quét ở trạng thái không xác định (`INSUFFICIENT_EVIDENCE` hoặc lỗi quét).
+- **Chặng 5.4 — Toàn vẹn Weekly Summary, Email & Duyệt tay (`repositories/report_repository.py`, `services/report_email_service.py`, `services/zalo_bcnb_service.py`, `api/zalo_routes.py`, `repositories/audit_repository.py`)**:
+  - Xác định điều kiện đủ tư cách theo từng nguồn (chỉ lấy job đã kết thúc và đúng `execution_mode`, gắn `execution_mode_badge="DRY-RUN"` khi xin xem dry-run), áp trần tài nguyên trước khi đọc dữ liệu, chặn gửi email bằng `409 SCAN_ACTIVE_FOR_WEEK` khi đang có job hoạt động cho tuần đó, không ghi vào `source_job`/ledger khi duyệt tay ở `dry-run`, tổng hợp dòng BCNB chưa quét thành `"Chưa quét Zalo"`, phân giải trạng thái LMS theo từng buổi `(class_code, lesson, class_date_iso)` và ghi audit nguyên tử `begin_smtp_send_intent` cho mỗi lần gửi SMTP.
+- **Chặng 5.5 — Một nguồn sự thật `services/report_status.py` + Helper dùng chung (`services/report_status.py`, `services/bcnb_safety.py`, `services/zalo_preflight.py`)**:
+  - Hợp nhất hằng trạng thái, `is_lesson_14`, `categorize_row` (`DONE | LATE | MISSING | REVIEW | EXEMPT | NOT_SCANNED`), `issue_severity` (`FAIL | NOTE` theo mã có cấu trúc `{code, severity, text}`), `is_failed(row)` (nộp trễ `LATE` và issue mức `NOTE` không tính là lỗi theo **D1/D2/D4**), `validate_two_week_plan()`, `normalize_class_code()`, bộ nhận diện cột BCNB và helper `fetch_and_evaluate_lms_quality`.
+- **Chặng 5.6 — Không rơi dòng im lặng trong Discovery / Plan / Preflight (`services/zalo_discovery_plan.py`, `services/zalo_preflight.py`, `api/zalo_routes.py`, `services/zalo_target_eligibility.py`, `services/zalo_scan_evidence.py`)**:
+  - Đếm và liệt kê đầy đủ 6 nhóm `dropped_rows` (`transition_review`, `missing_zalo`, `ambiguous_zalo`, `deduped`, `invalid_date`, `skipped_empty`) kèm cảnh báo preflight `YELLOW`; dựng miễn trừ Buổi 14 trực tiếp từ dòng BCNB (`exempt_targets`) không cần bịa tên nhóm Zalo; ghim `snapshot_id` xuyên suốt `/run-scan` (`409 SNAPSHOT_CHANGED`); hoãn an toàn khi tên nhóm Zalo có nhiều khung giờ; gắn `deadline_verification="PENDING"` (`⏳`) ở bước quét cho tới khi bước ghi BCNB đối chiếu xong.
+- **Chặng 5.7 — Giao diện vận hành bám dữ liệu server (`static/js/jobs.js`, `static/js/state.js`, `templates/partials/dashboard.html`, `templates/partials/specs.html`, `api/job_routes.py`, `repositories/job_repository.py`)**:
+  - Dựng lại bảng từ `weekly-summary` của server khi tải trang và sau khi job ghi kết thúc (F5 không mất dữ liệu quét chọn lọc), bảo toàn chế độ xem lịch sử khi bấm ⟳ hoặc polling, chặn bật lại modal/alert cho job đã kết thúc trước khi tải trang, khóa các nút hành động khi `currentJobActive`, bổ sung dải preflight/tiến độ thu gọn trên Tab chính, tách ô KPI `Nộp trễ` (`#count-late`), hiển thị issue `NOTE` màu trung tính và xóa các hàm CSV builder chết phía JS (**D6**).
+- **Chặng 5.8 — Parser vòng đời lớp mở rộng (D3), Dọn luồng tuần tự chết (D6), AI Assist nguyên văn không lộ log (D5), Khớp báo cáo cùng ngày thiếu/sai ngày (D2) & Chốt an toàn LMS toàn hệ thống (D4)**:
+  - Mở rộng `services/class_lifecycle.py` và `CLASS_LIFECYCLE.md` hỗ trợ `ROB4`, `SEMI`, `PRE`, `ARM`, `PT`, `JS`, `CS`, `G`, `S` (`B → A → I` trong cùng track, `fullmatch` token, bỏ qua hậu tố `HB`), tương thích đọc/ghi với `cohort_key` cũ của `JS`/`CS` và dừng fail-closed khi va chạm alias (**D3**).
+  - Xóa thân luồng quét Zalo tuần tự chết trong `services/zalo_service.py` (`166` dòng) và chuyển các cổng invariant sang kiểm tra implementation song song (**D6**); xác nhận AI assist gửi nguyên văn tin nhắn mà không ghi nguyên văn vào log (**D5**).
+  - Bổ sung nhánh khớp cùng ngày học có ghi chú QC mức `NOTE` (`ZALO_REPORT_NO_DATE`, `ZALO_REPORT_WRONG_DATE`) trong `services/zalo_target_matching.py` và `services/zalo_scan_evidence.py` (**D2**).
+  - Ghi chú `LMS_MANUAL_CHECK` mức `NOTE` lên cột `Mô tả vấn đề (TE/TF/QC)` mà không làm dòng bị tính lỗi trong email, kèm chốt an toàn `is_lms_fetch_unavailable` tạm ngưng ghi note `LMS_MANUAL_CHECK` hàng loạt và bật cờ cảnh báo `lms_fetch_unavailable` khi LMS lỗi toàn hệ thống (**D4**).
+
+---
+
 ## [2026-10-29] — Wave 4 (`4.0` → `4.4`): Kiểm Định Chất Lượng Nội Dung LMS/Zalo, Tự Động Ghi `Mô Tả Vấn Đề` Lên Teaching & Bảng Email Quản Lý (`DEC-036`, `DEC-038`)
 
 ### ✨ Tính năng mới & Nâng cấp toàn diện (`UPGRADE_PROGRESS.md` — `Wave 4: 25/25 ✅`)

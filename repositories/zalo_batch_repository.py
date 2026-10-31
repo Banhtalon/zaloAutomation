@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 import json
 from typing import Any
 
-from core.time_utils import now_utc, utc_iso
+from core.time_utils import now_utc, parse_timestamp, utc_iso
 from db.database import get_db_connection
+from services.report_status import normalize_class_code
 
 
 SCAN_STATUSES = {"PENDING", "RUNNING", "VERIFIED", "SKIPPED", "FAILED"}
@@ -25,7 +26,7 @@ WRITE_STATUSES = {
 
 
 def canonical_target_key(target: dict[str, Any]) -> str:
-    class_code = str(target.get("class_code") or "").strip().upper()
+    class_code = normalize_class_code(target.get("class_code"))
     lesson = str(target.get("lesson") or "").strip()
     class_date_iso = str(target.get("class_date_iso") or "").strip()
     try:
@@ -125,6 +126,103 @@ class ZaloBatchRepository:
                         week, year, lesson, class_date, class_date_iso,
                         source_json, created_at, updated_at
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    prepared,
+                )
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
+        return len(prepared)
+
+    async def seed_exempt_targets(
+        self,
+        job_id: int,
+        exempt_targets: list[dict[str, Any]],
+        *,
+        applied_at: datetime | str | None = None,
+    ) -> int:
+        if not exempt_targets:
+            return 0
+        from services.zalo_evidence import apply_lesson_14_exemption
+
+        prepared: list[tuple[Any, ...]] = []
+        seen: set[str] = set()
+        resolved_dt = (
+            parse_timestamp(applied_at)
+            if isinstance(applied_at, str)
+            else applied_at
+        ) or now_utc()
+        stamp = utc_iso(resolved_dt)
+        for target in exempt_targets:
+            key = canonical_target_key(target)
+            if key in seen:
+                raise ValueError(f"Exempt target trùng trong batch: {key}")
+            seen.add(key)
+            group_name = str(target.get("group_name") or "").strip()
+            person = str(target.get("person") or "Chưa xác định").strip()
+            class_code = str(target.get("class_code") or "").strip().upper()
+            lesson = str(target.get("lesson") or "14").strip()
+            class_date = str(target.get("class_date") or "").strip()
+            class_date_iso = str(target.get("class_date_iso") or "").strip()
+            source = dict(target)
+            source["group_name"] = group_name
+            source["target_kind"] = "EXEMPTION"
+            base_result: dict[str, Any] = {
+                "group": group_name,
+                "person": person,
+                "scan_target": source,
+                "evidence": {
+                    "validation_errors": [],
+                    "date_context": {
+                        "target_week": int(target["week"]),
+                        "target_year": int(target["year"]),
+                        "target_week_source": "BCNB_SERVER",
+                        "target_class_code": class_code,
+                        "target_lesson": lesson,
+                        "target_class_date": class_date_iso or class_date,
+                    },
+                },
+            }
+            exempt_result = apply_lesson_14_exemption(
+                base_result,
+                class_code=class_code,
+                applied_at=resolved_dt,
+                lesson=lesson,
+            )
+            prepared.append(
+                (
+                    job_id,
+                    key,
+                    group_name,
+                    person,
+                    class_code,
+                    int(target["week"]),
+                    int(target["year"]),
+                    lesson,
+                    class_date,
+                    class_date_iso,
+                    _json(source),
+                    "SKIPPED",
+                    "NOT_READY",
+                    _json(exempt_result),
+                    stamp,
+                    stamp,
+                    stamp,
+                    stamp,
+                )
+            )
+        async with get_db_connection() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                await db.executemany(
+                    """
+                    INSERT INTO zalo_batch_targets(
+                        job_id, target_key, group_name, person, class_code,
+                        week, year, lesson, class_date, class_date_iso,
+                        source_json, scan_status, write_status, result_json,
+                        created_at, updated_at, started_at, finished_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     prepared,
                 )

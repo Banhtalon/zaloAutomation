@@ -118,6 +118,70 @@ class InMemoryBatchRepository:
         self.rows[job_id] = rows
         return len(rows)
 
+    async def seed_exempt_targets(self, job_id, targets, *, applied_at=None):
+        from core.time_utils import now_utc, parse_timestamp
+        from services.zalo_evidence import apply_lesson_14_exemption
+
+        rows = self.rows.setdefault(job_id, [])
+        seen = {row["target_key"] for row in rows}
+        start_idx = len(rows) + 1
+        resolved_dt = (
+            parse_timestamp(applied_at)
+            if isinstance(applied_at, str)
+            else applied_at
+        ) or now_utc()
+        for offset, raw_target in enumerate(targets):
+            target = dict(raw_target or {})
+            group_name = str(target.get("group_name") or "").strip()
+            person = str(target.get("person") or "Chưa xác định").strip()
+            class_code = str(target.get("class_code") or "").strip().upper()
+            lesson = str(target.get("lesson") or "14").strip()
+            class_date = str(target.get("class_date") or "").strip()
+            class_date_iso = str(target.get("class_date_iso") or "").strip()
+            target["group_name"] = group_name
+            target["target_kind"] = "EXEMPTION"
+            key = canonical_target_key(target)
+            if key in seen:
+                continue
+            seen.add(key)
+            result = apply_lesson_14_exemption(
+                {
+                    "group": group_name,
+                    "person": person,
+                    "scan_target": target,
+                    "evidence": {
+                        "validation_errors": [],
+                        "date_context": {
+                            "target_week": int(target["week"]),
+                            "target_year": int(target["year"]),
+                            "target_week_source": "BCNB_SERVER",
+                            "target_class_code": class_code,
+                            "target_lesson": lesson,
+                            "target_class_date": class_date_iso or class_date,
+                        },
+                    },
+                },
+                class_code=class_code,
+                applied_at=resolved_dt,
+                lesson=lesson,
+            )
+            rows.append(
+                {
+                    "id": start_idx + offset,
+                    "job_id": job_id,
+                    "target_key": key,
+                    "source": target,
+                    "week": int(target["week"]),
+                    "year": int(target["year"]),
+                    "class_code": class_code,
+                    "lesson": lesson,
+                    "scan_status": "SKIPPED",
+                    "write_status": "NOT_READY",
+                    "result": result,
+                }
+            )
+        return len(targets)
+
     async def recover_interrupted(self, _job_id):
         return {"scan_requeued": 0, "write_unknown": 0}
 
@@ -3226,9 +3290,7 @@ class LandingReadinessTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(len(audit_actions), 1)
             self.assertIn(":dry-run:", audit_actions[0]["action_key"])
-            dry_updated = updated_source_results[-1][1]["items"][0]
-            self.assertFalse(bool(dry_updated.get("submitted_for_bcnb")))
-            self.assertIn("❌", dry_updated["status"])
+            self.assertEqual(updated_source_results, [])
             fake_checkbox.check.assert_not_awaited()
 
             # 2. Subsequent production run uses :production: action_key, checks checkbox, and marks submitted
@@ -3324,6 +3386,825 @@ class LandingReadinessTests(unittest.IsolatedAsyncioTestCase):
             res["evidence"]["business_rule"]["source_evidence_state"],
             "INSUFFICIENT_EVIDENCE",
         )
+
+    async def test_retry_target_once_second_attempt_runtime_error_marks_scan_failed_and_scans_next(
+        self,
+    ):
+        repository = InMemoryBatchRepository(claim_plan={"scan-1": [1, 2]})
+        browser = FakeParallelBrowser(
+            [
+                {"search_clear_errors": [TimeoutError("first-attempt-clear-timeout")]},
+                {"header_values": ["MindX - VT-SYN01", "MindX - VT-SYN02"]},
+                {"header_text": "MindX - VT-SYN02"},
+            ]
+        )
+        evidence_repo = SimpleNamespace(register_scan_results=AsyncMock())
+        job_repo = SimpleNamespace(
+            ensure_not_cancelled=AsyncMock(),
+            update_job=AsyncMock(),
+        )
+        runtime = SimpleNamespace(
+            external=SimpleNamespace(browser=browser),
+            zalo_scan_concurrency=1,
+            bcnb_write_concurrency=1,
+            batch_systemic_failure_limit=3,
+            batch_abnormal_percent_limit=80,
+        )
+        t1 = _make_search_target(1)
+        t2 = _make_search_target(2)
+
+        async def fake_scan(_page, **kwargs):
+            st = kwargs.get("scan_target") or {}
+            if st.get("class_code") == t1["class_code"]:
+                raise RuntimeError("attempt-2-unexpected-runtime-error")
+            return _verified_scan_result(st)
+
+        async def fake_update(_page, *, period_filter, scan_results, **_kwargs):
+            return {
+                "target_outcomes": [
+                    {
+                        "class_code": item["scan_target"]["class_code"],
+                        "lesson": item["scan_target"]["lesson"],
+                        "week": item["scan_target"]["week"],
+                        "year": item["scan_target"]["year"],
+                        "class_date_iso": item["scan_target"]["class_date_iso"],
+                        "status": "DRY_RUN",
+                    }
+                    for item in scan_results
+                    if item.get("evidence_state") == "SUBMITTED_VERIFIED"
+                    and (
+                        int(item["scan_target"]["week"]),
+                        int(item["scan_target"]["year"]),
+                    )
+                    in period_filter
+                ]
+            }
+
+        with (
+            patch.object(parallel_service, "ZaloBatchRepository", return_value=repository),
+            patch.object(
+                parallel_service,
+                "ensure_zalo_history_synced",
+                AsyncMock(return_value={"verified": True, "reason": "fixture"}),
+            ),
+            patch.object(parallel_service, "_login_bcnb_if_needed", AsyncMock()),
+            patch.object(
+                parallel_service,
+                "scan_open_zalo_chat",
+                AsyncMock(side_effect=fake_scan),
+            ),
+            patch.object(
+                parallel_service,
+                "update_bcnb_reports",
+                side_effect=fake_update,
+            ),
+            patch.object(parallel_service, "log_message"),
+            patch.object(parallel_service.asyncio, "sleep", AsyncMock()),
+        ):
+            result = await parallel_service.run_parallel_zalo_batch(
+                job_id=970,
+                execution_mode="dry-run",
+                scan_plan={
+                    "selected_weeks": [{"week": 34, "year": 2026}],
+                    "targets": [t1, t2],
+                },
+                today=datetime(2026, 8, 25, tzinfo=BUSINESS_TIMEZONE),
+                scan_started_at=datetime(2026, 8, 25, tzinfo=BUSINESS_TIMEZONE),
+                evidence_root="unused-evidence-root",
+                screenshots_dir="unused-screenshots-dir",
+                runtime=runtime,
+                job_repo=job_repo,
+                audit_repo=object(),
+                evidence_repo=evidence_repo,
+            )
+
+        rows = await repository.list_for_job(970)
+        self.assertFalse(result["halted"])
+        self.assertEqual(rows[0]["scan_status"], "FAILED")
+        self.assertEqual(rows[0]["error_code"], "SCAN_FAILED")
+        self.assertEqual(rows[0]["result"]["error_code"], "SCAN_FAILED")
+        self.assertEqual(rows[1]["scan_status"], "VERIFIED")
+        self.assertTrue(all(r["scan_status"] != "RUNNING" for r in rows))
+
+    async def test_retry_target_once_second_attempt_job_cancelled_leaves_no_target_running(
+        self,
+    ):
+        repository = InMemoryBatchRepository(claim_plan={"scan-1": [1, 2]})
+        browser = FakeParallelBrowser(
+            [
+                {"search_clear_errors": [TimeoutError("first-attempt-clear-timeout")]},
+                {"header_text": "MindX - VT-SYN01"},
+            ]
+        )
+        evidence_repo = SimpleNamespace(register_scan_results=AsyncMock())
+        job_repo = SimpleNamespace(
+            ensure_not_cancelled=AsyncMock(),
+            update_job=AsyncMock(),
+        )
+        runtime = SimpleNamespace(
+            external=SimpleNamespace(browser=browser),
+            zalo_scan_concurrency=1,
+            bcnb_write_concurrency=1,
+            batch_systemic_failure_limit=3,
+            batch_abnormal_percent_limit=80,
+        )
+        t1 = _make_search_target(1)
+        t2 = _make_search_target(2)
+
+        with (
+            patch.object(parallel_service, "ZaloBatchRepository", return_value=repository),
+            patch.object(
+                parallel_service,
+                "ensure_zalo_history_synced",
+                AsyncMock(return_value={"verified": True, "reason": "fixture"}),
+            ),
+            patch.object(
+                parallel_service,
+                "scan_open_zalo_chat",
+                AsyncMock(
+                    side_effect=parallel_service.JobCancelledError(
+                        "cancelled-on-attempt-2"
+                    )
+                ),
+            ),
+            patch.object(parallel_service, "log_message"),
+            patch.object(parallel_service.asyncio, "sleep", AsyncMock()),
+        ):
+            with self.assertRaises(parallel_service.JobCancelledError):
+                await parallel_service.run_parallel_zalo_batch(
+                    job_id=971,
+                    execution_mode="dry-run",
+                    scan_plan={
+                        "selected_weeks": [{"week": 34, "year": 2026}],
+                        "targets": [t1, t2],
+                    },
+                    today=datetime(2026, 8, 25, tzinfo=BUSINESS_TIMEZONE),
+                    scan_started_at=datetime(2026, 8, 25, tzinfo=BUSINESS_TIMEZONE),
+                    evidence_root="unused-evidence-root",
+                    screenshots_dir="unused-screenshots-dir",
+                    runtime=runtime,
+                    job_repo=job_repo,
+                    audit_repo=object(),
+                    evidence_repo=evidence_repo,
+                )
+
+        rows = await repository.list_for_job(971)
+        self.assertEqual(rows[0]["scan_status"], "FAILED")
+        self.assertEqual(rows[0]["error_code"], "JOB_CANCELLED")
+        self.assertTrue(all(r["scan_status"] != "RUNNING" for r in rows))
+
+    async def test_per_target_timeout_marks_target_timeout_refreshes_page_and_scans_next(
+        self,
+    ):
+        repository = InMemoryBatchRepository(claim_plan={"scan-1": [1, 2]})
+        browser = FakeParallelBrowser(
+            [
+                {"header_text": "MindX - VT-SYN01"},
+                {"header_text": "MindX - VT-SYN02"},
+                {"header_text": "MindX - VT-SYN02"},
+            ]
+        )
+        evidence_repo = SimpleNamespace(register_scan_results=AsyncMock())
+        job_repo = SimpleNamespace(
+            ensure_not_cancelled=AsyncMock(),
+            update_job=AsyncMock(),
+        )
+        runtime = SimpleNamespace(
+            external=SimpleNamespace(browser=browser),
+            zalo_scan_concurrency=1,
+            bcnb_write_concurrency=1,
+            batch_systemic_failure_limit=3,
+            batch_abnormal_percent_limit=80,
+            zalo_target_timeout_seconds=0.03,
+        )
+        t1 = _make_search_target(1)
+        t2 = _make_search_target(2)
+
+        async def fake_scan(_page, **kwargs):
+            st = kwargs.get("scan_target") or {}
+            if st.get("class_code") == t1["class_code"]:
+                await asyncio.Event().wait()
+            return _verified_scan_result(st)
+
+        async def fake_update(_page, *, period_filter, scan_results, **_kwargs):
+            return {
+                "target_outcomes": [
+                    {
+                        "class_code": item["scan_target"]["class_code"],
+                        "lesson": item["scan_target"]["lesson"],
+                        "week": item["scan_target"]["week"],
+                        "year": item["scan_target"]["year"],
+                        "class_date_iso": item["scan_target"]["class_date_iso"],
+                        "status": "DRY_RUN",
+                    }
+                    for item in scan_results
+                    if item.get("evidence_state") == "SUBMITTED_VERIFIED"
+                    and (
+                        int(item["scan_target"]["week"]),
+                        int(item["scan_target"]["year"]),
+                    )
+                    in period_filter
+                ]
+            }
+
+        with (
+            patch.object(parallel_service, "ZaloBatchRepository", return_value=repository),
+            patch.object(
+                parallel_service,
+                "ensure_zalo_history_synced",
+                AsyncMock(return_value={"verified": True, "reason": "fixture"}),
+            ),
+            patch.object(parallel_service, "_login_bcnb_if_needed", AsyncMock()),
+            patch.object(
+                parallel_service,
+                "scan_open_zalo_chat",
+                AsyncMock(side_effect=fake_scan),
+            ),
+            patch.object(
+                parallel_service,
+                "update_bcnb_reports",
+                side_effect=fake_update,
+            ),
+            patch.object(parallel_service, "ZALO_TARGET_TIMEOUT_SECONDS", 0.03),
+            patch.object(parallel_service, "log_message"),
+            patch.object(parallel_service.asyncio, "sleep", AsyncMock()),
+        ):
+            result = await asyncio.wait_for(
+                parallel_service.run_parallel_zalo_batch(
+                    job_id=972,
+                    execution_mode="dry-run",
+                    scan_plan={
+                        "selected_weeks": [{"week": 34, "year": 2026}],
+                        "targets": [t1, t2],
+                    },
+                    today=datetime(2026, 8, 25, tzinfo=BUSINESS_TIMEZONE),
+                    scan_started_at=datetime(2026, 8, 25, tzinfo=BUSINESS_TIMEZONE),
+                    evidence_root="unused-evidence-root",
+                    screenshots_dir="unused-screenshots-dir",
+                    runtime=runtime,
+                    job_repo=job_repo,
+                    audit_repo=object(),
+                    evidence_repo=evidence_repo,
+                ),
+                timeout=1.0,
+            )
+
+        rows = await repository.list_for_job(972)
+        self.assertFalse(result["halted"])
+        self.assertEqual(rows[0]["scan_status"], "FAILED")
+        self.assertEqual(rows[0]["error_code"], "TARGET_TIMEOUT")
+        self.assertEqual(rows[0]["result"]["error_code"], "TARGET_TIMEOUT")
+        self.assertEqual(
+            rows[0]["result"]["evidence"]["classifier_result"]["decision"],
+            "SCAN_FAILED",
+        )
+        self.assertEqual(rows[1]["scan_status"], "VERIFIED")
+        session = browser.sessions[0]
+        self.assertTrue(session.pages[0].closed)
+        self.assertGreaterEqual(len(session.pages), 2)
+
+    async def test_scan_one_target_exceeding_message_cap_returns_insufficient_evidence(
+        self,
+    ):
+        page = FakeParallelPage(1, header_text="MindX - VT-SYN01")
+        target = _make_search_target(1)
+        job_repo = SimpleNamespace(ensure_not_cancelled=AsyncMock())
+        with (
+            patch.object(
+                parallel_service,
+                "scan_open_zalo_chat",
+                AsyncMock(side_effect=parallel_service.EvidenceBoundsExceeded()),
+            ),
+            patch.object(parallel_service.asyncio, "sleep", AsyncMock()),
+        ):
+            res = await parallel_service._scan_one_target(
+                page,
+                job_id=973,
+                target=target,
+                sync_result={"verified": True},
+                screenshots_dir=".",
+                today=datetime(2026, 8, 25, tzinfo=BUSINESS_TIMEZONE),
+                job_repo=job_repo,
+            )
+        self.assertEqual(res["evidence_state"], "INSUFFICIENT_EVIDENCE")
+        self.assertEqual(
+            res["evidence"]["classifier_result"]["decision"],
+            "MESSAGE_CAP_REACHED",
+        )
+        self.assertFalse(res["submitted_for_bcnb"])
+
+    async def test_per_target_timeout_cancelled_during_fresh_page_setup_leaves_no_target_running(
+        self,
+    ):
+        repository = InMemoryBatchRepository(claim_plan={"scan-1": [1, 2]})
+        browser = FakeParallelBrowser(
+            [
+                {"header_text": "MindX - VT-SYN01"},
+                {"header_text": "MindX - VT-SYN02"},
+            ]
+        )
+        evidence_repo = SimpleNamespace(register_scan_results=AsyncMock())
+        job_repo = SimpleNamespace(
+            ensure_not_cancelled=AsyncMock(),
+            update_job=AsyncMock(),
+        )
+        runtime = SimpleNamespace(
+            external=SimpleNamespace(browser=browser),
+            zalo_scan_concurrency=1,
+            bcnb_write_concurrency=1,
+            batch_systemic_failure_limit=3,
+            batch_abnormal_percent_limit=80,
+            zalo_target_timeout_seconds=0.03,
+        )
+        t1 = _make_search_target(1)
+        t2 = _make_search_target(2)
+
+        async def fake_scan(_page, **kwargs):
+            st = kwargs.get("scan_target") or {}
+            if st.get("class_code") == t1["class_code"]:
+                await asyncio.Event().wait()
+            return _verified_scan_result(st)
+
+        sync_calls = 0
+
+        async def fake_sync(*_args, **_kwargs):
+            nonlocal sync_calls
+            sync_calls += 1
+            if sync_calls >= 2:
+                raise parallel_service.JobCancelledError(
+                    "cancelled-during-fresh-page-setup"
+                )
+            return {"verified": True, "reason": "fixture"}
+
+        with (
+            patch.object(parallel_service, "ZaloBatchRepository", return_value=repository),
+            patch.object(
+                parallel_service,
+                "ensure_zalo_history_synced",
+                AsyncMock(side_effect=fake_sync),
+            ),
+            patch.object(
+                parallel_service,
+                "scan_open_zalo_chat",
+                AsyncMock(side_effect=fake_scan),
+            ),
+            patch.object(parallel_service, "ZALO_TARGET_TIMEOUT_SECONDS", 0.03),
+            patch.object(parallel_service, "log_message"),
+            patch.object(parallel_service.asyncio, "sleep", AsyncMock()),
+        ):
+            with self.assertRaises(parallel_service.JobCancelledError):
+                await asyncio.wait_for(
+                    parallel_service.run_parallel_zalo_batch(
+                        job_id=974,
+                        execution_mode="dry-run",
+                        scan_plan={
+                            "selected_weeks": [{"week": 34, "year": 2026}],
+                            "targets": [t1, t2],
+                        },
+                        today=datetime(2026, 8, 25, tzinfo=BUSINESS_TIMEZONE),
+                        scan_started_at=datetime(2026, 8, 25, tzinfo=BUSINESS_TIMEZONE),
+                        evidence_root="unused-evidence-root",
+                        screenshots_dir="unused-screenshots-dir",
+                        runtime=runtime,
+                        job_repo=job_repo,
+                        audit_repo=object(),
+                        evidence_repo=evidence_repo,
+                    ),
+                    timeout=1.0,
+                )
+
+        rows = await repository.list_for_job(974)
+        self.assertEqual(rows[0]["scan_status"], "FAILED")
+        self.assertEqual(rows[0]["error_code"], "TARGET_TIMEOUT")
+        self.assertEqual(rows[1]["scan_status"], "FAILED")
+        self.assertEqual(rows[1]["error_code"], "JOB_CANCELLED")
+        self.assertTrue(all(r["scan_status"] != "RUNNING" for r in rows))
+
+    async def test_notes_only_unclaimed_passes_notes_only_and_exception_does_not_halt_policy(
+        self,
+    ):
+        """5.2.1(b), 5.2.2, 5.2.4: Notes-only unclaimed branch passes notes_only=True, triggers on direct [LMS]/[Zalo] note, and does not halt policy on exception."""
+        repository = InMemoryBatchRepository(claim_plan={"scan-1": [1]})
+        browser = FakeParallelBrowser(
+            [
+                {"header_text": "MindX - VT-SYN01"},
+                {"header_text": "BCNB"},
+            ]
+        )
+        evidence_repo = SimpleNamespace(register_scan_results=AsyncMock())
+        job_repo = SimpleNamespace(
+            ensure_not_cancelled=AsyncMock(),
+            update_job=AsyncMock(),
+        )
+        audit_repo = SimpleNamespace(record_intent=AsyncMock())
+        runtime = SimpleNamespace(
+            external=SimpleNamespace(browser=browser),
+            zalo_scan_concurrency=1,
+            bcnb_write_concurrency=1,
+            batch_systemic_failure_limit=1,
+            batch_abnormal_percent_limit=10,
+        )
+        t1 = {
+            **_make_search_target(1),
+            "qc_issue_note": "Ghi chú tay | [Zalo] Báo cáo ghi sai buổi",
+        }
+
+        async def fake_not_found_scan(_page, **kwargs):
+            st = kwargs.get("scan_target") or t1
+            return {
+                "group": st["group_name"],
+                "person": st["person"],
+                "status": "❌ Chưa tìm thấy trong khoảng đã kiểm chứng – Có minh chứng",
+                "evidence_state": "NOT_FOUND_VERIFIED",
+                "scan_target": st,
+                "evidence": {
+                    "date_context": {
+                        "target_week": st["week"],
+                        "target_year": st["year"],
+                        "target_lesson": st["lesson"],
+                        "target_class_date": st["class_date"],
+                    }
+                },
+            }
+
+        captured_kwargs: list[dict] = []
+
+        async def fake_update_bcnb(_page, **kwargs):
+            captured_kwargs.append(kwargs)
+            raise RuntimeError("auth expired during notes-only sync")
+
+        with (
+            patch.object(parallel_service, "ZaloBatchRepository", return_value=repository),
+            patch.object(
+                parallel_service,
+                "ensure_zalo_history_synced",
+                AsyncMock(return_value={"verified": True, "reason": "fixture"}),
+            ),
+            patch.object(
+                parallel_service,
+                "scan_open_zalo_chat",
+                AsyncMock(side_effect=fake_not_found_scan),
+            ),
+            patch.object(
+                parallel_service,
+                "_login_bcnb_if_needed",
+                AsyncMock(),
+            ),
+            patch.object(
+                parallel_service,
+                "_create_production_backup",
+                AsyncMock(),
+            ),
+            patch.object(
+                parallel_service,
+                "update_bcnb_reports",
+                AsyncMock(side_effect=fake_update_bcnb),
+            ),
+            patch.object(parallel_service, "log_message") as mock_log,
+        ):
+            result = await parallel_service.run_parallel_zalo_batch(
+                job_id=975,
+                execution_mode="production",
+                scan_plan={
+                    "selected_weeks": [
+                        {"week": 34, "year": 2026},
+                        {"week": 33, "year": 2026},
+                    ],
+                    "latest_week": {"week": 34, "year": 2026},
+                    "targets": [t1],
+                },
+                today=datetime(2026, 8, 25, tzinfo=BUSINESS_TIMEZONE),
+                scan_started_at=datetime(2026, 8, 25, tzinfo=BUSINESS_TIMEZONE),
+                evidence_root="unused-evidence-root",
+                screenshots_dir="unused-screenshots-dir",
+                runtime=runtime,
+                job_repo=job_repo,
+                audit_repo=audit_repo,
+                evidence_repo=evidence_repo,
+            )
+
+        self.assertEqual(len(captured_kwargs), 1)
+        self.assertTrue(captured_kwargs[0].get("notes_only"))
+        self.assertFalse(result["halted"])
+        self.assertIsNone(result["halt_reason"])
+        self.assertEqual(result["abnormal_targets"], 0)
+        self.assertEqual(result["checker_note_failures"], 1)
+        self.assertTrue(
+            any(
+                call.kwargs.get("event") == "bcnb.notes_only_sync_failed"
+                for call in mock_log.call_args_list
+            )
+        )
+
+    async def test_manual_approve_dry_run_no_source_mutation_and_ledger_error_logged(
+        self,
+    ):
+        import services.zalo_bcnb_service as bcnb_service
+
+        source_job = {
+            "id": 980,
+            "job_type": "ZALO_SCAN",
+            "status": "PARTIAL_SUCCESS",
+            "results": {
+                "items": [
+                    {
+                        "group": "MindX - VT-C4K-GI35 T7",
+                        "person": "GV A",
+                        "status": "❌ Chưa tìm thấy báo cáo",
+                        "submitted_for_bcnb": False,
+                        "scan_target": {
+                            "group_name": "MindX - VT-C4K-GI35 T7",
+                            "class_code": "VT-C4K-GI35",
+                            "week": 32,
+                            "year": 2026,
+                            "lesson": "2",
+                            "class_date_iso": "2026-08-08",
+                        },
+                    }
+                ]
+            },
+        }
+        job_events: list[tuple[int, str, str, dict | None]] = []
+        job_repo = SimpleNamespace(
+            get_job=AsyncMock(return_value=source_job),
+            update_terminal_results=AsyncMock(),
+            add_event=AsyncMock(
+                side_effect=lambda job_id, event_type, message, details=None: job_events.append(
+                    (job_id, event_type, message, details)
+                )
+            ),
+        )
+        # 1. Dry-run must NOT mutate source_job or ledger
+        dry_updated = await bcnb_service._persist_manual_approval_to_source_job(
+            job_repo=job_repo,
+            source_job_id=980,
+            approval_job_id=981,
+            group_name="MindX - VT-C4K-GI35 T7",
+            class_code="VT-C4K-GI35",
+            week=32,
+            year=2026,
+            lesson="2",
+            class_date_iso="2026-08-08",
+            target_key="2026-W32|VT-C4K-GI35|2|2026-08-08",
+            approved_by="operator-test",
+            evidence_path="/api/evidence/980/gi35.png",
+            evidence_sha256="c" * 64,
+            outcome="DRY_RUN",
+            dry_run=True,
+        )
+        self.assertIsNone(dry_updated[0])
+        job_repo.update_terminal_results.assert_not_awaited()
+        self.assertEqual(job_events, [])
+
+        # 2. Production manual approve where ledger update raises logs WARNING with error_type and emits job event
+        @asynccontextmanager
+        async def failing_db_conn():
+            raise RuntimeError("db locked")
+            yield
+
+        with (
+            patch.object(
+                bcnb_service,
+                "get_db_connection",
+                side_effect=failing_db_conn,
+            ),
+            patch.object(bcnb_service, "log_message") as mock_log,
+        ):
+            prod_updated = await bcnb_service._persist_manual_approval_to_source_job(
+                job_repo=job_repo,
+                source_job_id=980,
+                approval_job_id=982,
+                group_name="MindX - VT-C4K-GI35 T7",
+                class_code="VT-C4K-GI35",
+                week=32,
+                year=2026,
+                lesson="2",
+                class_date_iso="2026-08-08",
+                target_key="2026-W32|VT-C4K-GI35|2|2026-08-08",
+                approved_by="operator-test",
+                evidence_path="/api/evidence/980/gi35.png",
+                evidence_sha256="c" * 64,
+                outcome="VERIFIED",
+                dry_run=False,
+            )
+        self.assertIsNotNone(prod_updated[0])
+        job_repo.update_terminal_results.assert_awaited_once()
+        self.assertTrue(
+            any(
+                call.kwargs.get("event") == "bcnb.manual_approve_ledger_update_failed"
+                and call.kwargs.get("error_type") == "RuntimeError"
+                and "db locked" not in str(call.args[0])
+                for call in mock_log.call_args_list
+            )
+        )
+        self.assertTrue(
+            any(
+                ev[1] == "MANUAL_APPROVE_LEDGER_UPDATE_FAILED"
+                and isinstance(ev[3], dict)
+                and ev[3].get("error_type") == "RuntimeError"
+                and "error" not in ev[3]
+                and "db locked" not in str(ev[3])
+                for ev in job_events
+            )
+        )
+
+    async def test_phase_5_6_3_exempt_lesson_14_without_zalo_group_skips_zalo_scan_and_matches_bcnb_by_class_code(
+        self,
+    ):
+        repository = InMemoryBatchRepository()
+        browser = FakeParallelBrowser([{}])
+        evidence_repo = SimpleNamespace(register_scan_results=AsyncMock())
+        job_repo = SimpleNamespace(
+            ensure_not_cancelled=AsyncMock(),
+            update_job=AsyncMock(),
+        )
+        runtime = SimpleNamespace(
+            external=SimpleNamespace(browser=browser),
+            zalo_scan_concurrency=1,
+            bcnb_write_concurrency=1,
+            batch_systemic_failure_limit=3,
+            batch_abnormal_percent_limit=20,
+        )
+        exempt_target = {
+            "group_name": "",
+            "person": "GV L14",
+            "class_code": "VT-L14-NOZALO",
+            "lesson": "14",
+            "class_date": "30/08/2026",
+            "class_date_iso": "2026-08-30",
+            "week": 34,
+            "year": 2026,
+            "exempt": True,
+            "exempt_reason": "LESSON_14_EXEMPTION",
+        }
+        sync_mock = AsyncMock(return_value={"verified": True, "reason": "fixture"})
+        scan_mock = AsyncMock()
+        captured_bcnb_calls = []
+
+        async def fake_update_bcnb(_page, *, scan_results, **_kwargs):
+            captured_bcnb_calls.append((list(scan_results), dict(_kwargs)))
+            outcomes = []
+            for item in scan_results:
+                item["status"] = "✅ Đã miễn báo cáo Buổi 14"
+                item["nx_zalo_checked"] = False
+                st = item.get("scan_target") or {}
+                outcomes.append(
+                    {
+                        "class_code": st.get("class_code"),
+                        "lesson": st.get("lesson"),
+                        "week": st.get("week"),
+                        "year": st.get("year"),
+                        "class_date_iso": st.get("class_date_iso"),
+                        "status": "DRY_RUN",
+                    }
+                )
+            return {"target_outcomes": outcomes}
+
+        # Verify prepare_frozen_scan_execution admits both exemption-only and exemption + deferred plans
+        prepared_exempt_only = await parallel_service.prepare_frozen_scan_execution(
+            job_id=990,
+            scan_plan={
+                "selected_weeks": [{"week": 34, "year": 2026}],
+                "latest_week": {"week": 34, "year": 2026},
+                "targets": [],
+                "exempt_targets": [exempt_target],
+                "observed_at": "2026-08-25T09:50:00Z",
+                "expires_at": "2099-08-25T10:20:00Z",
+            },
+            scan_started_at=datetime(2026, 8, 25, 10, 0, tzinfo=BUSINESS_TIMEZONE),
+            runtime=runtime,
+            job_repo=job_repo,
+        )
+        self.assertIsNotNone(prepared_exempt_only)
+        assert prepared_exempt_only is not None
+        self.assertEqual(prepared_exempt_only[1], [])
+        self.assertEqual(len(prepared_exempt_only[0]["exempt_targets"]), 1)
+
+        prepared_exempt_plus_deferred = (
+            await parallel_service.prepare_frozen_scan_execution(
+                job_id=990,
+                scan_plan={
+                    "selected_weeks": [{"week": 34, "year": 2026}],
+                    "latest_week": {"week": 34, "year": 2026},
+                    "targets": [
+                        {
+                            "group_name": "MindX - VT-C4K-GA01 CN 18H-20H",
+                            "class_code": "VT-C4K-GA01",
+                            "person": "Teacher A",
+                            "class_date": "25/08/2026",
+                            "class_date_iso": "2026-08-25",
+                            "lesson": "8",
+                            "week": 34,
+                            "year": 2026,
+                        }
+                    ],
+                    "exempt_targets": [exempt_target],
+                    "observed_at": "2026-08-25T09:50:00Z",
+                    "expires_at": "2099-08-25T10:20:00Z",
+                },
+                scan_started_at=datetime(2026, 8, 25, 10, 0, tzinfo=BUSINESS_TIMEZONE),
+                runtime=runtime,
+                job_repo=job_repo,
+            )
+        )
+        self.assertIsNotNone(prepared_exempt_plus_deferred)
+        assert prepared_exempt_plus_deferred is not None
+        self.assertEqual(prepared_exempt_plus_deferred[1], [])
+        self.assertEqual(
+            len(prepared_exempt_plus_deferred[0]["deferred_targets"]), 1
+        )
+        self.assertEqual(
+            len(prepared_exempt_plus_deferred[0]["exempt_targets"]), 1
+        )
+
+        with (
+            patch.object(parallel_service, "ZaloBatchRepository", return_value=repository),
+            patch.object(parallel_service, "ensure_zalo_history_synced", sync_mock),
+            patch.object(parallel_service, "_scan_one_target", scan_mock),
+            patch.object(parallel_service, "_login_bcnb_if_needed", AsyncMock()),
+            patch.object(parallel_service, "update_bcnb_reports", side_effect=fake_update_bcnb),
+            patch.object(
+                parallel_service,
+                "fetch_and_evaluate_lms_quality",
+                AsyncMock(return_value={}),
+            ),
+            patch.object(parallel_service, "log_message"),
+        ):
+            result = await parallel_service.run_parallel_zalo_batch(
+                job_id=990,
+                execution_mode="dry-run",
+                scan_plan={
+                    "selected_weeks": [{"week": 34, "year": 2026}],
+                    "latest_week": {"week": 34, "year": 2026},
+                    "targets": [],
+                    "exempt_targets": [exempt_target],
+                },
+                today=datetime(2026, 8, 25, tzinfo=BUSINESS_TIMEZONE),
+                scan_started_at=datetime(2026, 8, 25, tzinfo=BUSINESS_TIMEZONE),
+                evidence_root="unused-evidence-root",
+                screenshots_dir="unused-screenshots-dir",
+                runtime=runtime,
+                job_repo=job_repo,
+                audit_repo=object(),
+                evidence_repo=evidence_repo,
+            )
+
+        sync_mock.assert_not_awaited()
+        scan_mock.assert_not_awaited()
+        self.assertFalse(result["halted"])
+        self.assertEqual(len(result["scan_results"]), 1)
+        self.assertEqual(result["scan_results"][0]["group"], "")
+        self.assertEqual(result["scan_results"][0]["evidence_state"], "LESSON_14_EXEMPTION")
+        self.assertEqual(len(captured_bcnb_calls), 1)
+
+        from pathlib import Path
+        import tempfile
+        from db import database
+        from repositories.zalo_batch_repository import ZaloBatchRepository
+        from services.zalo_bcnb_service import (
+            _apply_lesson_14_result,
+            _result_matches_schedule_row,
+        )
+
+        bcnb_row = {
+            "ma_lop": "VT-L14-NOZALO",
+            "buoi_so": "14",
+            "ngay_hoc": "30/08/2026",
+            "ngay_hoc_iso": "2026-08-30",
+            "giao_vien": "GV L14",
+        }
+        self.assertTrue(
+            _result_matches_schedule_row(result["scan_results"][0], bcnb_row, (34, 2026))
+        )
+        applied = _apply_lesson_14_result(result["scan_results"], bcnb_row)
+        self.assertIs(applied, result["scan_results"][0])
+        self.assertEqual(applied["evidence_state"], "LESSON_14_EXEMPTION")
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            db_file = str(Path(tmp_dir) / "exempt_batch_test.db")
+            with patch.object(database, "DB_PATH", db_file):
+                database.init_db()
+                async with database.get_db_connection() as db:
+                    await db.execute(
+                        "INSERT INTO scan_jobs (id, job_type, status, created_at) VALUES (990, 'ZALO_SCAN', 'RUNNING', '2026-08-25T10:00:00Z')"
+                    )
+                    await db.commit()
+                real_repo = ZaloBatchRepository()
+                seeded_count = await real_repo.seed_exempt_targets(
+                    990,
+                    [exempt_target],
+                    applied_at="2026-08-25T10:00:00Z",
+                )
+                self.assertEqual(seeded_count, 1)
+                seeded_rows = await real_repo.list_for_job(990)
+                self.assertEqual(len(seeded_rows), 1)
+                self.assertEqual(seeded_rows[0]["scan_status"], "SKIPPED")
+                self.assertEqual(seeded_rows[0]["group_name"], "")
+                self.assertEqual(
+                    seeded_rows[0]["result"]["evidence_state"],
+                    "LESSON_14_EXEMPTION",
+                )
+
 
 
 if __name__ == "__main__":

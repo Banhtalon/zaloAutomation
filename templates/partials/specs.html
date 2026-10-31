@@ -14,10 +14,6 @@
                     </div>
                 </div>
                 <div class="flex items-center gap-2">
-                    <button type="button" onclick="refreshCurrentZaloPreflight()" class="preflight-refresh" aria-label="Kiểm tra lại điều kiện an toàn từ tab kỹ thuật">
-                        <i class="fa-solid fa-rotate-right text-blue-600" aria-hidden="true"></i>
-                        Kiểm tra lại
-                    </button>
                     <button type="button" onclick="switchTab('logs')" class="preflight-refresh" aria-label="Cuộn xuống Nhật ký hệ thống">
                         <i class="fa-solid fa-terminal text-indigo-600" aria-hidden="true"></i>
                         Nhật ký &amp; Audit
@@ -29,7 +25,7 @@
                 <section id="zalo-preflight" class="preflight-compact flex flex-wrap items-center justify-between gap-2.5 rounded-xl border-2 border-slate-300 border-l-8 border-l-slate-600 bg-slate-50 px-3.5 py-2.5 text-xs text-slate-800 shadow-sm" role="status" aria-live="polite" aria-label="Trạng thái sẵn sàng trước khi chạy">
                     <div class="flex flex-wrap items-center gap-2.5 min-w-0">
                         <span id="zalo-preflight-status" class="rounded-md px-2.5 py-1 text-[10px] font-extrabold uppercase tracking-wider shrink-0 border">Đang kiểm tra</span>
-                        <span id="zalo-dashboard-plan-brief" class="font-bold truncate">Chưa có kế hoạch tuần BCNB · Hãy bấm “Dò tìm lại”</span>
+                        <span id="zalo-dashboard-plan-brief" class="font-bold truncate">Chưa có kế hoạch tuần BCNB · Hãy bấm “Dò kế hoạch”</span>
                     </div>
                     <div class="preflight-actions flex items-center gap-2 shrink-0">
                         <button id="zalo-preflight-refresh" type="button" onclick="refreshCurrentZaloPreflight()" class="preflight-refresh" aria-label="Kiểm tra lại điều kiện an toàn">
@@ -40,14 +36,14 @@
                 </section>
 
                 <div id="zalo-scan-plan" class="rounded-xl border-2 border-indigo-400 border-l-8 border-l-indigo-600 bg-indigo-50 px-4 py-2.5 text-xs font-bold text-indigo-950 shadow-sm" role="status">
-                    Chưa có kế hoạch tuần BCNB. Hãy bấm “Dò tìm” trước khi quét.
+                    Chưa có kế hoạch tuần BCNB. Hãy bấm “Dò kế hoạch” trước khi quét.
                 </div>
 
                 <div id="zalo-run-workflow" class="workflow-stepper" aria-label="Quy trình quét Zalo">
                     <div id="zalo-step-discover" class="workflow-step" data-state="current">
                         <span class="workflow-step__number">1</span>
                         <div>
-                            <p class="workflow-step__title">Dò tìm kế hoạch</p>
+                            <p class="workflow-step__title">Dò kế hoạch</p>
                             <p id="zalo-step-discover-detail" class="workflow-step__detail">Lấy hai tuần dữ liệu cần xử lý</p>
                         </div>
                     </div>

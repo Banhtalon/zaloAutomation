@@ -1,13 +1,7 @@
-import re
 from typing import Any
-import unicodedata
 
+from services.report_status import identity_tokens as _identity_tokens
 from services.zalo_safety import class_code_matches_group
-
-
-def _identity_tokens(value: str) -> tuple[str, ...]:
-    normalized = unicodedata.normalize("NFKC", value or "").upper()
-    return tuple(re.findall(r"[A-Z0-9]+", normalized))
 
 
 def _short_alias_tokens(class_code: str) -> tuple[str, ...]:

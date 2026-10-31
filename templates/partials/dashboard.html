@@ -1,6 +1,6 @@
 <!-- TAB 1: ZALO AUTO -->
 <div id="tab-dashboard" class="tab-content active shrink-0 flex-col space-y-3.5" role="tabpanel" aria-labelledby="btn-dashboard">
-    <div class="metrics-grid grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 shrink-0">
+    <div class="metrics-grid grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 shrink-0">
         <div class="metric-card glass-panel glow-card-blue flex items-center justify-between">
             <div class="flex items-center min-w-0">
                 <div class="metric-card__icon rounded-xl bg-blue-600 text-white border-2 border-blue-800 border-b-4 flex items-center justify-center text-lg shadow-sm mr-3.5 shrink-0">
@@ -25,6 +25,18 @@
             </div>
             <span class="text-[10px] font-extrabold text-emerald-800 bg-emerald-50 px-2 py-1 rounded-md border border-emerald-300 uppercase shrink-0">Đạt chuẩn</span>
         </div>
+        <div class="metric-card glass-panel glow-card-blue flex items-center justify-between">
+            <div class="flex items-center min-w-0">
+                <div class="metric-card__icon rounded-xl bg-slate-600 text-white border-2 border-slate-800 border-b-4 flex items-center justify-center text-lg shadow-sm mr-3.5 shrink-0">
+                    <i class="fa-regular fa-clock" aria-hidden="true"></i>
+                </div>
+                <div class="min-w-0">
+                    <p class="metric-card__label uppercase">Nộp trễ</p>
+                    <h3 class="metric-card__value font-extrabold font-mono mt-0.5 tabular-nums" id="count-late">0</h3>
+                </div>
+            </div>
+            <span class="text-[10px] font-extrabold text-slate-700 bg-slate-100 px-2 py-1 rounded-md border border-slate-300 uppercase shrink-0">Đã nộp</span>
+        </div>
         <div class="metric-card glass-panel glow-card-amber flex items-center justify-between">
             <div class="flex items-center min-w-0">
                 <div class="metric-card__icon rounded-xl bg-amber-500 text-white border-2 border-amber-700 border-b-4 flex items-center justify-center text-lg shadow-sm mr-3.5 shrink-0">
@@ -43,7 +55,7 @@
                     <i class="fa-solid fa-triangle-exclamation" aria-hidden="true"></i>
                 </div>
                 <div class="min-w-0">
-                    <p class="metric-card__label uppercase">Trễ / Chưa nộp</p>
+                    <p class="metric-card__label uppercase">Chưa nộp / Lỗi</p>
                     <h3 class="metric-card__value font-extrabold font-mono mt-0.5 tabular-nums" id="count-failed">0</h3>
                 </div>
             </div>
@@ -56,17 +68,17 @@
         <!-- ROW 1: PRIMARY 3-STEP WORKFLOW (LEFT) & SECONDARY POST-SCAN TOOLS (RIGHT) -->
         <div class="dashboard-action-bar flex flex-wrap items-center justify-between gap-3">
             <div class="dashboard-workflow-group flex flex-wrap items-center gap-2 bg-slate-100 p-1.5 rounded-xl border border-slate-300" role="group" aria-label="Quy trình thực thi chính">
-                <button type="button" onclick="startAutoDiscover()" class="action-button action-button--discover" title="Bước 1: Đọc BCNB và lập kế hoạch 2 tuần">
+                <button type="button" id="btn-discover" onclick="startAutoDiscover()" class="action-button action-button--discover" title="Bước 1: Đọc BCNB và lập kế hoạch 2 tuần">
                     <span class="step-pill step-pill--dark">1</span>
                     <i class="fa-solid fa-compass" aria-hidden="true"></i> Dò kế hoạch
                 </button>
                 <i class="fa-solid fa-chevron-right text-slate-400 text-xs hidden sm:inline" aria-hidden="true"></i>
-                <button type="button" onclick="startScan()" class="action-button action-button--scan" title="Bước 2: Kiểm tra an toàn và quét tin nhắn báo cáo Zalo">
+                <button type="button" id="btn-scan" onclick="startScan()" class="action-button action-button--scan" title="Bước 2: Kiểm tra an toàn và quét tin nhắn báo cáo Zalo">
                     <span class="step-pill step-pill--light">2</span>
                     <i class="fa-solid fa-bolt" aria-hidden="true"></i> Bắt đầu quét
                 </button>
                 <i class="fa-solid fa-chevron-right text-slate-400 text-xs hidden sm:inline" aria-hidden="true"></i>
-                <button type="button" onclick="openLmsModal()" class="action-button action-button--lms" title="Bước 3: Quét trang LMS và đối chiếu tích BCNB">
+                <button type="button" id="btn-lms-run" onclick="openLmsModal()" class="action-button action-button--lms" title="Bước 3: Quét trang LMS và đối chiếu tích BCNB">
                     <span class="step-pill step-pill--dark">3</span>
                     <i class="fa-solid fa-check-double" aria-hidden="true"></i> Tick LMS
                 </button>
@@ -115,6 +127,21 @@
             </div>
             <span id="weekly-history-status-badge" class="rounded-lg bg-slate-900 text-white border border-slate-950 px-3 py-1.5 text-[11px] font-bold shadow-sm truncate">Chế độ: Theo dõi phiên hiện tại</span>
         </div>
+
+        <!-- ROW 3: COMPACT PREFLIGHT & PROGRESS STRIP -->
+        <div id="dashboard-compact-strip" class="well-inset px-3 py-2 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-800">
+            <div class="flex flex-wrap items-center gap-2 min-w-0">
+                <span id="dashboard-preflight-pill" class="rounded-md bg-slate-700 border border-slate-900 px-2 py-0.5 text-[10px] font-extrabold uppercase tracking-wider text-white shrink-0">Đang kiểm tra</span>
+                <span id="dashboard-plan-strip-text" class="font-bold text-slate-800 truncate">Chưa có kế hoạch tuần BCNB · Hãy bấm “Dò kế hoạch”</span>
+            </div>
+            <div class="flex flex-wrap items-center gap-2 shrink-0">
+                <span id="dashboard-progress-strip-text" class="hidden font-mono text-[11px] font-bold text-indigo-900 bg-indigo-50 border border-indigo-300 rounded px-2 py-0.5"></span>
+                <details id="dashboard-preflight-drawer" class="hidden">
+                    <summary id="dashboard-preflight-drawer-summary" class="cursor-pointer font-extrabold text-blue-700 hover:underline select-none">Chi tiết kiểm tra</summary>
+                    <div id="dashboard-preflight-drawer-checks" class="mt-1.5 space-y-1 text-[11px] font-semibold"></div>
+                </details>
+            </div>
+        </div>
     </div>
 
     <details id="zalo-review-queue" class="hidden rounded-xl border-2 border-amber-400 border-l-8 border-l-amber-600 bg-amber-50 px-4 py-2.5 text-xs text-amber-950 shadow-sm shrink-0">
@@ -158,7 +185,7 @@
                                     <i class="fa-regular fa-folder-open text-3xl" aria-hidden="true"></i>
                                 </div>
                                 <p class="font-extrabold text-slate-800">Chưa có dữ liệu</p>
-                                <p class="mt-1 text-sm font-medium text-slate-600">Hãy Dò tìm kế hoạch, kiểm tra an toàn rồi bắt đầu quét.</p>
+                                <p class="mt-1 text-sm font-medium text-slate-600">Hãy bấm Dò kế hoạch, kiểm tra an toàn rồi bắt đầu quét.</p>
                             </div>
                         </td>
                     </tr>
@@ -171,8 +198,9 @@
             <span><i class="fa-solid fa-circle-info text-blue-600 mr-1" aria-hidden="true"></i>Các lớp chưa báo cáo được đóng khung đỏ nổi bật để ưu tiên kiểm tra.</span>
             <div class="flex items-center gap-4">
                 <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-sm bg-emerald-500 border border-emerald-700 inline-block"></span> Đã báo cáo</span>
+                <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-sm bg-slate-500 border border-slate-700 inline-block"></span> Nộp trễ</span>
                 <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-sm bg-amber-500 border border-amber-700 inline-block"></span> Miễn báo cáo</span>
-                <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-sm bg-rose-500 border border-rose-700 inline-block"></span> Trễ / Chưa nộp</span>
+                <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-sm bg-rose-500 border border-rose-700 inline-block"></span> Chưa nộp / Lỗi</span>
             </div>
         </div>
     </div>

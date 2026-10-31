@@ -1,7 +1,7 @@
 # PROJECT SUMMARY — Zalo Automation
 
 > Nguồn tham chiếu tổng quan cho AI và người phát triển. Nội dung này mô tả mã
-> nguồn tại ngày 2026-10-29; dữ liệu và trạng thái chạy phải kiểm tra lại trong
+> nguồn tại ngày 2026-10-31; dữ liệu và trạng thái chạy phải kiểm tra lại trong
 > `PROJECT_STATE.md` và runtime trước mỗi task.
 
 ## 1. Mục tiêu sản phẩm
@@ -42,13 +42,13 @@ Không dùng nhiều Uvicorn worker với kiến trúc hiện tại.
 | `main.py` | Tạo FastAPI app, middleware bảo mật/ghi log và gắn router |
 | `api/` | 10 router: giao diện, đăng nhập, Zalo, Form, LMS, job, upload, health, bằng chứng và probe đã nghỉ |
 | `core/` | Cấu hình bất biến, container, phân quyền và kiểm tra sẵn sàng production |
-| `services/` | Luồng nghiệp vụ, Playwright/Gemini gateway, dispatcher, bằng chứng và kiểm tra an toàn |
+| `services/` | Luồng nghiệp vụ, một nguồn sự thật trạng thái/phân loại báo cáo (`report_status.py`), Playwright/Gemini gateway, dispatcher, bằng chứng và kiểm tra an toàn |
 | `repositories/` | Đọc/ghi SQLite cho job, lớp, báo cáo, audit, LMS, upload và bằng chứng |
 | `db/` | Tạo/nâng schema, transaction, backup và thử khôi phục |
 | `googleform_autosubmit/` | Cấu hình, OCR và thao tác Google Form |
 | `classifiers/` | Bộ phân loại báo cáo Zalo theo luật và trích ngày |
 | `templates/`, `static/` | Dashboard năm khu vực và mã giao diện |
-| `tests/` | 55 file `test_*.py` cùng các cổng kiểm tra riêng |
+| `tests/` | 56 file `test_*.py` cùng các cổng kiểm tra riêng |
 | `scripts/` | Khởi động local, backup/restore, smoke test và runner chẩn đoán giới hạn |
 | `deploy/staging/` | Mẫu cấu hình staging; không tự triển khai |
 
@@ -108,12 +108,9 @@ có thể thao tác bên ngoài đã xảy ra nhưng chưa kịp ghi kết quả
    Zalo trên mỗi profile vì Zalo chỉ cho một phiên/tab ổn định. Muốn tăng worker
    phải dùng profile riêng và kiểm chứng riêng; thao tác ghi BCNB vẫn được giới
    hạn độc lập.
-5. Tin nhắn được phân loại bằng luật. Ngày gửi lấy từ giao diện Zalo; ngày trong
-   nội dung chỉ là bằng chứng hỗ trợ.
-6. Thiếu lịch sử đồng bộ, header sai, ngày không chắc chắn hoặc target mơ hồ trả
-   trạng thái cần xem xét, không suy luận “không có báo cáo”.
-7. Khi ghi BCNB, hệ thống ghi intent, tải lại trang và đọc lại checkbox trước khi
-   đánh dấu `VERIFIED`.
+5. Tin nhắn được phân loại bằng luật (có tùy chọn chấm phụ AI bị giới hạn theo `target_key` và không ghi nguyên văn tin nhắn vào log). Ngày gửi lấy từ giao diện Zalo; ngày trong nội dung chỉ là bằng chứng hỗ trợ. Báo cáo gửi đúng ngày học nhưng thiếu ngày/buổi hoặc ghi sai ngày (không mâu thuẫn số buổi, không trùng buổi trong ngày) vẫn được ghép kèm ghi chú QC mức `NOTE` (`DEC-039`).
+6. Thiếu lịch sử đồng bộ, header sai, ngày không chắc chắn hoặc target mơ hồ trả trạng thái cần xem xét, không suy luận “không có báo cáo”. Dòng BCNB không trở thành target (chuyển cấp, thiếu/mơ hồ nhóm Zalo, trùng, ngày học lỗi, rỗng) đều được liệt kê trong `dropped_rows` và đẩy lên preflight `YELLOW`; miễn trừ Buổi 14 được dựng trực tiếp từ dòng BCNB (`exempt_targets`).
+7. Khi ghi BCNB, hệ thống tách độc lập bước tích checkbox (`execute_verified_checkbox_action`) và bước cập nhật `Mô tả vấn đề (TE/TF/QC)` (`execute_verified_checker_note_action`, có kiểm tra lạc quan trước POST, provenance từ `external_action_audit` và đọc lại sau hard reload); chọn slot LMS theo ngày học + số buổi (`select_matching_lms_slot`), và phân loại trạng thái/lỗi theo một nguồn sự thật `services/report_status.py` (`categorize_row`, `issue_severity`, `is_failed`).
 
 Vòng đời lớp nằm trong `CLASS_LIFECYCLE.md`.
 

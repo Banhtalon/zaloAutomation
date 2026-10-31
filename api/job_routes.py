@@ -1,13 +1,56 @@
+import json
+from typing import Any
+
 from fastapi import APIRouter, Depends, Query
 
 from api.dependencies import get_container, require_operator, require_viewer
 from api.errors import internal_error, public_error
 from core.container import AppContainer
 from repositories.job_repository import JobNotFoundError, JobStateError
+from services.report_status import (
+    SUBMITTED_EVIDENCE_STATES,
+    categorize_row,
+    is_failed,
+)
 from services.zalo_preflight import effective_scan_worker_count
 
 
 router = APIRouter()
+
+
+def _annotate_item_status(item: dict[str, Any]) -> dict[str, Any]:
+    item["category"] = categorize_row(item)
+    item["is_failed"] = is_failed(item)
+    return item
+
+
+def _enrich_job_payload(job: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(job, dict):
+        return job
+    results = job.get("results")
+    parsed_from_str = False
+    if isinstance(results, str) and results.strip():
+        try:
+            results = json.loads(results)
+            parsed_from_str = True
+        except (TypeError, ValueError):
+            parsed_from_str = False
+    if isinstance(results, list):
+        for item in results:
+            if isinstance(item, dict):
+                _annotate_item_status(item)
+    elif isinstance(results, dict):
+        items = results.get("items")
+        if isinstance(items, list):
+            for item in items:
+                if isinstance(item, dict):
+                    _annotate_item_status(item)
+        updated_item = results.get("updated_item")
+        if isinstance(updated_item, dict):
+            _annotate_item_status(updated_item)
+    if parsed_from_str:
+        job["results"] = json.dumps(results, ensure_ascii=False)
+    return job
 
 
 def _zalo_target_report(targets: list[dict]) -> tuple[dict[str, int], list[dict]]:
@@ -40,7 +83,7 @@ def _zalo_target_report(targets: list[dict]) -> tuple[dict[str, int], list[dict]
         error_code = str(target.get("error_code") or result.get("error_code") or "")
         if scan_status not in {"PENDING", "RUNNING"}:
             counts["checked"] += 1
-        if evidence_state in {"SUBMITTED_VERIFIED", "SUBMITTED_LATE_VERIFIED"}:
+        if evidence_state in SUBMITTED_EVIDENCE_STATES:
             counts["submitted_verified"] += 1
         elif evidence_state == "NOT_FOUND_VERIFIED":
             counts["not_found_verified"] += 1
@@ -104,12 +147,27 @@ def _zalo_target_report(targets: list[dict]) -> tuple[dict[str, int], list[dict]
 
 @router.get("/api/jobs/active/latest", dependencies=[Depends(require_viewer)])
 async def get_latest_active_job(container: AppContainer = Depends(get_container)):
-    return await container.job_repo.get_latest_job(active_only=True)
+    return _enrich_job_payload(
+        await container.job_repo.get_latest_job(active_only=True)
+    )
 
 
 @router.get("/api/jobs/latest", dependencies=[Depends(require_viewer)])
-async def get_latest_job(container: AppContainer = Depends(get_container)):
-    return await container.job_repo.get_latest_job()
+async def get_latest_job(
+    container: AppContainer = Depends(get_container),
+    job_type: str | None = Query(default=None),
+):
+    clean_type = (
+        None
+        if hasattr(job_type, "default") or job_type is None
+        else str(job_type).strip().upper() or None
+    )
+    job = (
+        await container.job_repo.get_latest_job(job_type=clean_type)
+        if clean_type
+        else await container.job_repo.get_latest_job()
+    )
+    return _enrich_job_payload(job)
 
 
 @router.get("/api/jobs/{job_id}", dependencies=[Depends(require_viewer)])
@@ -120,7 +178,7 @@ async def get_job_status(
     job = await container.job_repo.get_job(job_id)
     if not job:
         raise public_error(404, "JOB_NOT_FOUND", "Không tìm thấy job.")
-    return job
+    return _enrich_job_payload(job)
 
 
 @router.post("/api/jobs/{job_id}/cancel", dependencies=[Depends(require_operator)])
@@ -191,6 +249,45 @@ async def get_job_targets(
     repository = container.zalo_batch_repo
     settings = getattr(container, "settings", None)
     targets = await repository.list_for_job(job_id)
+    for target in targets:
+        if not isinstance(target, dict):
+            continue
+        res_val = target.get("result")
+        if isinstance(res_val, dict):
+            eff_write_status = str(
+                target.get("write_status") or res_val.get("write_status") or ""
+            ).strip()
+            eff_bcnb_state = str(res_val.get("bcnb_update_state") or "").strip()
+            if eff_write_status and (
+                not eff_bcnb_state
+                or eff_write_status.upper()
+                in {
+                    "FAILED",
+                    "FAILED_BEFORE_WRITE",
+                    "OUTCOME_UNKNOWN",
+                    "CONFLICT_AFTER_WRITE",
+                    "BLOCKED_BATCH_HALT",
+                }
+            ):
+                eff_bcnb_state = eff_write_status
+            combined_row = {
+                **res_val,
+                "bcnb_update_state": eff_bcnb_state or None,
+                "write_status": eff_write_status or None,
+                "scan_status": target.get("scan_status") or res_val.get("scan_status"),
+                "error_code": target.get("error_code") or res_val.get("error_code"),
+            }
+            category = categorize_row(combined_row)
+            failed = is_failed(combined_row)
+            if eff_bcnb_state:
+                res_val["bcnb_update_state"] = eff_bcnb_state
+            res_val["category"] = category
+            res_val["is_failed"] = failed
+            target["category"] = category
+            target["is_failed"] = failed
+        else:
+            target["category"] = categorize_row(target)
+            target["is_failed"] = is_failed(target)
     report, review_queue = _zalo_target_report(targets)
     execution_mode = "production" if job.get("mutates_external") else "dry-run"
     get_record = getattr(container.job_repo, "get_job_record", None)

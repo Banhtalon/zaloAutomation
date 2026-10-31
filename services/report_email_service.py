@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 from email.message import EmailMessage
+import hashlib
 import html
+import json
 import os
 import re
 import smtplib
@@ -12,8 +15,11 @@ import ssl
 from typing import Any
 import unicodedata
 from urllib.parse import quote
+import uuid
 
+from repositories.audit_repository import AuditRepository
 from repositories.report_repository import (
+    ReportRepository,
     _resolve_row_evaluation_status,
     _resolve_row_issue_description,
     build_weekly_summary_csv,
@@ -213,6 +219,8 @@ def _short_url_status(value: str) -> str:
     low = str(value or "").lower()
     if "chưa quét" in low:
         return "Chưa quét"
+    if "⏳" in low or "chờ kiểm tra deadline" in low:
+        return "Chờ KT"
     if (
         "❌" in low
         or "[x]" in low
@@ -263,7 +271,9 @@ def _prepare_email_row_fields(idx: int, row: dict[str, Any]) -> dict[str, str]:
     lesson = _clean_single_line(row.get("lesson"), "—")
     class_date = _clean_single_line(row.get("class_date"), "—")
     zalo_status = normalize_zalo_status_text(
-        _clean_single_line(row.get("zalo_status"), "Chưa xác định")
+        _clean_single_line(row.get("zalo_status"), "Chưa xác định"),
+        item=row,
+        st=st,
     )
     lms_status = _clean_single_line(row.get("lms_status"), "Chưa quét LMS")
     raw_eval = str(row.get("evaluation_status") or "").strip()
@@ -352,6 +362,37 @@ def _build_unicode_table(prepared_rows: list[dict[str, str]]) -> str:
     return "\n".join(lines)
 
 
+def _count_unique_classes(rows: list[dict[str, Any]] | None) -> int:
+    if not isinstance(rows, list):
+        return 0
+    seen: set[str] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        code = str(row.get("class_code") or "").strip().upper()
+        if code and code != "KHONG_RO_LOP":
+            seen.add(code)
+    return len(seen)
+
+
+SMTP_DUPLICATE_WINDOW_SECONDS = 300
+
+
+def _parse_iso_utc(raw_value: Any) -> datetime | None:
+    text = str(raw_value or "").strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
 def build_failed_classes_email_package(
     *,
     week: int,
@@ -360,19 +401,45 @@ def build_failed_classes_email_package(
     total_rows_count: int,
     selected_job_id: int | None,
     recipients: list[str],
+    all_rows: list[dict[str, Any]] | None = None,
+    execution_mode: str = "production",
+    is_dry_run: bool = False,
+    execution_mode_badge: str | None = None,
 ) -> dict[str, Any]:
     """Build CSV attachment, subject, text/HTML bodies, and mailto/Gmail compose links."""
     safe_week = int(week)
     safe_year = int(year)
     failed_count = len(failed_rows)
     total_count = max(failed_count, int(total_rows_count))
-    filename = f"Bao_Cao_Lop_Loi_Tuan_W{safe_week:02d}_{safe_year}.csv"
-    csv_text = build_weekly_summary_csv(failed_rows)
+    failed_classes_count = _count_unique_classes(failed_rows)
+    total_classes_count = max(
+        failed_classes_count,
+        _count_unique_classes(all_rows) if isinstance(all_rows, list) else failed_classes_count,
+    )
+    resolved_exec_mode = str(execution_mode or "production").strip().lower()
+    resolved_is_dry_run = bool(
+        is_dry_run
+        or resolved_exec_mode in {"dry-run", "dry_run"}
+        or str(execution_mode_badge or "").strip().upper() == "DRY-RUN"
+    )
+    resolved_badge = "DRY-RUN" if resolved_is_dry_run else None
+    badge_prefix = f"[{resolved_badge}] " if resolved_badge else ""
+    badge_suffix = f" [{resolved_badge}]" if resolved_badge else ""
+    filename = (
+        f"Bao_Cao_Lop_Loi_Tuan_W{safe_week:02d}_{safe_year}_DRY_RUN.csv"
+        if resolved_is_dry_run
+        else f"Bao_Cao_Lop_Loi_Tuan_W{safe_week:02d}_{safe_year}.csv"
+    )
+    csv_text = build_weekly_summary_csv(
+        failed_rows,
+        is_dry_run=resolved_is_dry_run,
+        execution_mode_badge=resolved_badge,
+    )
 
     job_suffix = f" (Job #{int(selected_job_id)})" if selected_job_id else ""
     subject = (
-        f"[MindX BCNB] Báo cáo danh sách lớp lỗi Tuần W{safe_week:02d}/{safe_year}"
-        f"{job_suffix} - {failed_count}/{total_count} lớp cần xử lý"
+        f"{badge_prefix}[MindX BCNB] Báo cáo danh sách lớp lỗi Tuần W{safe_week:02d}/{safe_year}"
+        f"{job_suffix} - {failed_count}/{total_count} buổi học cần xử lý ({failed_classes_count} lớp)"
     )
 
     prepared_rows = [
@@ -429,9 +496,9 @@ def build_failed_classes_email_package(
     header_lines = [
         "Kính gửi Quản lý,",
         "",
-        f"Hệ thống Zalo & BCNB Automation gửi báo cáo danh sách các lớp lỗi/chưa hoàn tất trong Tuần W{safe_week:02d}/{safe_year}{job_suffix}:",
-        f"- Tổng số lớp trong kỳ: {total_count}",
-        f"- Số lớp lỗi / cần kiểm tra: {failed_count}",
+        f"Hệ thống Zalo & BCNB Automation gửi báo cáo danh sách các lớp lỗi/chưa hoàn tất trong Tuần W{safe_week:02d}/{safe_year}{job_suffix}{badge_suffix}:",
+        f"- Tổng số buổi học trong kỳ: {total_count} ({total_classes_count} lớp)",
+        f"- Số buổi học lỗi / cần kiểm tra: {failed_count} ({failed_classes_count} lớp)",
         "",
     ]
     footer_lines = [
@@ -468,7 +535,7 @@ def build_failed_classes_email_package(
     compose_url_compact_body = "\n".join(
         [
             "Kính gửi Quản lý,",
-            f"Báo cáo lớp lỗi Tuần W{safe_week:02d}/{safe_year}{job_suffix}: {failed_count}/{total_count} lớp cần xử lý.",
+            f"Báo cáo lớp lỗi Tuần W{safe_week:02d}/{safe_year}{job_suffix}{badge_suffix}: {failed_count}/{total_count} buổi học cần xử lý ({failed_classes_count} lớp).",
             "(Mẹo: Bảng 9 cột kẻ khung đã tự động copy vào Clipboard - bấm Ctrl+V trong Gmail để dán bảng màu đầy đủ)",
             "",
             *url_compact_lines,
@@ -521,10 +588,10 @@ def build_failed_classes_email_package(
         '<div style="font-family:Inter,Segoe UI,Arial,sans-serif;color:#0f172a;line-height:1.5;">'
         f"<p>Kính gửi Quản lý,</p>"
         f"<p>Hệ thống <strong>MindX Zalo &amp; BCNB Automation</strong> gửi báo cáo danh sách các lớp lỗi/chưa hoàn tất trong "
-        f"<strong>Tuần W{safe_week:02d}/{safe_year}{html.escape(job_suffix)}</strong>:</p>"
+        f"<strong>Tuần W{safe_week:02d}/{safe_year}{html.escape(job_suffix)}{html.escape(badge_suffix)}</strong>:</p>"
         "<ul>"
-        f"<li>Tổng số lớp trong kỳ: <strong>{total_count}</strong></li>"
-        f'<li>Số lớp lỗi / cần xử lý: <strong style="color:#dc2626;">{failed_count}</strong></li>'
+        f"<li>Tổng số buổi học trong kỳ: <strong>{total_count}</strong> ({total_classes_count} lớp)</li>"
+        f'<li>Số buổi học lỗi / cần xử lý: <strong style="color:#dc2626;">{failed_count}</strong> ({failed_classes_count} lớp)</li>'
         "</ul>"
         f"{html_table}"
         "<p style=\"margin-top:16px;font-size:12px;color:#475569;\">Trân trọng,<br>MindX Zalo &amp; BCNB Automation</p>"
@@ -583,6 +650,11 @@ def build_failed_classes_email_package(
         "gmail_compose_url": gmail_compose_url,
         "gmail_body_truncated": gmail_body_truncated,
         "mailto_url": mailto_url,
+        "total_classes_count": total_classes_count,
+        "failed_classes_count": failed_classes_count,
+        "execution_mode": "dry-run" if resolved_is_dry_run else "production",
+        "is_dry_run": resolved_is_dry_run,
+        "execution_mode_badge": resolved_badge,
     }
 
 
@@ -596,25 +668,45 @@ def _deliver_smtp_message(
     message: EmailMessage,
 ) -> dict[str, Any]:
     tls_context = ssl.create_default_context()
-    if int(port) == 465:
-        with smtplib.SMTP_SSL(
-            host=host,
-            port=int(port),
-            timeout=15.0,
-            context=tls_context,
-        ) as smtp:
-            smtp.login(username, password)
-            refused = smtp.send_message(message)
-            return dict(refused) if isinstance(refused, dict) else {}
-
-    with smtplib.SMTP(host=host, port=int(port), timeout=15.0) as smtp:
-        smtp.ehlo()
-        if use_tls:
-            smtp.starttls(context=tls_context)
-            smtp.ehlo()
-        smtp.login(username, password)
-        refused = smtp.send_message(message)
-        return dict(refused) if isinstance(refused, dict) else {}
+    send_started = False
+    send_completed = False
+    refused_result: dict[str, Any] = {}
+    try:
+        if int(port) == 465:
+            with smtplib.SMTP_SSL(
+                host=host,
+                port=int(port),
+                timeout=15.0,
+                context=tls_context,
+            ) as smtp:
+                smtp.login(username, password)
+                send_started = True
+                refused = smtp.send_message(message)
+                refused_result = dict(refused) if isinstance(refused, dict) else {}
+                send_completed = True
+        else:
+            with smtplib.SMTP(host=host, port=int(port), timeout=15.0) as smtp:
+                smtp.ehlo()
+                if use_tls:
+                    smtp.starttls(context=tls_context)
+                    smtp.ehlo()
+                smtp.login(username, password)
+                send_started = True
+                refused = smtp.send_message(message)
+                refused_result = dict(refused) if isinstance(refused, dict) else {}
+                send_completed = True
+        return refused_result
+    except (smtplib.SMTPRecipientsRefused, smtplib.SMTPSenderRefused) as exc:
+        setattr(exc, "_smtp_before_write", True)
+        raise
+    except Exception as exc:
+        if send_completed:
+            return refused_result
+        if not send_started:
+            setattr(exc, "_smtp_before_write", True)
+        else:
+            setattr(exc, "_smtp_ambiguous_after_send", True)
+        raise
 
 
 async def send_failed_classes_report_email(
@@ -626,8 +718,31 @@ async def send_failed_classes_report_email(
     failed_rows: list[dict[str, Any]],
     selected_job_id: int | None = None,
     requested_recipients: Any = None,
+    confirm_duplicate: bool = False,
+    execution_mode: str = "production",
+    is_dry_run: bool = False,
+    execution_mode_badge: str | None = None,
+    audit_repo: Any = None,
+    report_repo: Any = None,
 ) -> dict[str, Any]:
     """Validate failed-classes rows, build CSV package, and dispatch via SMTP if configured."""
+    resolved_report_repo = report_repo or ReportRepository()
+    active_jobs = await resolved_report_repo.get_active_mutation_jobs_for_week(
+        int(week), int(year)
+    )
+    if active_jobs:
+        active_desc = ", ".join(
+            f"#{j.get('id')} ({j.get('job_type')}:{j.get('status')})"
+            for j in active_jobs
+        )
+        raise ReportEmailError(
+            f"Tuần W{int(week):02d}/{int(year)} đang có tác vụ chạy hoặc chờ chạy ({active_desc}). "
+            "Vui lòng đợi tác vụ hoàn tất trước khi gửi email báo cáo.",
+            code="SCAN_ACTIVE_FOR_WEEK",
+            status_code=409,
+            extra={"active_jobs": active_jobs},
+        )
+
     if not all_rows:
         raise ReportEmailError(
             "Chưa có dữ liệu báo cáo trong tuần đã chọn để xuất CSV và gửi mail.",
@@ -655,7 +770,23 @@ async def send_failed_classes_report_email(
         total_rows_count=len(all_rows),
         selected_job_id=selected_job_id,
         recipients=recipients,
+        all_rows=all_rows,
+        execution_mode=execution_mode,
+        is_dry_run=is_dry_run,
+        execution_mode_badge=execution_mode_badge,
     )
+    resolved_exec_mode = str(package.get("execution_mode") or "production")
+    resolved_is_dry_run = bool(package.get("is_dry_run", False))
+    resolved_badge = package.get("execution_mode_badge")
+
+    recipients_norm = sorted(
+        {str(r).strip().lower() for r in recipients if str(r).strip()}
+    )
+    recipients_sha256 = hashlib.sha256(
+        ",".join(recipients_norm).encode("utf-8")
+    ).hexdigest()
+    content_payload = f"{package['subject']}\n{package['text_body']}\n{package['csv_text']}"
+    content_sha256 = hashlib.sha256(content_payload.encode("utf-8")).hexdigest()
 
     smtp_host = _clean_single_line(getattr(settings, "smtp_host", "smtp.gmail.com"), "")
     smtp_port = int(getattr(settings, "smtp_port", 587) or 587)
@@ -671,12 +802,17 @@ async def send_failed_classes_report_email(
     smtp_ready = bool(
         smtp_host and smtp_username and smtp_password and not isolated_quality
     )
-    if not smtp_ready:
+    if not smtp_ready or resolved_is_dry_run:
         return {
             "ok": True,
-            "delivery_status": "SMTP_NOT_CONFIGURED",
+            "delivery_status": (
+                "DRY_RUN_PREVIEW" if resolved_is_dry_run and smtp_ready else "SMTP_NOT_CONFIGURED"
+            ),
+            "execution_mode": resolved_exec_mode,
+            "is_dry_run": resolved_is_dry_run,
+            "execution_mode_badge": resolved_badge,
             "message": (
-                f"Đã chuẩn bị báo cáo {len(failed_rows)} lớp lỗi (bảng 9 cột đã tự động copy vào Clipboard — bấm Ctrl+V trong Gmail để dán bảng màu). "
+                f"Đã chuẩn bị báo cáo {len(failed_rows)} buổi học lỗi (bảng 9 cột đã tự động copy vào Clipboard — bấm Ctrl+V trong Gmail để dán bảng màu). "
                 f"Hệ thống đang mở sẵn khung gửi mail tới {', '.join(recipients)}."
             ),
             "week": int(week),
@@ -684,7 +820,11 @@ async def send_failed_classes_report_email(
             "selected_job_id": selected_job_id,
             "total_count": len(all_rows),
             "failed_count": len(failed_rows),
+            "total_classes_count": package["total_classes_count"],
+            "failed_classes_count": package["failed_classes_count"],
             "recipients": recipients,
+            "recipients_sha256": recipients_sha256,
+            "content_sha256": content_sha256,
             "accepted_recipients": [],
             "refused_recipients": [],
             "available_managers": list(MANAGER_EMAIL_ALLOWLIST),
@@ -699,6 +839,142 @@ async def send_failed_classes_report_email(
             "gmail_body_truncated": bool(package.get("gmail_body_truncated", False)),
             "mailto_url": package["mailto_url"],
         }
+
+    resolved_audit_repo = audit_repo or AuditRepository()
+    target_id = f"{int(year):04d}-W{int(week):02d}"
+    attempt_nonce = uuid.uuid4().hex[:12]
+    action_key = (
+        f"report-email-smtp:{int(year):04d}:W{int(week):02d}:"
+        f"{int(selected_job_id) if selected_job_id is not None else 0}:"
+        f"{recipients_sha256[:12]}:{attempt_nonce}"
+    )
+    audit_reason = {
+        "week": int(week),
+        "year": int(year),
+        "selected_job_id": int(selected_job_id) if selected_job_id is not None else None,
+        "recipients": recipients,
+        "recipients_sha256": recipients_sha256,
+        "content_sha256": content_sha256,
+        "confirm_duplicate": bool(confirm_duplicate),
+        "failed_count": len(failed_rows),
+        "total_count": len(all_rows),
+        "failed_classes_count": package["failed_classes_count"],
+        "total_classes_count": package["total_classes_count"],
+    }
+    intended_state = {
+        "recipients": recipients,
+        "recipients_sha256": recipients_sha256,
+        "content_sha256": content_sha256,
+    }
+    begin_smtp_fn = getattr(resolved_audit_repo, "begin_smtp_send_intent", None)
+    if begin_smtp_fn is not None:
+        audit_row, duplicate_audit = await begin_smtp_fn(
+            action_key=action_key,
+            job_id=int(selected_job_id) if selected_job_id is not None else None,
+            target_id=target_id,
+            recipients_sha256=recipients_sha256,
+            content_sha256=content_sha256,
+            intended_state=intended_state,
+            reason=audit_reason,
+            duplicate_window_seconds=SMTP_DUPLICATE_WINDOW_SECONDS,
+            confirm_duplicate=bool(confirm_duplicate),
+        )
+        if duplicate_audit is not None or audit_row is None:
+            dup_info = duplicate_audit or {}
+            age_s = int(dup_info.get("_age_seconds") or 0)
+            raise ReportEmailError(
+                f"Email báo cáo tuần W{int(week):02d}/{int(year)} vừa được gửi hoặc đang gửi tới cùng người nhận cách đây {age_s}s. "
+                "Truyền confirm_duplicate=true nếu muốn gửi lại.",
+                code="DUPLICATE_EMAIL_SEND",
+                status_code=409,
+                extra={
+                    "duplicate_audit_id": dup_info.get("id"),
+                    "duplicate_outcome": dup_info.get("outcome"),
+                    "recipients_sha256": recipients_sha256,
+                    "content_sha256": content_sha256,
+                },
+            )
+    else:
+        if not confirm_duplicate:
+            recent_audits = await resolved_audit_repo.list_recent_smtp_send_audits(
+                target_id, recipients_sha256=recipients_sha256, limit=200
+            )
+            now_utc = datetime.now(timezone.utc)
+            for audit in recent_audits:
+                outcome_up = str(audit.get("outcome") or "").strip().upper()
+                if outcome_up not in {
+                    "VERIFIED",
+                    "INTENT_RECORDED",
+                    "FAILED_AFTER_WRITE",
+                    "UNKNOWN",
+                }:
+                    continue
+                audit_dt = _parse_iso_utc(
+                    audit.get("completed_at") or audit.get("created_at")
+                )
+                if audit_dt is None:
+                    continue
+                age_seconds = (now_utc - audit_dt).total_seconds()
+                if age_seconds > SMTP_DUPLICATE_WINDOW_SECONDS:
+                    continue
+                raw_reason = audit.get("reason") or audit.get("reason_json")
+                try:
+                    reason_obj = (
+                        json.loads(raw_reason)
+                        if isinstance(raw_reason, str)
+                        else (raw_reason if isinstance(raw_reason, dict) else {})
+                    )
+                except Exception:
+                    reason_obj = {}
+                if not isinstance(reason_obj, dict):
+                    reason_obj = {}
+                after_obj = audit.get("after_state")
+                if not isinstance(after_obj, dict):
+                    after_obj = {}
+                if outcome_up == "FAILED_AFTER_WRITE" and not (
+                    after_obj.get("accepted_recipients")
+                    or reason_obj.get("accepted_recipients")
+                ):
+                    continue
+                if str(reason_obj.get("recipients_sha256") or "") == recipients_sha256:
+                    raise ReportEmailError(
+                        f"Email báo cáo tuần W{int(week):02d}/{int(year)} vừa được gửi hoặc đang gửi tới cùng người nhận cách đây {max(0, int(age_seconds))}s. "
+                        "Truyền confirm_duplicate=true nếu muốn gửi lại.",
+                        code="DUPLICATE_EMAIL_SEND",
+                        status_code=409,
+                        extra={
+                            "duplicate_audit_id": audit.get("id"),
+                            "duplicate_outcome": outcome_up,
+                            "recipients_sha256": recipients_sha256,
+                            "content_sha256": content_sha256,
+                        },
+                    )
+            if any(bool(a.get("_overflow")) for a in recent_audits) or len(recent_audits) > 200:
+                top_audit = recent_audits[0] if recent_audits else {}
+                raise ReportEmailError(
+                    f"Email báo cáo tuần W{int(week):02d}/{int(year)} vượt ngưỡng kiểm tra lịch sử gửi tới cùng người nhận. "
+                    "Truyền confirm_duplicate=true nếu muốn gửi lại.",
+                    code="DUPLICATE_EMAIL_SEND",
+                    status_code=409,
+                    extra={
+                        "duplicate_audit_id": top_audit.get("id"),
+                        "duplicate_outcome": "OVERFLOW",
+                        "recipients_sha256": recipients_sha256,
+                        "content_sha256": content_sha256,
+                    },
+                )
+        audit_row, _ = await resolved_audit_repo.record_intent(
+            action_key=action_key,
+            job_id=int(selected_job_id) if selected_job_id is not None else 0,
+            action_type="REPORT_EMAIL_SMTP_SEND",
+            target_type="weekly_report_email",
+            target_id=target_id,
+            mode="production",
+            intended_state=intended_state,
+            reason=audit_reason,
+            evidence_sha256=content_sha256,
+        )
+    audit_id = int(audit_row["id"])
 
     msg = EmailMessage()
     msg["Subject"] = _clean_single_line(package["subject"], "[MindX BCNB] Báo cáo lớp lỗi")
@@ -725,6 +1001,23 @@ async def send_failed_classes_report_email(
             message=msg,
         )
     except Exception as exc:
+        failure_outcome = (
+            "FAILED_BEFORE_WRITE"
+            if bool(getattr(exc, "_smtp_before_write", False))
+            else "UNKNOWN"
+        )
+        await resolved_audit_repo.complete_action(
+            audit_id,
+            outcome=failure_outcome,
+            after_state={
+                **audit_reason,
+                "error_code": "SMTP_SEND_FAILED",
+                "error_type": type(exc).__name__,
+                "delivery_outcome": failure_outcome,
+            },
+            error_message=f"SMTP_SEND_FAILED: {type(exc).__name__}",
+            evidence_sha256=content_sha256,
+        )
         raise ReportEmailError(
             "Không thể gửi email tự động qua SMTP. Hãy kiểm tra cấu hình SMTP_HOST/SMTP_PORT/SMTP_USERNAME/SMTP_PASSWORD trong .env.",
             code="SMTP_SEND_FAILED",
@@ -735,6 +1028,8 @@ async def send_failed_classes_report_email(
                 "failed_count": len(failed_rows),
                 "accepted_recipients": [],
                 "refused_recipients": list(recipients),
+                "audit_id": audit_id,
+                "audit_outcome": failure_outcome,
             },
         ) from exc
 
@@ -753,6 +1048,18 @@ async def send_failed_classes_report_email(
         if raw_refused not in refused_recipients:
             refused_recipients.append(raw_refused)
     if refused_recipients:
+        await resolved_audit_repo.complete_action(
+            audit_id,
+            outcome="FAILED_AFTER_WRITE" if accepted_recipients else "FAILED_BEFORE_WRITE",
+            after_state={
+                **audit_reason,
+                "error_code": "SMTP_RECIPIENT_REFUSED",
+                "accepted_recipients": accepted_recipients,
+                "refused_recipients": refused_recipients,
+            },
+            error_message="SMTP_RECIPIENT_REFUSED",
+            evidence_sha256=content_sha256,
+        )
         accepted_text = ", ".join(accepted_recipients) if accepted_recipients else "không có"
         raise ReportEmailError(
             "Một số địa chỉ quản lý bị máy chủ SMTP từ chối: "
@@ -765,21 +1072,40 @@ async def send_failed_classes_report_email(
                 "failed_count": len(failed_rows),
                 "accepted_recipients": accepted_recipients,
                 "refused_recipients": refused_recipients,
+                "audit_id": audit_id,
             },
         )
+
+    await resolved_audit_repo.complete_action(
+        audit_id,
+        outcome="VERIFIED",
+        after_state={
+            **audit_reason,
+            "accepted_recipients": accepted_recipients,
+        },
+        evidence_sha256=content_sha256,
+    )
 
     return {
         "ok": True,
         "delivery_status": "SENT",
+        "execution_mode": resolved_exec_mode,
+        "is_dry_run": resolved_is_dry_run,
+        "execution_mode_badge": resolved_badge,
         "message": (
-            f"Đã gửi email báo cáo {len(failed_rows)} lớp lỗi tự động thành công tới {', '.join(accepted_recipients)}."
+            f"Đã gửi email báo cáo {len(failed_rows)} buổi học lỗi tự động thành công tới {', '.join(accepted_recipients)}."
         ),
         "week": int(week),
         "year": int(year),
         "selected_job_id": selected_job_id,
         "total_count": len(all_rows),
         "failed_count": len(failed_rows),
+        "total_classes_count": package["total_classes_count"],
+        "failed_classes_count": package["failed_classes_count"],
         "recipients": recipients,
+        "recipients_sha256": recipients_sha256,
+        "content_sha256": content_sha256,
+        "audit_id": audit_id,
         "accepted_recipients": accepted_recipients,
         "refused_recipients": [],
         "available_managers": list(MANAGER_EMAIL_ALLOWLIST),

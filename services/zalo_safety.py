@@ -4,13 +4,10 @@ from datetime import datetime, tzinfo as TzInfo
 import re
 import unicodedata
 
-
-REPORT_DATE_LOOKBACK_DAYS = 10
-
-
-def _identity_tokens(value: str) -> tuple[str, ...]:
-    normalized = unicodedata.normalize("NFKC", value or "").upper()
-    return tuple(re.findall(r"[A-Z0-9]+", normalized))
+from services.report_status import (
+    REPORT_DATE_LOOKBACK_DAYS,
+    identity_tokens as _identity_tokens,
+)
 
 
 def class_code_matches_group(class_code: str, group_name: str) -> bool:
@@ -198,10 +195,18 @@ def parse_class_date(
     default_year: int,
     timezone_info: TzInfo | None = None,
 ) -> datetime | None:
-    """Parse BCNB's class date without silently accepting a malformed value."""
+    """Parse BCNB's class date (dd/mm, dd/mm/yyyy, or YYYY-MM-DD) without silently accepting a malformed value."""
     value = (class_date or "").strip()
     if not value:
         return None
+    iso_match = re.fullmatch(r"(\d{4})-(\d{1,2})-(\d{1,2})", value)
+    if iso_match:
+        return datetime(
+            int(iso_match.group(1)),
+            int(iso_match.group(2)),
+            int(iso_match.group(3)),
+            tzinfo=timezone_info,
+        )
     parts = value.split("/")
     if len(parts) not in {2, 3}:
         raise ValueError("Ngày học phải có định dạng dd/mm hoặc dd/mm/yyyy.")

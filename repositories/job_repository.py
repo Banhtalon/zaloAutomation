@@ -624,11 +624,24 @@ class JobRepository:
                 row = await cursor.fetchone()
         return self._row_to_job(row, include_payload=True) if row else None
 
-    async def get_latest_job(self, active_only: bool = False) -> dict | None:
-        where = "WHERE status IN ('PENDING', 'RUNNING')" if active_only else ""
+    async def get_latest_job(
+        self,
+        active_only: bool = False,
+        job_type: str | None = None,
+    ) -> dict | None:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if active_only:
+            clauses.append("status IN ('PENDING', 'RUNNING')")
+        clean_type = str(job_type or "").strip().upper()
+        if clean_type:
+            clauses.append("job_type = ?")
+            params.append(clean_type)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         async with get_db_connection() as db:
             async with db.execute(
-                f"SELECT {self._columns} FROM scan_jobs {where} ORDER BY id DESC LIMIT 1"
+                f"SELECT {self._columns} FROM scan_jobs {where} ORDER BY id DESC LIMIT 1",
+                tuple(params),
             ) as cursor:
                 row = await cursor.fetchone()
         return self._row_to_job(row, include_payload=False) if row else None

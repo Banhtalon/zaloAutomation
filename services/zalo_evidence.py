@@ -46,8 +46,13 @@ def apply_lesson_14_exemption(
     *,
     class_code: str,
     applied_at: datetime,
+    lesson: Any = 14,
 ) -> dict[str, Any]:
     """Apply the lesson-14 rule while preserving the source evidence state."""
+    from services.report_status import is_lesson_14
+
+    if not is_lesson_14(lesson):
+        raise ValueError("Chỉ áp dụng miễn báo cáo cho Buổi 14.")
     if result is None:
         result = {
             "group": f"{class_code} (Buổi 14)",

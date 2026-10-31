@@ -1182,6 +1182,195 @@ class BasicRepositoryTests(unittest.IsolatedAsyncioTestCase):
         remaining = await self.reports.get_form_submissions()
         self.assertEqual(len(remaining), 0)
 
+    async def test_5_8_1_legacy_js_cohort_key_remap_and_collision_fail_closed(self):
+        group_name = "MindX - VT-JSB17 T7 17h30-19h30"
+        other_group = "MindX - VT-C4K-PTB16 CN 09h00-11h00"
+        # Seed legacy cohort key VT-J|S|17 directly in DB (simulating pre-5.8.1 data without migration)
+        async with get_db_connection() as db:
+            await db.execute(
+                """
+                INSERT INTO groups (group_name, class_code, cohort_key)
+                VALUES (?, 'VT-JSB17', 'VT-J|S|17'),
+                       (?, 'VT-C4K-PTB16', 'VT-C4K|PT|16')
+                """,
+                (group_name, other_group),
+            )
+            await db.execute(
+                """
+                INSERT INTO class_cohorts (
+                    cohort_key, center_code, track, cohort_number,
+                    current_class_code, current_group_name, current_lesson_number,
+                    status, last_seen_bcnb_at, updated_at
+                ) VALUES (
+                    'VT-J|S|17', 'VT-J', 'S', '17',
+                    'VT-JSB17', ?, 14,
+                    'ACTIVE', '2026-08-01T00:00:00+00:00', '2026-08-01T00:00:00+00:00'
+                )
+                """,
+                (group_name,),
+            )
+            await db.execute(
+                """
+                INSERT INTO class_code_history (
+                    cohort_key, class_code, group_name, first_seen_at, last_seen_at, last_lesson_number
+                ) VALUES (
+                    'VT-J|S|17', 'VT-JSB17', ?, '2026-07-01T00:00:00+00:00', '2026-08-01T00:00:00+00:00', 14
+                )
+                """,
+                (group_name,),
+            )
+            await db.commit()
+
+        # Before discovery save, read paths already resolve legacy key to canonical key
+        pre_lifecycles = await self.groups.get_class_lifecycles()
+        self.assertEqual(len(pre_lifecycles), 1)
+        self.assertEqual(pre_lifecycles[0]["cohort_key"], "VT|JS|17")
+        self.assertEqual(
+            [h["class_code"] for h in await self.groups.get_class_history("VT-J|S|17")],
+            ["VT-JSB17"],
+        )
+        self.assertEqual(
+            [h["class_code"] for h in await self.groups.get_class_history("VT|JS|17")],
+            ["VT-JSB17"],
+        )
+
+        # Discovery save #1 and #2 with progressed class VT-JSA17 under canonical key VT|JS|17
+        # generated via build_discovery_plan (including transition alias for VT-JSB17)
+        from services.zalo_discovery_plan import build_discovery_plan
+
+        new_js_group = "MindX - VT-JSA17 T7 17h30-19h30"
+        plan = build_discovery_plan(
+            group_names=[group_name, new_js_group, other_group],
+            bcnb_data=[
+                {
+                    "ma_lop": "VT-JSA17",
+                    "giao_vien": "GV JS",
+                    "ngay_hoc": "T7",
+                    "buoi_so": "1",
+                },
+                {
+                    "ma_lop": "VT-C4K-PTB16",
+                    "giao_vien": "GV PT",
+                    "ngay_hoc": "CN",
+                    "buoi_so": "5",
+                },
+            ],
+            ignored_groups=[],
+            existing_groups=[
+                {
+                    "TenNhom": group_name,
+                    "MaLop": "VT-JSB17",
+                    "CohortKey": "VT-J|S|17",
+                }
+            ],
+        )
+        res1 = await self.groups.apply_discovery_snapshot(
+            plan, observed_at="2026-08-10T10:00:00+00:00"
+        )
+        res2 = await self.groups.apply_discovery_snapshot(
+            plan, observed_at="2026-08-10T10:05:00+00:00"
+        )
+        self.assertEqual(res1["status"], "OBSERVED_ONLY")
+        self.assertEqual(res2["status"], "PROMOTED")
+        self.assertEqual(res1["alias_collision_count"], 0)
+        self.assertEqual(res2["alias_collision_count"], 0)
+
+        # Verify no implicit DB backfill: the stored row in class_cohorts keeps its legacy key VT-J|S|17
+        async with get_db_connection() as db:
+            async with db.execute(
+                "SELECT cohort_key, current_class_code FROM class_cohorts WHERE cohort_key = 'VT-J|S|17'"
+            ) as cursor:
+                raw_cohort_rows = await cursor.fetchall()
+        self.assertEqual(len(raw_cohort_rows), 1)
+        self.assertEqual(raw_cohort_rows[0][0], "VT-J|S|17")
+        self.assertEqual(raw_cohort_rows[0][1], "VT-JSA17")
+
+        # Verify no duplicate cohort, contiguous class history, and ACTIVE lifecycle status
+        lifecycles = await self.groups.get_class_lifecycles()
+        by_ck = {item["cohort_key"]: item for item in lifecycles}
+        self.assertIn("VT|JS|17", by_ck)
+        self.assertNotIn("VT-J|S|17", by_ck)
+        self.assertEqual(by_ck["VT|JS|17"]["class_code"], "VT-JSA17")
+        self.assertEqual(by_ck["VT|JS|17"]["status"], "ACTIVE")
+
+        history_via_new = await self.groups.get_class_history("VT|JS|17")
+        history_via_old = await self.groups.get_class_history("VT-J|S|17")
+        self.assertEqual(
+            [item["class_code"] for item in history_via_new],
+            ["VT-JSB17", "VT-JSA17"],
+        )
+        self.assertEqual(
+            [item["class_code"] for item in history_via_old],
+            ["VT-JSB17", "VT-JSA17"],
+        )
+
+        # Now seed an alias collision (both VT-C|S|04 and VT|CS|04 exist in class_cohorts) -> fail-closed
+        cs_group_old = "MindX - VT-CSB04 Old"
+        cs_group_new = "MindX - VT-CSA04 New"
+        async with get_db_connection() as db:
+            await db.execute(
+                """
+                INSERT INTO class_cohorts (
+                    cohort_key, center_code, track, cohort_number,
+                    current_class_code, current_group_name, current_lesson_number,
+                    status, last_seen_bcnb_at, updated_at
+                ) VALUES
+                    ('VT-C|S|04', 'VT-C', 'S', '04', 'VT-CSB04', ?, 12, 'ACTIVE', '2026-08-01T00:00:00+00:00', '2026-08-01T00:00:00+00:00'),
+                    ('VT|CS|04', 'VT', 'CS', '04', 'VT-CSA04', ?, 1, 'ACTIVE', '2026-08-05T00:00:00+00:00', '2026-08-05T00:00:00+00:00')
+                """,
+                (cs_group_old, cs_group_new),
+            )
+            await db.execute(
+                """
+                INSERT INTO class_code_history (
+                    cohort_key, class_code, group_name, first_seen_at, last_seen_at, last_lesson_number
+                ) VALUES
+                    ('VT-C|S|04', 'VT-CSB04', ?, '2026-07-01T00:00:00+00:00', '2026-08-01T00:00:00+00:00', 12),
+                    ('VT|CS|04', 'VT-CSA04', ?, '2026-08-05T00:00:00+00:00', '2026-08-05T00:00:00+00:00', 1)
+                """,
+                (cs_group_old, cs_group_new),
+            )
+            await db.commit()
+
+        collision_plan = {
+            **plan,
+            "fingerprint_sha256": None,
+            "source_group_names": [group_name, new_js_group, other_group, cs_group_new],
+            "discovered_groups": [
+                *plan["discovered_groups"],
+                {
+                    "TenNhom": cs_group_new,
+                    "MaLop": "VT-CSA04",
+                    "CohortKey": "VT|CS|04",
+                },
+            ],
+            "lifecycle_records": [
+                *plan["lifecycle_records"],
+                {
+                    "cohort_key": "VT|CS|04",
+                    "center_code": "VT",
+                    "track": "CS",
+                    "cohort_number": "04",
+                    "class_code": "VT-CSA04",
+                    "group_name": cs_group_new,
+                    "lesson_number": 2,
+                },
+            ],
+        }
+        res_collision = await self.groups.apply_discovery_snapshot(
+            collision_plan, observed_at="2026-08-11T10:00:00+00:00"
+        )
+        self.assertGreaterEqual(res_collision["alias_collision_count"], 1)
+        # Fail-closed: collided keys do not merge histories
+        self.assertEqual(
+            [item["class_code"] for item in await self.groups.get_class_history("VT-C|S|04")],
+            ["VT-CSB04"],
+        )
+        self.assertEqual(
+            [item["class_code"] for item in await self.groups.get_class_history("VT|CS|04")],
+            ["VT-CSA04"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

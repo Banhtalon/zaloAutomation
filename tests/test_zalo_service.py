@@ -189,6 +189,60 @@ class ZaloProductionPlanGuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(jobs.updates[-1][1]["status"], "SUCCESS")
         self.assertIn("đã hoãn 1 target", jobs.updates[-1][1]["message"])
 
+    async def test_5_8_2_run_zalo_automation_delegates_unconditionally_to_parallel_batch(self):
+        class Jobs:
+            def __init__(self):
+                self.updates = []
+
+            async def update_job(self, job_id, **values):
+                self.updates.append((job_id, values))
+
+            async def ensure_not_cancelled(self, _job_id):
+                return None
+
+        jobs = Jobs()
+        scan_plan = {
+            "latest_week": {"week": 33, "year": 2026},
+            "targets": [
+                {
+                    "group_name": "MindX -LEGO-VT-KIND-ROB4I01 T6 18H-19H30",
+                    "class_code": "VT-KIND-ROB4I01",
+                    "lesson": "2",
+                    "class_date": "10/08/2026",
+                    "class_date_iso": "2026-08-10",
+                    "week": 33,
+                    "year": 2026,
+                }
+            ],
+        }
+        parallel_mock = AsyncMock()
+        with tempfile.TemporaryDirectory() as evidence_root:
+            with (
+                patch.object(zalo_service, "job_repo", jobs),
+                patch.object(zalo_service.evidence_repo, "expire_old", AsyncMock()),
+                patch(
+                    "services.zalo_parallel_service.prepare_frozen_scan_execution",
+                    AsyncMock(return_value=(scan_plan, [{"TenNhom": "G"}], False)),
+                ),
+                patch(
+                    "services.zalo_parallel_service.run_and_finalize_parallel_zalo_batch",
+                    parallel_mock,
+                ),
+            ):
+                await zalo_service._run_zalo_automation(
+                    125,
+                    "dry-run",
+                    scan_plan=scan_plan,
+                    evidence_root=evidence_root,
+                    runtime=None,
+                )
+
+        parallel_mock.assert_awaited_once()
+        kwargs = parallel_mock.await_args.kwargs
+        self.assertEqual(kwargs["job_id"], 125)
+        self.assertEqual(kwargs["execution_mode"], "dry-run")
+        self.assertIsNotNone(kwargs["runtime"])
+
 
 class ZaloBcnbTimingGuardTests(unittest.IsolatedAsyncioTestCase):
     async def test_current_day_deferred_target_cannot_reach_bcnb_checkbox_action(self):

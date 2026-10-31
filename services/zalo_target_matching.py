@@ -12,11 +12,14 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from services.report_status import normalize_class_code
 from services.zalo_safety import parse_class_date
 
 
 TARGET_EXACT = "TARGET_EXACT"
 TARGET_DATE_TYPO_CORRECTED = "TARGET_DATE_TYPO_CORRECTED"
+TARGET_SAME_DAY_NO_DATE = "TARGET_SAME_DAY_NO_DATE"
+TARGET_SAME_DAY_WRONG_DATE = "TARGET_SAME_DAY_WRONG_DATE"
 TARGET_BEFORE_CLASS_DATE = "TARGET_BEFORE_CLASS_DATE"
 TARGET_SESSION_AMBIGUOUS = "TARGET_SESSION_AMBIGUOUS"
 
@@ -31,6 +34,7 @@ class BcnbScanTarget:
     lesson: str
     class_date: datetime
     zalo_deadline: str
+    same_day_target_ambiguous: bool = False
 
     @property
     def class_date_iso(self) -> str:
@@ -64,9 +68,11 @@ def parse_bcnb_scan_target(
     if not 1 <= week <= 53 or not 2000 < year <= 2100:
         raise ValueError("Tuần/năm target BCNB không hợp lệ.")
 
-    class_code = str(value.get("class_code") or "").strip()
+    class_code = normalize_class_code(value.get("class_code"))
     lesson = str(value.get("lesson") or "").strip()
-    class_date_text = str(value.get("class_date") or "").strip()
+    class_date_iso_text = str(value.get("class_date_iso") or "").strip()
+    class_date_raw_text = str(value.get("class_date") or "").strip()
+    class_date_text = class_date_iso_text or class_date_raw_text
     if not class_code or not lesson or not class_date_text:
         raise ValueError("Target BCNB thiếu mã lớp, buổi hoặc ngày học.")
     class_date = parse_class_date(
@@ -74,8 +80,22 @@ def parse_bcnb_scan_target(
         default_year=default_year,
         timezone_info=timezone_info,
     )
+    if class_date is None and class_date_iso_text and class_date_raw_text:
+        class_date = parse_class_date(
+            class_date_raw_text,
+            default_year=default_year,
+            timezone_info=timezone_info,
+        )
     if class_date is None:
         raise ValueError("Ngày học target BCNB không hợp lệ.")
+    same_day_count = 0
+    try:
+        same_day_count = int(value.get("same_day_target_count") or 0)
+    except (TypeError, ValueError):
+        same_day_count = 0
+    same_day_ambiguous = bool(value.get("same_day_target_ambiguous")) or (
+        same_day_count > 1
+    )
     return BcnbScanTarget(
         week=week,
         year=year,
@@ -83,6 +103,7 @@ def parse_bcnb_scan_target(
         lesson=lesson,
         class_date=class_date,
         zalo_deadline=str(value.get("zalo_deadline") or "").strip(),
+        same_day_target_ambiguous=same_day_ambiguous,
     )
 
 
@@ -106,22 +127,38 @@ def _target_label(target: BcnbScanTarget) -> str:
 def resolve_report_target(
     target: BcnbScanTarget,
     *,
-    ui_sent_at: datetime,
+    ui_sent_at: datetime | None,
     claimed_lesson_date: datetime | None,
     claimed_lesson: int | None,
     content_lesson: int | None,
+    same_day_target_ambiguous: bool = False,
 ) -> TargetMatch:
     """Resolve a candidate without letting a stale teacher header move its week.
 
     Exact BCNB date or explicit session number wins.  A template-error repair
     is deliberately narrow: the message must identify the BCNB lesson through
     ``Bài số N`` while its header is exactly one normal weekly session behind.
+    Under D2, a report sent on the exact BCNB class date with no conflicting
+    lesson number and no same-day target ambiguity matches with a QC NOTE issue
+    when its content omits date/lesson or writes a wrong date.
     Anything else remains manual review instead of being silently retargeted.
     """
+    if ui_sent_at is None:
+        return TargetMatch(
+            decision=TARGET_SESSION_AMBIGUOUS,
+            matches=False,
+            note=(
+                "Có báo cáo nhưng không đọc được ngày gửi từ giao diện Zalo "
+                f"cho {_target_label(target)}; chưa đủ căn cứ để tự ghép."
+            ),
+        )
     target_day = target.class_date.date()
     sent_day = ui_sent_at.date()
     expected_lesson = _lesson_number(target.lesson)
     claimed_day = claimed_lesson_date.date() if claimed_lesson_date is not None else None
+    is_same_day_ambiguous = bool(
+        target.same_day_target_ambiguous or same_day_target_ambiguous
+    )
 
     if sent_day < target_day:
         return TargetMatch(
@@ -150,8 +187,28 @@ def resolve_report_target(
         )
 
     # An explicit "buổi N" equal to BCNB's row is sufficient to correct a
-    # mistaken date in the copied report template.
+    # mistaken date in the copied report template.  When the report was sent on
+    # the exact BCNB class date without same-day target ambiguity, D2 classifies
+    # a wrong/missing content date as a non-failing QC note.
     if expected_lesson is not None and claimed_lesson == expected_lesson:
+        if (
+            sent_day == target_day
+            and not is_same_day_ambiguous
+            and (content_lesson is None or content_lesson == expected_lesson)
+        ):
+            if claimed_lesson_date is not None:
+                return TargetMatch(
+                    decision=TARGET_SAME_DAY_WRONG_DATE,
+                    matches=True,
+                    corrected_teacher_date=True,
+                    note=f"[Zalo] Báo cáo ghi sai ngày ({claimed_lesson_date.strftime('%d/%m')})",
+                )
+            return TargetMatch(
+                decision=TARGET_SAME_DAY_NO_DATE,
+                matches=True,
+                corrected_teacher_date=False,
+                note="[Zalo] Báo cáo không ghi ngày/buổi",
+            )
         claimed_text = claimed_lesson_date.strftime("%d/%m") if claimed_lesson_date else "không rõ ngày"
         return TargetMatch(
             decision=TARGET_DATE_TYPO_CORRECTED,
@@ -181,6 +238,42 @@ def resolve_report_target(
             note=(
                 "Đã báo cáo nhưng ghi sai ngày/buổi trong mẫu; "
                 f"'Bài số {content_lesson}' khớp với {_target_label(target)}."
+            ),
+        )
+
+    # D2 fallback: report sent on the exact BCNB class date with no same-day
+    # target ambiguity and no conflicting lesson number in content.
+    has_conflicting_lesson = bool(
+        claimed_lesson is not None
+        or (
+            expected_lesson is not None
+            and content_lesson is not None
+            and content_lesson != expected_lesson
+        )
+    )
+    if sent_day == target_day and not is_same_day_ambiguous and not has_conflicting_lesson:
+        if claimed_day is None:
+            return TargetMatch(
+                decision=TARGET_SAME_DAY_NO_DATE,
+                matches=True,
+                corrected_teacher_date=False,
+                note="[Zalo] Báo cáo không ghi ngày/buổi",
+            )
+        if claimed_lesson_date is not None:
+            return TargetMatch(
+                decision=TARGET_SAME_DAY_WRONG_DATE,
+                matches=True,
+                corrected_teacher_date=True,
+                note=f"[Zalo] Báo cáo ghi sai ngày ({claimed_lesson_date.strftime('%d/%m')})",
+            )
+
+    if sent_day == target_day and is_same_day_ambiguous:
+        return TargetMatch(
+            decision=TARGET_SESSION_AMBIGUOUS,
+            matches=False,
+            note=(
+                "Có báo cáo gửi đúng ngày học nhưng nhóm có nhiều buổi học BCNB trùng ngày "
+                f"cho {_target_label(target)}; chưa đủ căn cứ để tự ghép."
             ),
         )
 

@@ -4,11 +4,13 @@ import unittest
 from core.time_utils import BUSINESS_TIMEZONE
 from services.zalo_target_eligibility import (
     DEFERRED_SAME_DAY_BEFORE_CLASS_END,
+    DEFERRED_SAME_DAY_TIME_UNKNOWN,
     READY_CURRENT_DAY_AFTER_CLASS_END,
     READY_PREVIOUS_WEEK,
     evaluate_scan_target,
     parse_group_end_time,
     split_scan_targets_for_execution,
+    split_scan_targets_with_deduped,
 )
 
 
@@ -79,3 +81,23 @@ class ZaloTargetEligibilityTests(unittest.TestCase):
         self.assertEqual([(item["week"], item["lesson"]) for item in ready], [(32, "1")])
         self.assertEqual([(item["week"], item["lesson"]) for item in deferred], [(33, "2")])
         self.assertEqual(deferred[0]["deferred_reason"], DEFERRED_SAME_DAY_BEFORE_CLASS_END)
+
+    def test_multiple_time_ranges_fail_closed_to_time_unknown(self):
+        self.assertIsNone(parse_group_end_time("T7 9H-11H & CN 14H-16H"))
+        self.assertIsNone(parse_group_end_time("MindX - VT-C4K-SI25 T3 (18:00-19:30) / T7 (14:00-15:30)"))
+
+        multi_time_target = {
+            **self.rob4i01_w33,
+            "group_name": "MindX - VT-KIND-ROB4I01 T7 9H-11H & CN 14H-16H",
+        }
+        ready, deferred, deduped = split_scan_targets_with_deduped(
+            [multi_time_target, dict(multi_time_target)],
+            latest_week=self.latest_week,
+            now=datetime(2026, 8, 14, 12, 0, tzinfo=BUSINESS_TIMEZONE),
+        )
+        self.assertEqual(ready, [])
+        self.assertEqual(len(deferred), 1)
+        self.assertEqual(deferred[0]["deferred_reason"], DEFERRED_SAME_DAY_TIME_UNKNOWN)
+        self.assertEqual(deferred[0]["deferred_reason_detail"], "cần xác nhận giờ học")
+        self.assertEqual(len(deduped), 1)
+        self.assertEqual(deduped[0]["reason"], "DUPLICATE_TARGET")

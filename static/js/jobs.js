@@ -107,11 +107,16 @@
             const emptyHint = document.getElementById('specs-target-progress-empty');
             const review = document.getElementById('zalo-review-queue');
             const reviewItems = document.getElementById('zalo-review-queue-items');
+            const stripProgress = document.getElementById('dashboard-progress-strip-text');
             if (!container) return;
             const summary = payload && payload.summary;
             if (!summary || !summary.total) {
                 container.classList.add('hidden');
                 container.textContent = '';
+                if (stripProgress) {
+                    stripProgress.textContent = '';
+                    stripProgress.classList.add('hidden');
+                }
                 if (emptyHint) emptyHint.classList.remove('hidden');
                 if (review) review.classList.add('hidden');
                 if (reviewItems) reviewItems.replaceChildren();
@@ -145,6 +150,10 @@
             ];
             container.textContent = reportLines.join(' · ');
             container.classList.remove('hidden');
+            if (stripProgress) {
+                stripProgress.textContent = `Tiến độ: ${Number(report.checked || 0)}/${summary.total} đã kiểm tra · ${verified} verified · ${processing} đang xử lý${needsReview > 0 ? ` · ${needsReview} cần kiểm tra` : ''}`;
+                stripProgress.classList.remove('hidden');
+            }
             if (emptyHint) emptyHint.classList.add('hidden');
 
             if (!review || !reviewItems) return;
@@ -571,11 +580,23 @@
             return `${summary}\n\nChi tiết học viên thất bại:\n${detailLines.join('\n')}`;
         }
 
-        function handleTerminalJob(job, payload) {
-            if (handledTerminalJobIds.has(job.id)) return;
-            handledTerminalJobIds.add(job.id);
-            if (handledTerminalJobIds.size > 200) {
-                handledTerminalJobIds.delete(handledTerminalJobIds.values().next().value);
+        async function handleTerminalJob(job, payload) {
+            if (!job || handledTerminalJobIds.has(job.id)) return;
+            if (typeof isJobFinishedBeforePageLoad === 'function' && isJobFinishedBeforePageLoad(job)) {
+                if (typeof markTerminalJobHandled === 'function') {
+                    markTerminalJobHandled(job.id);
+                } else {
+                    handledTerminalJobIds.add(job.id);
+                }
+                return;
+            }
+            if (typeof markTerminalJobHandled === 'function') {
+                markTerminalJobHandled(job.id);
+            } else {
+                handledTerminalJobIds.add(job.id);
+                if (handledTerminalJobIds.size > 200) {
+                    handledTerminalJobIds.delete(handledTerminalJobIds.values().next().value);
+                }
             }
 
             if (job.job_type === 'GOOGLEFORM_OCR' || job.job_type === 'GOOGLEFORM_LMS_STUDENTS') {
@@ -634,14 +655,21 @@
                 }
             } else if (job.job_type === 'ZALO_DISCOVERY') {
                 if (typeof refreshZaloScanPlan === 'function') {
-                    refreshZaloScanPlan();
+                    await refreshZaloScanPlan();
                 }
                 if (job.status === 'SUCCESS'
                     && typeof fetchBcnbZaloGaps === 'function') {
-                    fetchBcnbZaloGaps();
+                    await fetchBcnbZaloGaps();
+                }
+            } else if (job.job_type === 'ZALO_SCAN') {
+                if (typeof refreshZaloRequiredWeekSummary === 'function') {
+                    await refreshZaloRequiredWeekSummary(null, { keepLiveMode: true, silent: true });
                 }
             } else if (job.job_type === 'LMS_AUTOMATION') {
                 alert(job.message || job.status);
+                if (typeof refreshZaloRequiredWeekSummary === 'function') {
+                    await refreshZaloRequiredWeekSummary(null, { keepLiveMode: true, silent: true });
+                }
             } else if (job.job_type === 'ZALO_MANUAL_APPROVE') {
                 if (job.status !== 'SUCCESS') {
                     alert(
@@ -649,6 +677,9 @@
                             ? 'Duyệt tay BCNB đã được hủy.'
                             : (job.message || 'Duyệt tay BCNB thất bại và đã dừng an toàn.')
                     );
+                }
+                if (typeof refreshZaloRequiredWeekSummary === 'function') {
+                    await refreshZaloRequiredWeekSummary(null, { keepLiveMode: true, silent: true });
                 }
             } else if (job.job_type === 'GOOGLEFORM_SUBMIT') {
                 if (typeof clearGoogleFormIdempotencyState === 'function') {
@@ -684,6 +715,7 @@
         // DASHBOARD POLLING (3s, only while a job is active)
         async function updateDashboardData() {
             try {
+                const wasUntrackedInitialFetch = !currentJobId;
                 const url = currentJobId ? `/api/jobs/${currentJobId}` : '/api/jobs/latest';
                 const resResults = await fetch(url);
                 if (!resResults.ok) throw new Error(`Không thể tải trạng thái job (HTTP ${resResults.status}).`);
@@ -693,6 +725,10 @@
                     const payload = parseJobResults(job.results);
                     const isTerminal = terminalStatuses.has(job.status);
                     currentJobActive = !isTerminal;
+                    if (!isTerminal && typeof sessionTrackedJobIds !== 'undefined' && Number.isInteger(Number(job.id))) {
+                        sessionTrackedJobIds.add(Number(job.id));
+                    }
+                    if (typeof applyZaloRunState === 'function') applyZaloRunState();
                     if (typeof renderZaloWorkflow === 'function') renderZaloWorkflow();
                     if (isTerminal) stopJobPolling();
                     renderJobControls(job);
@@ -707,17 +743,31 @@
                     const pulseDot = document.getElementById('pulse-dot');
                     const statusDot = document.getElementById('status-dot');
                     statusText.innerText = `${job.message || job.status}${queueMessage}`;
+                    let finishedBeforeLoad = false;
                     if (isTerminal) {
                         pulseDot.classList.add('hidden');
                         const isError = job.status === 'FAILED' || job.status === 'CANCELLED';
                         statusDot.className = 'relative inline-flex rounded-full h-2.5 w-2.5 ' + (isError ? 'bg-rose-500 shadow-[0_0_8px_#f43f5e]' : 'bg-gray-500');
-                        handleTerminalJob(job, payload);
+                        finishedBeforeLoad = (
+                            wasUntrackedInitialFetch
+                            && !(typeof sessionTrackedJobIds !== 'undefined' && sessionTrackedJobIds.has(Number(job.id)))
+                        ) || (typeof isJobFinishedBeforePageLoad === 'function' && isJobFinishedBeforePageLoad(job));
+                        if (finishedBeforeLoad) {
+                            if (typeof markTerminalJobHandled === 'function') {
+                                markTerminalJobHandled(job.id);
+                            } else {
+                                handledTerminalJobIds.add(job.id);
+                            }
+                        }
                     } else {
                         pulseDot.classList.remove('hidden');
                         statusDot.className = 'relative inline-flex rounded-full h-2.5 w-2.5 bg-blue-500 shadow-[0_0_8px_#3b82f6]';
                     }
 
                     if (job.job_type === 'ZALO_SCAN') {
+                        if (Number.isInteger(Number(job.id)) && Number(job.id) > 0) {
+                            latestZaloResultsJobId = Number(job.id);
+                        }
                         const incomingItems = zaloResultItems(payload).map(item => (
                             item && typeof item === 'object'
                                 && (!Number.isInteger(item.source_job_id) || item.source_job_id <= 0)
@@ -733,11 +783,20 @@
                         const verifiedSnapshotId = (payload && payload.snapshot_id != null)
                             ? payload.snapshot_id
                             : (isSelective && hasActiveSelectiveScanBaseline() ? selectiveBaselineSnapshotId : null);
-                        renderZaloResults(mergedItems, false, {
-                            snapshotId: verifiedSnapshotId,
-                            payload,
-                            sourceJobId: job.id,
-                        });
+                        if (!isHistoricalWeekViewActive()) {
+                            renderZaloResults(mergedItems, false, {
+                                snapshotId: verifiedSnapshotId,
+                                payload,
+                                sourceJobId: job.id,
+                            });
+                            if (
+                                isTerminal
+                                && finishedBeforeLoad
+                                && typeof refreshZaloRequiredWeekSummary === 'function'
+                            ) {
+                                await refreshZaloRequiredWeekSummary(null, { keepLiveMode: true, silent: true });
+                            }
+                        }
                     } else if (
                         job.job_type === 'ZALO_MANUAL_APPROVE'
                         && job.status === 'SUCCESS'
@@ -746,8 +805,27 @@
                     ) {
                         applyManualApprovePayload(payload);
                     }
+                    if (isTerminal && !finishedBeforeLoad) {
+                        await handleTerminalJob(job, payload);
+                    }
                     if (job.job_type === 'ZALO_SCAN') {
                         await refreshZaloTargetProgress(job);
+                    } else if (wasUntrackedInitialFetch && isTerminal && !isHistoricalWeekViewActive()) {
+                        try {
+                            const latestZaloRes = await fetch('/api/jobs/latest?job_type=ZALO_SCAN');
+                            if (latestZaloRes && latestZaloRes.ok) {
+                                const latestZaloJob = await latestZaloRes.json();
+                                if (latestZaloJob && latestZaloJob.id) {
+                                    latestZaloResultsJobId = Number(latestZaloJob.id);
+                                    await refreshZaloTargetProgress(latestZaloJob);
+                                }
+                            }
+                        } catch (_) {
+                            // Ignore when /api/jobs/latest?job_type=ZALO_SCAN is unavailable in synthetic harnesses
+                        }
+                        if (typeof refreshZaloRequiredWeekSummary === 'function') {
+                            await refreshZaloRequiredWeekSummary(null, { keepLiveMode: true, silent: true });
+                        }
                     }
                 }
             } catch (e) { console.error('Lỗi cập nhật job:', e); }
@@ -920,20 +998,98 @@
             return cleaned;
         }
 
-        function isLesson14ExemptRow(r) {
-            if (!r || typeof r !== 'object') return false;
-            if (String(r.evidence_state || '').trim() === 'LESSON_14_EXEMPTION') return true;
+        function resolveRowCategory(r) {
+            if (!r || typeof r !== 'object') return 'NOT_SCANNED';
+            const explicit = String(r.category || '').trim().toUpperCase();
+            if (['DONE', 'LATE', 'MISSING', 'REVIEW', 'EXEMPT', 'NOT_SCANNED'].includes(explicit)) {
+                return explicit;
+            }
+            const evState = String(r.evidence_state || '').trim().toUpperCase();
+            const bcnbWriteState = String(r.bcnb_update_state || r.write_status || '').trim().toUpperCase();
             const st = r.scan_target && typeof r.scan_target === 'object' ? r.scan_target : {};
             const ev = r.evidence && typeof r.evidence === 'object' ? r.evidence : {};
             const ctx = ev.date_context && typeof ev.date_context === 'object' ? ev.date_context : {};
-            const lesson = String(
+            const rawLesson = String(
                 st.lesson != null ? st.lesson : (ctx.target_lesson != null ? ctx.target_lesson : (r.lesson != null ? r.lesson : ''))
-            ).trim();
-            return lesson === '14';
+            ).trim().replace(/^buổi\s*/i, '').replace(/^0+/, '');
+            if (['FAILED_BEFORE_WRITE', 'OUTCOME_UNKNOWN', 'BLOCKED_BATCH_HALT', 'CONFLICT_AFTER_WRITE'].includes(bcnbWriteState)) {
+                return 'REVIEW';
+            }
+            if (evState === 'LESSON_14_EXEMPTION' || rawLesson === '14') return 'EXEMPT';
+            if (evState === 'SUBMITTED_LATE_VERIFIED') return 'LATE';
+            if (evState === 'SUBMITTED_VERIFIED' || evState === 'MANUAL_APPROVED_VERIFIED' || r.manual_approved === true) {
+                return 'DONE';
+            }
+            if (evState === 'NOT_FOUND_VERIFIED') return 'MISSING';
+            if (['INSUFFICIENT_EVIDENCE', 'SCAN_FAILED', 'BLOCKED_BATCH_HALT', 'AMBIGUOUS_EVIDENCE'].includes(evState)) {
+                return 'REVIEW';
+            }
+            const rawStatus = String(r.status || r.zalo_status || '').trim();
+            if (rawStatus.includes('Miễn')) return 'EXEMPT';
+            if (rawStatus.includes('🟡')) return 'LATE';
+            if (rawStatus.includes('✅')) return 'DONE';
+            if (rawStatus.includes('❌') || /^chưa\s+nhận\s+xét\b/i.test(rawStatus)) return 'MISSING';
+            if (rawStatus.includes('⚠️')) return 'REVIEW';
+            return 'NOT_SCANNED';
+        }
+
+        function resolveRowIssueSeverity(r) {
+            if (!r || typeof r !== 'object') return 'FAIL';
+            if (typeof r.is_failed === 'boolean' && r.is_failed === false) {
+                return 'NOTE';
+            }
+            const st = r.scan_target && typeof r.scan_target === 'object' ? r.scan_target : {};
+            const noteCodes = new Set(['LMS_MANUAL_CHECK', 'ZALO_REPORT_NO_DATE', 'ZALO_REPORT_WRONG_DATE']);
+            const structuredEntries = [];
+            const collectStructured = val => {
+                if (!val) return;
+                if (Array.isArray(val)) {
+                    val.forEach(collectStructured);
+                    return;
+                }
+                if (typeof val === 'object') {
+                    structuredEntries.push(val);
+                }
+            };
+            collectStructured(r.quality_issues || st.quality_issues);
+            collectStructured(r.lms_quality_issues || st.lms_quality_issues);
+            collectStructured(r.zalo_content_issues || st.zalo_content_issues);
+            const hasManualOrPlainString = Boolean(
+                String(r.issue_description || '').trim()
+                || String(r.qc_issue_note || st.qc_issue_note || '').trim()
+            );
+            if (structuredEntries.length > 0 && !hasManualOrPlainString) {
+                const allNote = structuredEntries.every(item => {
+                    const sev = String(item.severity || '').trim().toUpperCase();
+                    const code = String(item.code || '').trim().toUpperCase();
+                    return sev === 'NOTE' || noteCodes.has(code);
+                });
+                if (allNote) return 'NOTE';
+            }
+            const issueText = resolveDashboardRowIssueDescription(r);
+            if (
+                issueText
+                && /^\[LMS\]\s*Không tải được đầy đủ dữ liệu buổi học từ LMS,\s*cần kiểm tra thủ công\.?$/i.test(issueText)
+            ) {
+                return 'NOTE';
+            }
+            return 'FAIL';
+        }
+
+        function resolveRowIsFailed(r) {
+            if (!r || typeof r !== 'object') return false;
+            if (typeof r.is_failed === 'boolean') return r.is_failed;
+            const category = resolveRowCategory(r);
+            if (category === 'MISSING' || category === 'REVIEW') return true;
+            const lmsStatus = resolveDashboardRowLmsStatus(r);
+            if (lmsStatus.startsWith('❌')) return true;
+            const issueText = resolveDashboardRowIssueDescription(r);
+            if (issueText && resolveRowIssueSeverity(r) === 'FAIL') return true;
+            return false;
         }
 
         function normalizeZaloStatusDisplay(status, row = null) {
-            if (isLesson14ExemptRow(row)) {
+            if (row && resolveRowCategory(row) === 'EXEMPT') {
                 return '✅ Miễn báo cáo (Buổi 14)';
             }
             const text = String(status || '').replace(/\s+/g, ' ').trim();
@@ -943,12 +1099,41 @@
             ) {
                 return 'Chưa nhận xét';
             }
+            if (row && typeof row === 'object') {
+                const ev = row.evidence && typeof row.evidence === 'object' ? row.evidence : {};
+                const ctx = ev.date_context && typeof ev.date_context === 'object' ? ev.date_context : {};
+                const deadlineVer = String(
+                    ctx.deadline_verification || row.deadline_verification || ''
+                ).trim().toUpperCase();
+                if (deadlineVer === 'PENDING') {
+                    const dryMatch = text.match(/^(\[(?:DRY-RUN|DRY_RUN)\]\s*)/i);
+                    const dryPrefix = dryMatch ? dryMatch[1] : '';
+                    let rest = dryPrefix ? text.slice(dryPrefix.length).trim() : text;
+                    if (rest.startsWith('✅')) {
+                        rest = `⏳${rest.slice(1)}`;
+                        if (!/chờ kiểm tra deadline/i.test(rest)) {
+                            rest = `${rest} (chờ kiểm tra deadline BCNB)`;
+                        }
+                        return `${dryPrefix}${rest}`;
+                    }
+                    if (rest.startsWith('🟡')) {
+                        return `${dryPrefix}⏳ Đã báo cáo – Minh chứng hợp lệ (chờ kiểm tra deadline BCNB)`;
+                    }
+                    if (
+                        !rest.startsWith('⏳')
+                        && !rest.startsWith('❌')
+                        && !rest.startsWith('⚠️')
+                    ) {
+                        return `${dryPrefix}⏳ Đã thấy báo cáo Zalo (chờ kiểm tra deadline BCNB)`;
+                    }
+                }
+            }
             return text;
         }
 
         function normalizeZaloStatusDetailDisplay(detail, row = null) {
             const text = String(detail || '').trim();
-            if (isLesson14ExemptRow(row)) {
+            if (row && resolveRowCategory(row) === 'EXEMPT') {
                 if (
                     !text
                     || text.includes('Buổi 14 được miễn báo cáo Zalo')
@@ -958,18 +1143,6 @@
                 }
             }
             return text;
-        }
-
-        function isUnreportedOrWarningZaloStatus(status, row = null) {
-            if (isLesson14ExemptRow(row)) {
-                return false;
-            }
-            const text = normalizeZaloStatusDisplay(status, row);
-            return (
-                text.includes('❌') ||
-                text.includes('⚠️') ||
-                /^chưa\s+nhận\s+xét\b/i.test(text)
-            );
         }
 
         function splitCheckerIssueNoteInJs(rawNote) {
@@ -1080,6 +1253,13 @@
                     val.forEach(entry => addVal(entry, false));
                     return;
                 }
+                if (typeof val === 'object') {
+                    const objText = String(val.text || val.message || val.issue || '').trim();
+                    if (objText) {
+                        addOne(objText, true);
+                    }
+                    return;
+                }
                 const text = String(val).trim();
                 if (!text) return;
                 const parsed = splitCheckerIssueNoteInJs(text);
@@ -1110,28 +1290,17 @@
         function resolveDashboardRowEvaluationStatus(r) {
             if (!r || typeof r !== 'object') return '';
             const st = r.scan_target && typeof r.scan_target === 'object' ? r.scan_target : {};
+            const category = resolveRowCategory(r);
             let explicitEval = String(r.evaluation_status || st.evaluation_status || '').trim();
-            const zaloStatus = normalizeZaloStatusDisplay(r.status || r.zalo_status || '', r);
-            const lmsStatus = resolveDashboardRowLmsStatus(r);
             if (
-                zaloStatus.includes('Miễn')
+                category === 'EXEMPT'
                 && (/zalo\s+cần\s+kiểm\s+tra/i.test(explicitEval) || /chưa\s+nhận\s+xét\s+zalo/i.test(explicitEval))
             ) {
                 explicitEval = '';
             }
-            const zaloWarn = zaloStatus.startsWith('⚠️');
-            const lmsWarn = lmsStatus.startsWith('⚠️');
-            const zaloDone = !isUnreportedOrWarningZaloStatus(zaloStatus, r) && (
-                zaloStatus.includes('✅') || zaloStatus.includes('Miễn') || zaloStatus.includes('🟡')
-            );
-            const lmsDone = !lmsStatus.startsWith('❌') && !lmsWarn && (
-                lmsStatus.startsWith('✅') || lmsStatus.includes('Dry-run LMS') || lmsStatus.includes('Chờ tích BCNB')
-            );
-            if (lmsWarn || zaloWarn) {
-                if (zaloDone && lmsWarn) return '⚠️ Đã nhận xét Zalo, LMS cần kiểm tra';
-                if (lmsDone && zaloWarn) return '⚠️ Đã hoàn tất nhận xét LMS, Zalo cần kiểm tra';
-                return '⚠️ Cần kiểm tra nhận xét';
-            }
+            const lmsStatus = resolveDashboardRowLmsStatus(r);
+            const zaloDone = ['DONE', 'LATE', 'EXEMPT'].includes(category);
+            const lmsDone = lmsStatus.startsWith('✅') || lmsStatus.includes('Dry-run LMS') || lmsStatus.includes('Chờ tích BCNB');
             if (explicitEval) {
                 if (zaloDone && lmsDone && /^⏳/.test(explicitEval)) {
                     return '✅ Đã hoàn thành nhận xét';
@@ -1164,14 +1333,29 @@
                     }
                 }
             }
+            const resolvedLmsUnavailable = Boolean(
+                (options && options.lmsFetchUnavailable)
+                || (options && options.payload && options.payload.lms_fetch_unavailable)
+                || (Array.isArray(resultsArray) && resultsArray.some(r => (
+                    r && typeof r === 'object'
+                    && (r.lms_fetch_unavailable === true || (r.scan_target && r.scan_target.lms_fetch_unavailable === true))
+                )))
+            );
             if (!Array.isArray(resultsArray) || resultsArray.length === 0) {
                 lastResultsSignature = '[]';
                 latestZaloResults = [];
+                latestLmsFetchUnavailable = resolvedLmsUnavailable;
+                if (typeof updateWeeklyHistoryStatusBadge === 'function') {
+                    updateWeeklyHistoryStatusBadge();
+                }
                 latestZaloResultsPeriodKey = '';
                 latestZaloResultsSnapshotId = null;
                 latestZaloResultsJobId = null;
-                ['count-total', 'count-success', 'count-exempt', 'count-failed']
-                    .forEach(id => { document.getElementById(id).innerText = '0'; });
+                ['count-total', 'count-success', 'count-late', 'count-exempt', 'count-failed']
+                    .forEach(id => {
+                        const el = document.getElementById(id);
+                        if (el) el.innerText = '0';
+                    });
                 const tbody = document.getElementById('results-table');
                 tbody.replaceChildren();
                 const row = document.createElement('tr');
@@ -1225,6 +1409,10 @@
             }
             lastResultsSignature = signature;
             latestZaloResults = resultsArray;
+            latestLmsFetchUnavailable = resolvedLmsUnavailable;
+            if (typeof updateWeeklyHistoryStatusBadge === 'function') {
+                updateWeeklyHistoryStatusBadge();
+            }
             if (!preserveOrigin) {
                 latestZaloResultsSnapshotId = resolvedSnapshotId;
                 latestZaloResultsPeriodKey = resolvedPeriodKey;
@@ -1238,28 +1426,27 @@
             }
             const dashboardResults = dashboardResultsForRequiredWeek(resultsArray);
             renderSpecsEvidenceTable(dashboardResults);
-            let total = dashboardResults.length, success = 0, exempt = 0, failed = 0;
+            let total = dashboardResults.length, success = 0, late = 0, exempt = 0, failed = 0;
             dashboardResults.forEach(r => {
-                const status = normalizeZaloStatusDisplay(r.status, r);
-                if (status.includes('Miễn')) exempt++;
-                else if (status.includes('✅')) success++;
-                else failed++;
+                const category = resolveRowCategory(r);
+                const isFailed = resolveRowIsFailed(r);
+                if (isFailed) failed++;
+                else if (category === 'EXEMPT') exempt++;
+                else if (category === 'LATE') late++;
+                else if (category === 'DONE') success++;
             });
             document.getElementById('count-total').innerText = total;
             document.getElementById('count-success').innerText = success;
+            const countLateEl = document.getElementById('count-late');
+            if (countLateEl) countLateEl.innerText = late;
             document.getElementById('count-exempt').innerText = exempt;
             document.getElementById('count-failed').innerText = failed;
 
             const tbody = document.getElementById('results-table');
             const searchValue = document.getElementById('searchInput').value.toLowerCase();
             const rows = dashboardResults.filter(r => {
-                const status = normalizeZaloStatusDisplay(r.status, r);
-                const lmsStatusText = resolveDashboardRowLmsStatus(r);
                 const issueText = resolveDashboardRowIssueDescription(r);
-                const isFailed = isUnreportedOrWarningZaloStatus(status, r)
-                    || lmsStatusText.startsWith('❌')
-                    || lmsStatusText.startsWith('⚠️')
-                    || Boolean(issueText);
+                const isFailed = resolveRowIsFailed(r);
                 if (filterUnreported && !isFailed) return false;
                 return !searchValue
                     || String(r.group || '').toLowerCase().includes(searchValue)
@@ -1270,6 +1457,7 @@
             rows.forEach(r => {
                 const tr = document.createElement('tr');
                 tr.className = 'result-row transition-colors';
+                const rowCategory = resolveRowCategory(r);
                 const values = [r.group, r.person, r.timestamp || 'Hôm nay', r.status];
                 values.forEach((value, valueIndex) => {
                     const td = document.createElement('td');
@@ -1277,10 +1465,12 @@
                     if (valueIndex === 3) {
                         const status = normalizeZaloStatusDisplay(value, r);
                         td.classList.add('status-cell');
-                        if (status.includes('Miễn')) {
+                        if (rowCategory === 'EXEMPT') {
                             td.classList.add('status-cell--exempt');
-                        } else if (status.includes('✅')) {
+                        } else if (rowCategory === 'DONE') {
                             td.classList.add('status-cell--success');
+                        } else if (rowCategory === 'LATE') {
+                            td.classList.add('status-cell--late');
                         } else {
                             td.classList.add('status-cell--error');
                         }
@@ -1309,8 +1499,14 @@
                         const resolvedIssue = resolveDashboardRowIssueDescription(r);
                         if (resolvedIssue) {
                             const issueDetail = document.createElement('div');
-                            issueDetail.className = 'status-detail font-semibold text-rose-700';
-                            issueDetail.textContent = `Vấn đề: ${resolvedIssue}`;
+                            const issueSeverity = resolveRowIssueSeverity(r);
+                            if (issueSeverity === 'NOTE') {
+                                issueDetail.className = 'status-detail font-medium text-slate-600';
+                                issueDetail.textContent = `Ghi chú QC: ${resolvedIssue}`;
+                            } else {
+                                issueDetail.className = 'status-detail font-semibold text-rose-700';
+                                issueDetail.textContent = `Vấn đề: ${resolvedIssue}`;
+                            }
                             td.appendChild(issueDetail);
                         }
                         const st = r.scan_target && typeof r.scan_target === 'object' ? r.scan_target : {};
@@ -1365,7 +1561,7 @@
                         item.sha256 ? `SHA-256: ${item.sha256}` : 'Thiếu SHA-256',
                         item.size_bytes != null ? `${item.size_bytes} bytes` : 'Thiếu size',
                         item.capture_type ? `Capture: ${item.capture_type}` : '',
-                    ].filter(Boolean).join('\\n');
+                    ].filter(Boolean).join('\n');
                     if (lifecycle !== 'AVAILABLE') {
                         button.classList.add('is-disabled');
                         button.disabled = true;
@@ -1390,24 +1586,33 @@
                     unavailable.disabled = true;
                     actions.appendChild(unavailable);
                 }
-                const rowStatus = normalizeZaloStatusDisplay(r.status, r);
                 const rowTargetKey = canonicalTargetKey(r.scan_target);
-                if (rowTargetKey && isUnreportedOrWarningZaloStatus(rowStatus, r)) {
+                if (rowTargetKey && ['MISSING', 'REVIEW'].includes(rowCategory)) {
                     const availableEvidencePath = getAvailableRowEvidencePath(r);
                     const rowSourceJobId = resolveResultRowSourceJobId(r);
-                    if (availableEvidencePath && rowSourceJobId) {
+                    const isSimulatedManualApprove = Boolean(
+                        r.manual_approve_simulated
+                        || (typeof simulatedManualApproveTargetKeys !== 'undefined' && simulatedManualApproveTargetKeys.has(rowTargetKey))
+                        || String(r.bcnb_update_state || '').toUpperCase() === 'DRY_RUN'
+                        || /\[DRY-RUN\]\s*Đã mô phỏng duyệt tay/i.test(String(r.status_detail || ''))
+                    );
+                    if (availableEvidencePath && rowSourceJobId && !isSimulatedManualApprove) {
                         const approveBtn = document.createElement('button');
                         approveBtn.type = 'button';
-                        approveBtn.className = 'table-link';
+                        approveBtn.className = `table-link btn-row-manual-approve${currentJobActive ? ' is-disabled' : ''}`;
+                        approveBtn.disabled = Boolean(currentJobActive);
                         approveBtn.textContent = '✅ Duyệt & Tích';
                         approveBtn.title = `Duyệt tay và tích BCNB cho lớp ${r.group || ''}`;
                         approveBtn.addEventListener('click', () => manualApproveZaloTarget(r, availableEvidencePath, rowSourceJobId));
                         actions.appendChild(approveBtn);
                     }
                     if (!isHistoricalWeekViewActive()) {
+                        const canRescanRow = (typeof canRunZaloScanNow === 'function' ? canRunZaloScanNow() : !currentJobActive)
+                            && !isHistoricalWeekViewActive();
                         const rescanBtn = document.createElement('button');
                         rescanBtn.type = 'button';
-                        rescanBtn.className = 'table-link';
+                        rescanBtn.className = `table-link btn-row-rescan${canRescanRow ? '' : ' is-disabled'}`;
+                        rescanBtn.disabled = !canRescanRow;
                         rescanBtn.textContent = 'Quét lại';
                         rescanBtn.title = `Quét lại riêng lớp ${r.group || ''}`;
                         rescanBtn.addEventListener('click', () => startScan([rowTargetKey]));
@@ -1455,10 +1660,7 @@
                 return { text: '', itemCount: 0, teacherCount: 0, totalCount: 0, missingPeriod: true };
             }
             const sourceRows = dashboardResultsForRequiredWeek(Array.isArray(resultsArray) ? resultsArray : []);
-            const unreported = sourceRows.filter(r => {
-                const status = normalizeZaloStatusDisplay(r && r.status, r);
-                return isUnreportedOrWarningZaloStatus(status, r);
-            });
+            const unreported = sourceRows.filter(r => ['MISSING', 'REVIEW'].includes(resolveRowCategory(r)));
             if (unreported.length === 0) {
                 return { text: '', itemCount: 0, teacherCount: 0, totalCount: sourceRows.length, missingPeriod: false };
             }
@@ -1522,6 +1724,7 @@
         let selectiveBaselineResults = [];
         let selectiveBaselinePeriodKey = '';
         let selectiveBaselineSnapshotId = null;
+        const simulatedManualApproveTargetKeys = new Set();
 
         function getAvailableRowEvidencePaths(r) {
             if (!r || typeof r !== 'object') return [];
@@ -1588,8 +1791,7 @@
                 alert('Không tìm thấy dòng kết quả hợp lệ để duyệt.');
                 return;
             }
-            const status = normalizeZaloStatusDisplay(row.status, row);
-            if (!isUnreportedOrWarningZaloStatus(status, row)) {
+            if (!['MISSING', 'REVIEW'].includes(resolveRowCategory(row))) {
                 alert('Chỉ có thể duyệt tay các lớp đang ở trạng thái cần xem lại hoặc chưa báo cáo.');
                 return;
             }
@@ -1654,6 +1856,11 @@
             if (!payload || payload.kind !== 'zalo_manual_approve' || !payload.target_key) return;
             const targetKey = String(payload.target_key);
             const verifiedProduction = payload.dry_run === false && payload.outcome === 'VERIFIED';
+            if (verifiedProduction) {
+                simulatedManualApproveTargetKeys.delete(targetKey);
+            } else {
+                simulatedManualApproveTargetKeys.add(targetKey);
+            }
             const approvedStatus = String(payload.status || '✅ Đã duyệt tay & Tích BCNB');
             const approvedDetail = payload.status_detail != null
                 ? String(payload.status_detail)
@@ -1673,13 +1880,16 @@
                     : { ...existing };
                 if (verifiedProduction) {
                     base.status = approvedStatus;
+                    base.category = 'DONE';
                     base.submitted_for_bcnb = true;
                     base.manual_approved = true;
+                    base.manual_approve_simulated = false;
                     base.evidence_state = 'MANUAL_APPROVED_VERIFIED';
                 } else {
                     base.status = String(existing.status || payload.status || '⚠️ Không đủ bằng chứng – Cần kiểm tra thủ công');
                     base.submitted_for_bcnb = false;
                     base.manual_approved = false;
+                    base.manual_approve_simulated = true;
                 }
                 base.status_detail = approvedDetail;
                 base.bcnb_update_state = payload.outcome || (verifiedProduction ? 'VERIFIED' : 'DRY_RUN');
@@ -1904,10 +2114,7 @@
                 return { keys: [], missingPeriod: true, totalCount: 0, failedCount: 0, skippedWithoutIdentity: 0 };
             }
             const sourceRows = dashboardResultsForRequiredWeek(Array.isArray(resultsArray) ? resultsArray : []);
-            const failedRows = sourceRows.filter(r => {
-                const status = normalizeZaloStatusDisplay(r && r.status, r);
-                return isUnreportedOrWarningZaloStatus(status, r);
-            });
+            const failedRows = sourceRows.filter(r => ['MISSING', 'REVIEW'].includes(resolveRowCategory(r)));
             const keys = [];
             const seen = new Set();
             let skippedWithoutIdentity = 0;
@@ -1954,158 +2161,6 @@
                 return;
             }
             await startScan(summary.keys);
-        }
-
-        const WEEKLY_CSV_HEADERS = [
-            'Mã lớp',
-            'Giáo viên',
-            'Buổi học',
-            'Ngày học',
-            'Trạng thái Zalo',
-            'Trạng thái LMS',
-            'Tình trạng đánh giá',
-            'Mô tả vấn đề (TE/TF/QC)',
-            'Thời gian kiểm chứng',
-        ];
-
-        function sanitizeCsvCell(value) {
-            if (value == null) return '';
-            const raw = String(value);
-            const hadLeadingTabOrCr = raw.startsWith('\t') || raw.startsWith('\r');
-            const cleaned = raw.replace(/[\r\n\t]+/g, ' ').trim();
-            if (!cleaned) return '';
-            if (hadLeadingTabOrCr || ['=', '+', '-', '@'].includes(cleaned[0])) {
-                return `'${cleaned}`;
-            }
-            return cleaned;
-        }
-
-        function escapeCsvField(value) {
-            const sanitized = sanitizeCsvCell(value);
-            if (
-                sanitized.includes(',')
-                || sanitized.includes('"')
-                || sanitized.includes('\n')
-                || sanitized.includes('\r')
-            ) {
-                return `"${sanitized.replace(/"/g, '""')}"`;
-            }
-            return sanitized;
-        }
-
-        function extractRowClassCodeForCsv(item) {
-            if (!item || typeof item !== 'object') return 'KHONG_RO_LOP';
-            const st = item.scan_target && typeof item.scan_target === 'object' ? item.scan_target : null;
-            if (st && st.class_code) return String(st.class_code).trim().toUpperCase();
-            if (item.class_code) return String(item.class_code).trim().toUpperCase();
-            const ev = item.evidence && typeof item.evidence === 'object' ? item.evidence : null;
-            const ctx = ev && ev.date_context && typeof ev.date_context === 'object' ? ev.date_context : null;
-            if (ctx && ctx.target_class_code) return String(ctx.target_class_code).trim().toUpperCase();
-            const grp = String(item.group || '').trim();
-            if (grp) {
-                return grp.replace(/^MindX\s*[-–—]\s*/i, '').replace(/\s*\([^)]*\)\s*$/, '').trim().toUpperCase() || grp;
-            }
-            return 'KHONG_RO_LOP';
-        }
-
-        function buildWeeklySummaryCsvRowsFromDashboard(resultsArray, targetPeriod = null, targetJobId = null) {
-            const period = targetPeriod || effectiveDashboardPeriod();
-            if (!period) return [];
-            const rawList = Array.isArray(resultsArray) ? resultsArray : [];
-            const sourceRows = rawList.filter(r => {
-                const target = r && r.scan_target;
-                if (
-                    !target
-                    || Number(target.week) !== Number(period.week)
-                    || Number(target.year) !== Number(period.year)
-                ) {
-                    return false;
-                }
-                if (targetJobId != null) {
-                    const rowJobId = resolveResultRowSourceJobId(r);
-                    return Number(rowJobId) === Number(targetJobId);
-                }
-                return true;
-            });
-            return sourceRows.map(r => {
-                const st = r && r.scan_target && typeof r.scan_target === 'object' ? r.scan_target : {};
-                const ev = r && r.evidence && typeof r.evidence === 'object' ? r.evidence : {};
-                const verifiedAt = String(ev.scanned_at || r.timestamp || '—').trim() || '—';
-                const zaloStatus = normalizeZaloStatusDisplay((r && r.status) || 'Chưa xác định', r);
-                const lmsStatus = resolveDashboardRowLmsStatus(r);
-                const evaluationStatus = resolveDashboardRowEvaluationStatus(r, zaloStatus, lmsStatus);
-                const issueDescription = resolveDashboardRowIssueDescription(r);
-                return {
-                    class_code: extractRowClassCodeForCsv(r),
-                    teacher: String((r && r.person) || 'Chưa phân công').trim() || 'Chưa phân công',
-                    lesson: String(st.lesson != null ? st.lesson : '—').trim() || '—',
-                    class_date: String(st.class_date || st.class_date_iso || '—').trim() || '—',
-                    zalo_status: zaloStatus,
-                    lms_status: lmsStatus,
-                    evaluation_status: evaluationStatus,
-                    issue_description: issueDescription,
-                    verified_at: verifiedAt,
-                };
-            });
-        }
-
-        function isFailedWeeklySummaryRow(row) {
-            if (!row || typeof row !== 'object') return false;
-            const zaloStatus = normalizeZaloStatusDisplay(row.zalo_status || row.status || '', row);
-            const lmsStatus = String(row.lms_status || resolveDashboardRowLmsStatus(row)).trim();
-            const normalizedEval = String(resolveDashboardRowEvaluationStatus(row) || '').trim();
-            const rawEval = String(row.evaluation_status || '').trim();
-            const evalStatus = normalizedEval || (
-                zaloStatus.includes('Miễn')
-                && (/zalo\s+cần\s+kiểm\s+tra/i.test(rawEval) || /chưa\s+nhận\s+xét\s+zalo/i.test(rawEval))
-                    ? ''
-                    : rawEval
-            );
-            const issueDesc = String(
-                row.issue_description != null ? row.issue_description : resolveDashboardRowIssueDescription(row)
-            ).trim();
-            const zaloOkOrExempt = zaloStatus.includes('✅') || zaloStatus.includes('Miễn');
-            const lmsFailed = lmsStatus.startsWith('❌') || lmsStatus.startsWith('⚠️');
-            const evalFailed = evalStatus.startsWith('❌') || evalStatus.startsWith('⚠️');
-            return !zaloOkOrExempt || lmsFailed || evalFailed || Boolean(issueDesc);
-        }
-
-        function filterFailedWeeklySummaryRows(rows) {
-            return (Array.isArray(rows) ? rows : []).filter(isFailedWeeklySummaryRow);
-        }
-
-        function buildWeeklySummaryCsv(rows) {
-            const safeRows = Array.isArray(rows) ? rows : [];
-            const lines = [WEEKLY_CSV_HEADERS.map(escapeCsvField).join(',')];
-            safeRows.forEach(row => {
-                if (!row || typeof row !== 'object') return;
-                const zaloStatus = normalizeZaloStatusDisplay(row.zalo_status || row.status || '', row);
-                const lmsStatus = String(row.lms_status || resolveDashboardRowLmsStatus(row)).trim();
-                const normalizedEval = String(resolveDashboardRowEvaluationStatus(row) || '').trim();
-                const rawEval = String(row.evaluation_status || '').trim();
-                const evaluationStatus = normalizedEval || (
-                    zaloStatus.includes('Miễn')
-                    && (/zalo\s+cần\s+kiểm\s+tra/i.test(rawEval) || /chưa\s+nhận\s+xét\s+zalo/i.test(rawEval))
-                        ? '⏳ Đã hoàn tất nhận xét Zalo, chưa nhận xét LMS'
-                        : rawEval
-                ) || '—';
-                const issueDescription = String(
-                    row.issue_description != null ? row.issue_description : resolveDashboardRowIssueDescription(row)
-                ).trim();
-                const cells = [
-                    row.class_code,
-                    row.teacher,
-                    row.lesson,
-                    row.class_date,
-                    zaloStatus,
-                    lmsStatus,
-                    evaluationStatus,
-                    issueDescription,
-                    row.verified_at,
-                ];
-                lines.push(cells.map(escapeCsvField).join(','));
-            });
-            return '\uFEFF' + lines.join('\r\n') + '\r\n';
         }
 
         async function copyFailedEmailReportToClipboard(emailData) {
@@ -2202,11 +2257,23 @@
         function updateWeeklyHistoryStatusBadge() {
             const badge = document.getElementById('weekly-history-status-badge');
             if (!badge) return;
+            const lmsUnavailable = Boolean(
+                (typeof latestLmsFetchUnavailable !== 'undefined' && latestLmsFetchUnavailable)
+                || (weeklyHistoryView && (
+                    weeklyHistoryView.lmsFetchUnavailable
+                    || (weeklyHistoryView.lmsSummary && weeklyHistoryView.lmsSummary.lms_fetch_unavailable)
+                ))
+            );
+            const lmsOutageSuffix = lmsUnavailable
+                ? ' · ⚠️ Không tải được dữ liệu LMS toàn hệ thống (tạm ngưng ghi chú LMS tự động)'
+                : '';
             if (!isHistoricalWeekViewActive()) {
                 const req = requiredDashboardPeriod();
-                badge.textContent = req
-                    ? `Chế độ: Tuần hiện tại W${req.week}/${req.year}`
-                    : 'Chế độ: Theo dõi phiên hiện tại';
+                badge.textContent = (
+                    req
+                        ? `Chế độ: Tuần hiện tại W${req.week}/${req.year}`
+                        : 'Chế độ: Theo dõi phiên hiện tại'
+                ) + lmsOutageSuffix;
                 return;
             }
             const w = Number(weeklyHistoryView.week);
@@ -2229,7 +2296,7 @@
                 lmsText = ` · LMS: ${lmsParts.join(', ')}`;
             }
             const jobText = jobId ? `Job #${jobId}` : 'Tổng hợp tuần';
-            badge.textContent = `Đang xem lịch sử W${w}/${y} (${jobText})${lmsText}`;
+            badge.textContent = `Đang xem lịch sử W${w}/${y} (${jobText})${lmsText}${lmsOutageSuffix}`;
         }
 
         function syncWeeklyHistoryControlsWithPlan() {
@@ -2323,10 +2390,35 @@
             }
         }
 
+        async function refreshZaloRequiredWeekSummary(plan = null, options = {}) {
+            if (isHistoricalWeekViewActive()) return null;
+            const reqWeek = (plan && plan.required_week) ? plan.required_week : requiredDashboardPeriod();
+            const week = Number(reqWeek && reqWeek.week);
+            const year = Number(reqWeek && reqWeek.year);
+            if (!Number.isInteger(week) || !Number.isInteger(year) || week < 1 || week > 53) {
+                return null;
+            }
+            return loadWeeklyHistorySummary({
+                week,
+                year,
+                jobId: null,
+                keepLiveMode: options && options.keepLiveMode !== undefined ? Boolean(options.keepLiveMode) : true,
+                silent: options && options.silent !== undefined ? Boolean(options.silent) : true,
+            });
+        }
+
         async function loadWeeklyHistorySummary(options = {}) {
             const weekSelect = document.getElementById('history-week-select');
             const jobSelect = document.getElementById('history-job-select');
-            const keepLiveMode = Boolean(options && options.keepLiveMode);
+            const silent = Boolean(options && options.silent);
+            const hasExplicitHistoryTarget = Boolean(
+                (options && (options.week !== undefined || options.year !== undefined || options.jobId !== undefined))
+                || (weekSelect && weekSelect.value)
+                || (jobSelect && jobSelect.value)
+            );
+            const keepLiveMode = (options && options.keepLiveMode !== undefined)
+                ? Boolean(options.keepLiveMode)
+                : (!isHistoricalWeekViewActive() && !hasExplicitHistoryTarget);
             let targetPeriod = null;
             if (options && Number.isInteger(Number(options.week)) && Number.isInteger(Number(options.year))) {
                 targetPeriod = { week: Number(options.week), year: Number(options.year) };
@@ -2361,6 +2453,7 @@
                     return null;
                 }
                 if (!res.ok) {
+                    if (silent) return null;
                     if (keepLiveMode) {
                         renderZaloResults([], true, {
                             snapshotId: null,
@@ -2375,6 +2468,13 @@
                     alert('Lỗi: ' + message);
                     return null;
                 }
+                const dataLmsUnavailable = Boolean(
+                    data && (
+                        data.lms_fetch_unavailable
+                        || (data.lms_summary && data.lms_summary.lms_fetch_unavailable)
+                    )
+                );
+                latestLmsFetchUnavailable = dataLmsUnavailable;
                 if (!keepLiveMode && data && data.week != null && data.year != null) {
                     weeklyHistoryView = {
                         week: Number(data.week),
@@ -2384,6 +2484,7 @@
                         rows: Array.isArray(data.rows) ? data.rows : [],
                         summary: data.summary || null,
                         lmsSummary: data.lms_summary || null,
+                        lmsFetchUnavailable: dataLmsUnavailable,
                     };
                 } else {
                     weeklyHistoryView = null;
@@ -2393,6 +2494,9 @@
                     weekSelect.value = '';
                 }
                 const items = Array.isArray(data && data.items) ? data.items : [];
+                if (silent && items.length === 0 && Array.isArray(latestZaloResults) && latestZaloResults.length > 0) {
+                    return data;
+                }
                 const summarySnapshotId = (
                     data
                     && data.snapshot_id != null
@@ -2427,12 +2531,14 @@
                     snapshotId: summarySnapshotId,
                     periodKey: summaryPeriodKey,
                     sourceJobId: summaryJobId,
+                    lmsFetchUnavailable: dataLmsUnavailable,
                 });
                 return data;
             } catch (err) {
                 if (typeof weeklyHistoryRequestSeq === 'number' && requestSeq !== weeklyHistoryRequestSeq) {
                     return null;
                 }
+                if (silent) return null;
                 if (keepLiveMode) {
                     renderZaloResults([], true, {
                         snapshotId: null,
@@ -2525,19 +2631,6 @@
             const selectedJobId = (jobSelect && jobSelect.value && Number.isInteger(Number(jobSelect.value)) && Number(jobSelect.value) > 0)
                 ? Number(jobSelect.value)
                 : (matchesActiveHistoryPeriod && weeklyHistoryView.jobId ? Number(weeklyHistoryView.jobId) : null);
-
-            let snapshotFallbackRows = [];
-            if (
-                matchesActiveHistoryPeriod
-                && (weeklyHistoryView.jobId || null) === (selectedJobId || null)
-                && Array.isArray(weeklyHistoryView.rows)
-            ) {
-                snapshotFallbackRows = weeklyHistoryView.rows
-                    .filter(r => r && typeof r === 'object')
-                    .map(r => ({ ...r }));
-            } else if (!isHistoricalWeekViewActive() && !selectedJobId) {
-                snapshotFallbackRows = buildWeeklySummaryCsvRowsFromDashboard(latestZaloResults, period, null);
-            }
 
             if (sendEmail) {
                 const defaultFailedFilename = `Bao_Cao_Lop_Loi_Tuan_W${String(period.week).padStart(2, '0')}_${period.year}.csv`;
@@ -2648,66 +2741,61 @@
                 }
             }
 
-            let rowsToExport = [];
             try {
                 const params = [
                     `week=${encodeURIComponent(period.week)}`,
                     `year=${encodeURIComponent(period.year)}`,
+                    'format=csv',
                 ];
                 if (selectedJobId) {
                     params.push(`job_id=${encodeURIComponent(selectedJobId)}`);
                 }
+                if (failedOnly) {
+                    params.push('failed_only=true');
+                }
                 const res = await fetch(`/api/reports/weekly-summary?${params.join('&')}`);
-                if (res && res.ok) {
-                    const payload = await res.json();
-                    const payloadMatchesPeriod = !payload
-                        || payload.week == null
-                        || payload.year == null
-                        || (Number(payload.week) === Number(period.week) && Number(payload.year) === Number(period.year));
-                    if (payload && payloadMatchesPeriod && Array.isArray(payload.rows)) {
-                        rowsToExport = payload.rows;
-                    }
-                } else if (res && !res.ok) {
+                if (!res || !res.ok) {
                     let message = 'Không thể xuất báo cáo tuần.';
                     try {
-                        const errData = await res.json();
-                        const detail = errData && errData.detail;
-                        message = detail && typeof detail === 'object'
-                            ? (detail.message || detail.code || message)
-                            : (detail || message);
+                        if (res && typeof res.json === 'function') {
+                            const errData = await res.json();
+                            const detail = errData && errData.detail;
+                            message = detail && typeof detail === 'object'
+                                ? (detail.message || detail.code || message)
+                                : (detail || message);
+                        }
                     } catch (_) {
                         // ignore json parse error
                     }
                     alert('Lỗi: ' + message);
                     return '';
                 }
-            } catch (_) {
-                // Chỉ fallback sang snapshot bất biến đã chụp trước khi gửi request
-                rowsToExport = snapshotFallbackRows;
-            }
-
-            if (rowsToExport.length === 0) {
-                alert('Chưa có dữ liệu báo cáo trong tuần đã chọn để xuất CSV.');
-                return '';
-            }
-
-            if (failedOnly) {
-                rowsToExport = filterFailedWeeklySummaryRows(rowsToExport);
-                if (rowsToExport.length === 0) {
-                    alert('Không có lớp lỗi nào trong tuần đã chọn cần xuất CSV và gửi mail.');
+                const csvText = typeof res.text === 'function' ? await res.text() : '';
+                const nonEmptyLines = String(csvText || '')
+                    .replace(/^\uFEFF/, '')
+                    .trim()
+                    .split(/\r?\n/)
+                    .filter(Boolean);
+                if (nonEmptyLines.length <= 1) {
+                    alert(
+                        failedOnly
+                            ? 'Không có lớp lỗi nào trong tuần đã chọn cần xuất CSV và gửi mail.'
+                            : 'Chưa có dữ liệu báo cáo trong tuần đã chọn để xuất CSV.'
+                    );
                     return '';
                 }
+                const filePrefix = failedOnly ? 'Bao_Cao_Lop_Loi_Tuan' : 'Bao_Cao_Tuan';
+                const filename = `${filePrefix}_W${String(period.week).padStart(2, '0')}_${period.year}.csv`;
+                if (downloadCsv) {
+                    triggerCsvFileDownload(csvText, filename);
+                } else {
+                    lastExportedWeeklyCsv = String(csvText || '');
+                }
+                return csvText;
+            } catch (_) {
+                alert('Không thể kết nối máy chủ để xuất CSV báo cáo tuần.');
+                return '';
             }
-
-            const csvText = buildWeeklySummaryCsv(rowsToExport);
-            const filePrefix = failedOnly ? 'Bao_Cao_Lop_Loi_Tuan' : 'Bao_Cao_Tuan';
-            const filename = `${filePrefix}_W${String(period.week).padStart(2, '0')}_${period.year}.csv`;
-            if (downloadCsv) {
-                triggerCsvFileDownload(csvText, filename);
-            } else {
-                lastExportedWeeklyCsv = String(csvText || '');
-            }
-            return csvText;
         }
 
         async function exportAndEmailFailedClassesCsv(options = {}) {

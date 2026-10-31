@@ -25,6 +25,7 @@ if missing:
 runtime = read("services/runtime.py")
 external = read("services/external_gateways.py")
 zalo = read("services/zalo_service.py")
+zalo_parallel = read("services/zalo_parallel_service.py")
 discovery = read("services/zalo_discovery_service.py")
 lms = read("services/lms_service.py")
 google = read("services/googleform_service.py")
@@ -32,7 +33,7 @@ submitter = read("googleform_autosubmit/form_submitter.py")
 tool_config = read("pyproject.toml")
 quality_script = read("CHECK_QUALITY.ps1")
 
-orchestration = zalo + discovery + lms + google
+orchestration = zalo + zalo_parallel + discovery + lms + google
 invariants = {
     "runtime-owns-external-gateways": "external: ExternalGateways" in runtime
     and "default_factory=ExternalGateways.production" in runtime,
@@ -43,7 +44,7 @@ invariants = {
     and "async def form_batch" in external
     and external.count("await context.close()") == 1
     and external.count("await browser.close()") == 1,
-    "zalo-gateway-wiring": zalo.count("external.browser.persistent_page") == 1
+    "zalo-gateway-wiring": zalo_parallel.count("external.browser.persistent_session") == 1
     and discovery.count("selected.browser.persistent_page") == 1,
     "lms-gateway-wiring": lms.count("external.browser.persistent_page") == 2
     and "external.lms_ocr" in lms,
