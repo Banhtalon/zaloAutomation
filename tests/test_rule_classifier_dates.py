@@ -115,6 +115,35 @@ class RuleClassifierDateTests(unittest.TestCase):
         self.assertFalse(informal_cls["is_report"])
         self.assertTrue(is_eligible_for_ai_assist(informal_report, informal_cls))
 
+    def test_homework_tail_bubble_does_not_false_trigger_content_header_or_lesson_number(self):
+        from services.zalo_safety import extract_report_lesson_number
+
+        tail_bubble = (
+            "📊 TÌNH HÌNH CHUNG LỚP HỌC:\n"
+            "• Hôm nay các bạn học viên đều đến lớp đúng giờ, giữ tinh thần học tập nghiêm túc.\n"
+            "📋 ĐÁNH GIÁ CHI TIẾT TỪNG HỌC VIÊN:\n"
+            "• Học viên A: Con lắp ráp mô hình tốt.\n"
+            "🏠 NHIỆM VỤ KHI VỀ NHÀ:\n"
+            "• Nội dung bài tập tại file [ARMB - Homework] Buổi 3_Hang động kỳ bí, "
+            "các con hoàn thành và buổi học sau mang lên cô chấm."
+        )
+        cls_res = classify_report_content(
+            tail_bubble,
+            "MindX - Robotics-VT-ROB-ARMB20 T7 (14H-16H)",
+            datetime(2026, 11, 3),
+        )
+        self.assertFalse(cls_res["is_report"])
+        self.assertNotIn("strong_header:nội dung", cls_res["matched_signals"])
+        self.assertIsNone(extract_report_lesson_number(tail_bubble))
+        self.assertEqual(
+            extract_report_lesson_number("Đã chữa bài tập về nhà.\nBáo cáo buổi 4"),
+            4,
+        )
+        self.assertEqual(
+            extract_report_lesson_number("Đã chữa bài tập về nhà. Báo cáo buổi 4"),
+            4,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

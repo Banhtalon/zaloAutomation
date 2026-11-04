@@ -1030,8 +1030,6 @@ def extract_proven_auto_issues_from_audits(
 
         if str(audit.get("outcome") or "").strip().upper() != "VERIFIED":
             continue
-        if bool(after_state.get("no_change")) or after_state.get("post_verified") is not True:
-            continue
         if not isinstance(before_state, Mapping):
             continue
         before_note_raw = before_state.get("qc_issue_note")
@@ -1039,6 +1037,15 @@ def extract_proven_auto_issues_from_audits(
             continue
         after_note_raw = after_state.get("qc_issue_note")
         if not isinstance(after_note_raw, str) or not preserve_bcnb_note_text(after_note_raw):
+            continue
+        has_post_verified = after_state.get("post_verified") is True
+        has_legacy_auto_qc_wrapper = (
+            "post_verified" not in after_state
+            and "[auto qc:" in after_note_raw.lower()
+        )
+        if bool(after_state.get("no_change")) or not (
+            has_post_verified or has_legacy_auto_qc_wrapper
+        ):
             continue
         if preserve_bcnb_note_text(before_note_raw) == preserve_bcnb_note_text(after_note_raw):
             continue

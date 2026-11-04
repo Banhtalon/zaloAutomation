@@ -104,14 +104,19 @@ def classify_report_content(
         score += 1.0
         matched_signals.append(f"greeting:{greeting}")
 
+    text_without_homework_content = re.sub(r"nội\s+dung\s+bài\s+tập", "", text)
     strong_headers = ["nội dung", "nhận xét", "mã lớp: vt", "bài tập về nhà", "btvn", "nhiệm vụ về nhà", "nhiệm vụ khi về nhà"]
     for header in strong_headers:
-        if header in text:
+        search_target = text_without_homework_content if header == "nội dung" else text
+        if header in search_target:
             score += 2.0
             matched_signals.append(f"strong_header:{header}")
 
     substance_headers = ("nội dung", "nhận xét", "bài tập về nhà", "btvn", "nhiệm vụ về nhà", "nhiệm vụ khi về nhà")
-    has_substance_header = any(header in text for header in substance_headers)
+    has_substance_header = any(
+        header in (text_without_homework_content if header == "nội dung" else text)
+        for header in substance_headers
+    )
 
     weak_headers = ["tình hình lớp", "sĩ số", "vắng", "buổi số", "buổi học"]
     for header in weak_headers:

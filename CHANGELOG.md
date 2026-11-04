@@ -4,6 +4,25 @@ Tài liệu này ghi lại toàn bộ quá trình hình thành, phát triển ki
 
 ---
 
+## [2026-11-04] — Hotfix 3 Điểm Báo Lỗi Giả / Kẹt Lỗi Cũ Trên Dashboard (`W44/2026` Job `#419`) & Quy Tắc Đồng Bộ GitHub Source of Truth (`DEC-036`, `DEC-040`)
+
+### 🛠️ Sửa lỗi & Củng cố độ chính xác kiểm định Zalo/LMS/BCNB
+- **Điểm 1 — Xử lý báo cáo Zalo tách làm 2 bubble (`VT-ROB-ARMB20`, `VT-ROB-PREB19`) & Chuẩn hóa câu chữ thiếu ngày (`classifiers/rule_classifier.py`, `services/zalo_safety.py`, `services/zalo_scan_evidence.py`, `services/zalo_target_matching.py`)**:
+  - Loại trừ cụm `"nội dung bài tập"` khỏi việc tự kích hoạt `strong_header:nội dung` trong `classify_report_content`, ngăn bubble đuôi chỉ chứa nhận xét chung và bài tập về nhà tự đạt ngưỡng báo cáo độc lập.
+  - Trong `extract_report_lesson_number` (`services/zalo_safety.py`), bỏ qua số buổi nằm trong tên file bài tập về nhà (`"homework"`, `"bài tập"`, `"tại file"`) trên cùng dòng (sau khi tách từ khóa `"báo cáo"`, `"tổng kết"`, `"update"`), không ăn sang dòng trước (`"Đã chữa bài tập về nhà.\nBáo cáo buổi 4"` vẫn nhận đúng buổi `4`).
+  - Trong `scan_open_zalo_chat` (`services/zalo_scan_evidence.py`), khi quét ngược danh sách tin nhắn có `target` và bubble mới hơn chỉ khớp fallback (`target_match.decision != TARGET_EXACT`), lưu trạng thái tạm `provisional_state` và kiểm tra tiếp các bubble cũ hơn; nếu gặp bubble chính khớp `TARGET_EXACT` thì ưu tiên chọn `TARGET_EXACT`, nếu không thì khôi phục nguyên trạng `provisional_state`.
+  - Trong `resolve_report_target` (`services/zalo_target_matching.py`), khi `claimed_lesson == expected_lesson` và `claimed_lesson_date is None` (gửi khác ngày học), chuẩn hóa ghi chú thành `"Đã báo cáo nhưng không ghi ngày; đã ghép theo ..."` thay vì câu chữ tối nghĩa `"ghi sai ngày không rõ ngày"`.
+- **Điểm 2 — Sửa trích xuất tên bài học trên Zalo (`VT-C4K-GI34`, `VT-C4K-GB42-HB`, `VT-CSA04-HB`, `VT-C4K-SA27`, `VT-JSB16` — `services/lms_quality_service.py`)**:
+  - Trong `extract_report_lesson_title`, dừng quét ngay khi gặp tiêu đề mục buổi học kế tiếp (`_NEXT_LESSON_SECTION_MARKERS`: `"buổi học kế tiếp"`, `"buổi tiếp theo"`, `"bài học kế tiếp"`, ...), ngăn lấy nhầm dòng `"Nội dung bài học: BUỔI N+1: ..."` ở phần giới thiệu buổi sau đem so với LMS của buổi hiện tại.
+  - Loại bỏ toàn bộ ký tự biểu tượng/non-word đầu dòng và hỗ trợ mẫu tiêu đề nhiều dòng khi dòng `📘 NỘI DUNG BUỔI HỌC:` / `📝 NỘI DUNG CỦA BUỔI HỌC:` đứng riêng và dòng kế tiếp mang cấu trúc đánh số `Bài/Buổi/Lesson N: <Title>` (không nhận nhầm các dòng thông tin khác như `👥 ĐIỂM DANH: 6/6`).
+- **Điểm 3 — Provenance cho các audit Wave 4 legacy bọc `[Auto QC: ...]` (`VT-C4K-GB42-HB` `session_id = 6052` — `services/bcnb_safety.py`)**:
+  - Trong `extract_proven_auto_issues_from_audits`, chấp nhận các bản ghi audit `VERIFIED` production từ giai đoạn Wave 4 (chưa có trường `post_verified`) khi `after_state.qc_issue_note` có bọc `[Auto QC: ...]`.
+  - Giúp `split_checker_issue_note` và `merge_checker_issue_note` nhận diện đúng các lỗi tự động cũ (`[Zalo] Có báo cáo gửi 18/10 trước ngày học target ...`, `[LMS] Chưa ghi nội dung bài học`, `[LMS] Chưa nhận xét học viên (3/3 HS)`) và tự động xóa sạch khi giáo viên đã khắc phục, đồng thời giữ nguyên 15/15 case bảo vệ ghi chú tay trong `test_5_2_4_table_driven_provenance_auto_vs_manual_note`.
+- **Quy trình (`DEC-040` — GitHub là Source of Truth)**:
+  - Thiết lập quy tắc cố định trong `AGENTS.md`, `GEMINI.md` và `PROJECT_DECISIONS.md`: sau khi hoàn tất bất kỳ tính năng hoặc bản sửa lỗi nào và vượt qua đầy đủ các cổng kiểm chứng (`.\CHECK_QUALITY.ps1 -Isolated` + Independent Review `gpt-6.1-sol` `VERDICT: PASS`), bắt buộc cập nhật `CHANGELOG.md` rõ ràng, commit và push đồng bộ lên GitHub (`origin`).
+
+---
+
 ## [2026-10-31] — Wave 5 (`5.0` → `5.8`): Hardening Toàn Diện Luồng Kiểm Tra Báo Cáo Zalo/BCNB/LMS (`DEC-036`, `DEC-039`)
 
 ### 🛡️ Củng cố độ bền, tính đúng đắn bằng chứng & Một nguồn sự thật (`UPGRADE_PROGRESS.md` — `Wave 5: 59/59 ✅`)

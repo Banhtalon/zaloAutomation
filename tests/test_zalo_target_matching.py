@@ -199,6 +199,19 @@ class ZaloTargetMatchingTests(unittest.TestCase):
         self.assertTrue(m_late_valid.matches)
         self.assertEqual(m_late_valid.decision, TARGET_EXACT)
 
+        # 9. Exact lesson on a later day without a date uses clean "không ghi ngày" wording
+        m_late_no_date_with_lesson = resolve_report_target(
+            target,
+            ui_sent_at=datetime(2026, 10, 26, tzinfo=BUSINESS_TIMEZONE),
+            claimed_lesson_date=None,
+            claimed_lesson=5,
+            content_lesson=None,
+        )
+        self.assertTrue(m_late_no_date_with_lesson.matches)
+        self.assertEqual(m_late_no_date_with_lesson.decision, TARGET_DATE_TYPO_CORRECTED)
+        self.assertIn("không ghi ngày", m_late_no_date_with_lesson.note or "")
+        self.assertNotIn("ghi sai ngày không rõ ngày", m_late_no_date_with_lesson.note or "")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1143,3 +1143,14 @@
      - Truy vấn GraphQL lấy `_id`, `index`, `date`, `startTime`, `endTime`; đổi mốc thời gian slot về múi giờ `Asia/Ho_Chi_Minh` và chỉ chọn khi có đúng 1 slot không bị hủy khớp đồng thời ngày học (`slot_date_iso == target_date_iso`) và số buổi (`index + 1 == lesson_num`), bỏ hoàn toàn việc lấy theo vị trí `class_slots[lesson_num - 1]`.
   6. **Quy trình Review độc lập Wave 5**:
      - Toàn bộ các chặng `5.0 → 5.8` và diff tổng thể của Wave 5 được kiểm định độc lập bằng `codex exec -m gpt-6.1-sol -c model_reasoning_effort="high" -s read-only -` đạt `VERDICT: PASS`.
+
+## DEC-040 — GitHub là Source of Truth; cập nhật `CHANGELOG.md`, commit & push lên GitHub sau mỗi tính năng hoặc bản sửa lỗi hoàn tất
+
+- Date: 2026-11-04
+- Status: Accepted by Owner (Standing Rule)
+- Context: Owner chỉ đạo rõ: *"Ghi nhớ luôn, github sẽ là source of truth, xong tính năng hoặc fix gì xong thì update lên github. có changelog rõ"*.
+- Decision:
+  1. **GitHub (`origin`) là Source of Truth**: Sau khi hoàn tất bất kỳ tính năng mới hoặc bản sửa lỗi nào và đã vượt qua đầy đủ các cổng kiểm chứng (`.\CHECK_QUALITY.ps1 -Isolated` + Review độc lập `gpt-6.1-sol` đạt `VERDICT: PASS`), Lead chủ động cập nhật `CHANGELOG.md` (và `PROJECT_STATE.md` / `VERSION.md` khi phù hợp) với nội dung thay đổi rõ ràng.
+  2. **Commit & Push an toàn**: Chỉ stage các file mã nguồn, test và tài liệu thuộc phạm vi task allowlist; tuyệt đối không stage `.env`, `database.db`, browser state, dữ liệu học viên thô hay secret; thực hiện `git commit` với thông điệp chuẩn mực và `git push` đồng bộ lên GitHub (`origin`).
+- Consequences: Mã nguồn và lịch sử thay đổi (`CHANGELOG.md`) trên GitHub luôn khớp tức thời với trạng thái đã kiểm chứng mới nhất ở local mà không cần Owner phải nhắc push thủ công sau mỗi lần làm tính năng/fix.
+- Supersedes: Thay thế quy tắc chặn tự động commit/push sau khi hoàn tất task trong các hướng dẫn cũ, trong khi giữ nguyên 100% rào chắn an toàn dữ liệu và không tự ý thao tác hệ thống ngoài (Zalo/BCNB/LMS/Production).

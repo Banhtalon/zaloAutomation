@@ -479,6 +479,38 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
             extract_report_lesson_title("📌 Tên bài học: Cảm biến siêu âm HC-SR04\nĐiểm danh: 6/6"),
             "Cảm biến siêu âm HC-SR04",
         )
+        multiline_report = (
+            "Chào bố mẹ, thầy gửi báo cáo buổi học số 8 ngày 31/10/2026 của lớp VT-C4K-GI34:\n"
+            "📘 NỘI DUNG BUỔI HỌC:\n"
+            "BÀI 8: CAMERA THÔNG MINH\n"
+            "- Biết cách sử dụng biến để thao tác với Camera.\n"
+            "📌 NỘI DUNG BUỔI HỌC KẾ TIẾP:\n"
+            "Thời gian: Thứ Bảy (07/11/2026)\n"
+            "Nội dung bài học: BUỔI 9: KIỂM THỬ VÀ SỬA LỖI TRÒ CHƠI"
+        )
+        self.assertEqual(
+            extract_report_lesson_title(multiline_report),
+            "BÀI 8: CAMERA THÔNG MINH",
+        )
+        no_inline_title_with_next_section = (
+            "📘 NỘI DUNG BUỔI HỌC:\n"
+            "- Tìm hiểu về danh sách (list) và biến cục bộ.\n"
+            "📌 NỘI DUNG BUỔI HỌC KẾ TIẾP:\n"
+            "Nội dung bài học: BUỔI 5: WORKSHOP KỸ NĂNG (Checkpoint 1)"
+        )
+        self.assertEqual(
+            extract_report_lesson_title(no_inline_title_with_next_section),
+            "",
+        )
+        attendance_between_header_and_title = (
+            "📘 NỘI DUNG BUỔI HỌC:\n"
+            "👥 ĐIỂM DANH: 6/6\n"
+            "📌 Tên bài học: Camera thông minh"
+        )
+        self.assertEqual(
+            extract_report_lesson_title(attendance_between_header_and_title),
+            "Camera thông minh",
+        )
         exempt = evaluate_lms_slot_quality(
             {"summary": "", "studentAttendance": []},
             class_code="VT-C4K-PTB16",

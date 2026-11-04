@@ -1837,6 +1837,91 @@ class BcnbActionTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual((persisted_ws_ok, obs_ws_ok), (True, "  QC fallback\n"))
 
+    def test_legacy_wave4_auto_qc_wrapped_audits_prove_and_clear_resolved_issues(self) -> None:
+        from services.bcnb_safety import (
+            extract_proven_auto_issues_from_audits,
+            merge_checker_issue_note,
+        )
+
+        legacy_audits = [
+            {
+                "action_type": "BCNB_UPDATE_CHECKER_NOTE",
+                "target_id": "VT-C4K-GB42-HB",
+                "mode": "production",
+                "outcome": "VERIFIED",
+                "before_state": {"bcnb_session_id": "6052", "qc_issue_note": ""},
+                "after_state": {
+                    "bcnb_session_id": "6052",
+                    "qc_issue_note": (
+                        "[Auto QC: [Zalo] Có báo cáo gửi 18/10 trước ngày học target "
+                        "BCNB W44/2026, ngày 28/10, buổi 12 — không dùng cho dòng này.]"
+                    ),
+                },
+                "reason": {
+                    "bcnb_session_id": "6052",
+                    "class_date": "2026-10-28",
+                    "lesson": "12",
+                    "week": 44,
+                    "year": 2026,
+                    "auto_issues": [
+                        "[Zalo] Có báo cáo gửi 18/10 trước ngày học target BCNB W44/2026, ngày 28/10, buổi 12 — không dùng cho dòng này."
+                    ],
+                },
+            },
+            {
+                "action_type": "BCNB_UPDATE_CHECKER_NOTE",
+                "target_id": "VT-C4K-GB42-HB",
+                "mode": "production",
+                "outcome": "VERIFIED",
+                "before_state": {
+                    "bcnb_session_id": "6052",
+                    "qc_issue_note": (
+                        "[Auto QC: [Zalo] Có báo cáo gửi 18/10 trước ngày học target "
+                        "BCNB W44/2026, ngày 28/10, buổi 12 — không dùng cho dòng này.]"
+                    ),
+                },
+                "after_state": {
+                    "bcnb_session_id": "6052",
+                    "qc_issue_note": (
+                        "[Auto QC: [Zalo] Có báo cáo gửi 18/10 trước ngày học target "
+                        "BCNB W44/2026, ngày 28/10, buổi 12 — không dùng cho dòng này.; "
+                        "[LMS] Chưa ghi nội dung bài học; [LMS] Chưa nhận xét học viên (3/3 HS)]"
+                    ),
+                },
+                "reason": {
+                    "bcnb_session_id": "6052",
+                    "class_date": "2026-10-28",
+                    "lesson": "12",
+                    "week": 44,
+                    "year": 2026,
+                    "auto_issues": [
+                        "[Zalo] Có báo cáo gửi 18/10 trước ngày học target BCNB W44/2026, ngày 28/10, buổi 12 — không dùng cho dòng này.",
+                        "[LMS] Chưa ghi nội dung bài học",
+                        "[LMS] Chưa nhận xét học viên (3/3 HS)",
+                    ],
+                },
+            },
+        ]
+        proven = extract_proven_auto_issues_from_audits(
+            legacy_audits,
+            class_code="VT-C4K-GB42-HB",
+            lesson="12",
+            week=44,
+            year=2026,
+            session_id="6052",
+            class_date_iso="2026-10-28",
+        )
+        self.assertEqual(len(proven), 3)
+        existing_unwrapped = (
+            "[Zalo] Có báo cáo gửi 18/10 trước ngày học target BCNB W44/2026, ngày 28/10, buổi 12 — không dùng cho dòng này.; "
+            "[LMS] Chưa ghi nội dung bài học; [LMS] Chưa nhận xét học viên (3/3 HS)"
+        )
+        merged = merge_checker_issue_note(
+            existing_unwrapped,
+            ["[LMS] Nhận xét thiếu ý"],
+            proven_auto_issues=proven,
+        )
+        self.assertEqual(merged, "[LMS] Nhận xét thiếu ý")
 
 
 if __name__ == "__main__":

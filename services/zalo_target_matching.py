@@ -209,15 +209,22 @@ def resolve_report_target(
                 corrected_teacher_date=False,
                 note="[Zalo] Báo cáo không ghi ngày/buổi",
             )
-        claimed_text = claimed_lesson_date.strftime("%d/%m") if claimed_lesson_date else "không rõ ngày"
+        if claimed_lesson_date is not None:
+            claimed_text = claimed_lesson_date.strftime("%d/%m")
+            note_text = (
+                f"Đã báo cáo nhưng ghi sai ngày {claimed_text}; "
+                f"đã ghép theo {_target_label(target)}."
+            )
+        else:
+            note_text = (
+                f"Đã báo cáo nhưng không ghi ngày; "
+                f"đã ghép theo {_target_label(target)}."
+            )
         return TargetMatch(
             decision=TARGET_DATE_TYPO_CORRECTED,
             matches=True,
             corrected_teacher_date=True,
-            note=(
-                f"Đã báo cáo nhưng ghi sai ngày {claimed_text}; "
-                f"đã ghép theo {_target_label(target)}."
-            ),
+            note=note_text,
         )
 
     # GA35-style stale headers are only repaired when a separate curriculum

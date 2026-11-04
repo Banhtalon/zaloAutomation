@@ -753,24 +753,59 @@ def evaluate_lms_slot_quality(
     }
 
 
+_NEXT_LESSON_SECTION_MARKERS = (
+    "buoi hoc ke tiep",
+    "buoi ke tiep",
+    "buoi hoc tiep theo",
+    "buoi tiep theo",
+    "bai hoc ke tiep",
+    "bai hoc tiep theo",
+    "lich hoc buoi tiep theo",
+    "lich hoc ke tiep",
+)
+
+
 def extract_report_lesson_title(raw_content: str | None) -> str:
     """Extract an explicit lesson title/topic line from a Zalo report without capturing student PII."""
     if not raw_content:
         return ""
+    awaiting_next_line_title = False
     for line in str(raw_content).splitlines():
-        clean_line = " ".join(line.split()).strip(" -–—•*📌📝📚🎯✅🔹")
+        clean_line = re.sub(
+            r"^[^\w]+",
+            "",
+            " ".join(line.split()),
+            flags=re.UNICODE,
+        ).strip()
         if not clean_line:
             continue
+        folded_line = fold_text(clean_line)
+        if any(marker in folded_line for marker in _NEXT_LESSON_SECTION_MARKERS):
+            break
         m = re.match(
             r"^(?:t[eê]n\s+b[aà]i(?:\s+h[oọ]c)?|ch[uủ]\s+[dđ][eề](?:\s+b[aà]i\s+h[oọ]c)?|"
-            r"n[oộ]i\s+dung\s+b[aà]i\s+h[oọ]c|b[aà]i\s+h[oọ]c\s+h[oô]m\s+nay)\s*[:\-–—]\s*(.+)$",
+            r"n[oộ]i\s+dung\s+(?:c[uủ]a\s+)?(?:b[aà]i|bu[oổ]i)\s+h[oọ]c|b[aà]i\s+h[oọ]c\s+h[oô]m\s+nay)"
+            r"(?:\s*[:\-–—]\s*(.+)|\s*[:\-–—]?\s*)$",
             clean_line,
             flags=re.IGNORECASE,
         )
         if m:
-            title = m.group(1).strip(" .;:!|-–—")
-            if 3 <= len(title) <= 120:
-                return title
+            inline_title = (m.group(1) or "").strip(" .;:!|-–—")
+            if 3 <= len(inline_title) <= 120:
+                return inline_title
+            awaiting_next_line_title = True
+            continue
+        if awaiting_next_line_title:
+            awaiting_next_line_title = False
+            m_numbered = re.match(
+                r"^(?:b[aà]i(?:\s+h[oọ]c)?(?:\s+s[oố])?|bu[oổ]i(?:\s+h[oọ]c)?(?:\s+s[oố])?|lesson)\s*\d+\s*[:\-–—.]\s*(.+)$",
+                clean_line,
+                flags=re.IGNORECASE,
+            )
+            if m_numbered and len(m_numbered.group(1).strip(" .;:!|-–—")) >= 3:
+                title = clean_line.strip(" .;:!|-–—")
+                if 3 <= len(title) <= 120:
+                    return title
     return ""
 
 

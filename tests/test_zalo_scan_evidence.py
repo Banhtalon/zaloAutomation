@@ -1999,6 +1999,114 @@ class ZaloScanEvidenceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(categorize_row(res_late), CATEGORY_LATE)
             self.assertFalse(is_failed(res_late))
 
+            # 5. Split 2-bubble Zalo report (ARMB20 / PREB19 pattern): primary dated bubble followed by
+            #    a continuation bubble must match TARGET_EXACT on the primary bubble without false date-typo issues
+            split_target = {
+                "class_code": "VT-ROB-ARMB20",
+                "class_date": "31/10/2026",
+                "class_date_iso": "2026-10-31",
+                "lesson": "3",
+                "week": 44,
+                "year": 2026,
+                "zalo_deadline": "20:00 02/11/2026",
+            }
+            bubble_1_main = (
+                "@All Kính gửi Quý Phụ huynh,\n"
+                "Em xin phép tổng kết sau buổi học số 3 - 31/10/2026 của lớp VT-ROB-ARMB20 ạ:\n"
+                "📌 SĨ SỐ LỚP HỌC:\n"
+                "• Tham gia: 4/4 học viên\n"
+                "📝 NỘI DUNG CỦA BUỔI HỌC:\n"
+                "Buổi 3: HANG ĐỘNG KỲ BÍ\n"
+                "• Nhận biết và hiểu vai trò của Cảm biến màu sắc (Color Sensor).\n"
+                "📅 NỘI DUNG BUỔI HỌC KẾ TIẾP:\n"
+                "• Thời gian: 14:00 - 16:00, Thứ Bảy, ngày 07/11/2026"
+            )
+            bubble_2_tail = (
+                "📊 TÌNH HÌNH LỚP HỌC & NHẬN XÉT:\n"
+                "• Hôm nay tất cả các bạn học viên đều đến lớp đúng giờ.\n"
+                "🏠 NHIỆM VỤ KHI VỀ NHÀ:\n"
+                "• Nội dung bài tập tại file [ARMB - Homework] Buổi 3_Hang động kỳ bí, "
+                "các con hoàn thành và buổi học sau mang lên cô chấm."
+            )
+            # 5a. Sent on class day (31/10/2026): bubble_2_tail triggers TARGET_SAME_DAY_NO_DATE
+            #     (creating provisional_state), then bubble_1_main supersedes it with TARGET_EXACT
+            res_split = await scan_open_zalo_chat(
+                FakePage(
+                    [
+                        FakeMessage(bubble_1_main, "31/10/2026"),
+                        FakeMessage(bubble_2_tail, "31/10/2026"),
+                    ]
+                ),
+                job_id=5845,
+                screenshots_dir=root,
+                group_name="MindX - Robotics-VT-ROB-ARMB20 T7 (14H-16H)",
+                actual_group_name="MindX - Robotics-VT-ROB-ARMB20 T7 (14H-16H)",
+                person="Teacher",
+                class_date_str="31/10/2026",
+                scan_target=split_target,
+                today=datetime(2026, 11, 4),
+                ensure_not_cancelled=AsyncMock(),
+            )
+            self.assertEqual(res_split["evidence_state"], SUBMITTED_VERIFIED)
+            self.assertTrue(res_split["submitted_for_bcnb"])
+            self.assertEqual(
+                res_split["evidence"]["date_context"].get("target_match_decision"),
+                "TARGET_EXACT",
+            )
+            self.assertEqual(
+                res_split["evidence"]["date_context"].get("reported_lesson_title"),
+                "Buổi 3: HANG ĐỘNG KỲ BÍ",
+            )
+            self.assertFalse(res_split.get("zalo_content_issues"))
+
+            # 5b. Provisional fallback restoration when no earlier bubble matches TARGET_EXACT
+            older_prev_week_report = (
+                "@All Kính gửi Quý Phụ huynh,\n"
+                "Em xin phép tổng kết sau buổi học số 2 - 24/10/2026 của lớp VT-ROB-ARMB20 ạ:\n"
+                "📝 NỘI DUNG CỦA BUỔI HỌC:\n"
+                "Buổi 2: KHÁM PHÁ CẢM BIẾN\n"
+                "• NHẬN XÉT: Các con hoàn thành bài tốt."
+            )
+            res_provisional_restored = await scan_open_zalo_chat(
+                FakePage(
+                    [
+                        FakeMessage(older_prev_week_report, "24/10/2026"),
+                        FakeMessage(bubble_2_tail, "31/10/2026"),
+                    ]
+                ),
+                job_id=5846,
+                screenshots_dir=root,
+                group_name="MindX - Robotics-VT-ROB-ARMB20 T7 (14H-16H)",
+                actual_group_name="MindX - Robotics-VT-ROB-ARMB20 T7 (14H-16H)",
+                person="Teacher",
+                class_date_str="31/10/2026",
+                scan_target=split_target,
+                today=datetime(2026, 11, 4),
+                ensure_not_cancelled=AsyncMock(),
+            )
+            self.assertEqual(res_provisional_restored["evidence_state"], SUBMITTED_VERIFIED)
+            self.assertTrue(res_provisional_restored["submitted_for_bcnb"])
+            self.assertEqual(
+                res_provisional_restored["evidence"]["date_context"].get(
+                    "target_match_decision"
+                ),
+                "TARGET_SAME_DAY_NO_DATE",
+            )
+            self.assertEqual(
+                res_provisional_restored["evidence"]["classifier_result"][
+                    "evaluated_messages"
+                ],
+                1,
+            )
+            self.assertEqual(
+                len(
+                    res_provisional_restored["evidence"]["classifier_result"][
+                        "candidates"
+                    ]
+                ),
+                1,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -172,6 +172,16 @@ def extract_report_lesson_number(raw_content: str) -> int | None:
         context = text[max(0, match.start() - 24) : match.start()]
         if "kế tiếp" in context or "tiếp theo" in context:
             continue
+        line_start = text.rfind("\n", 0, match.start()) + 1
+        same_line_before = text[line_start : match.start()]
+        tail_after_report_kw = re.split(
+            r"(?:báo\s+cáo|tổng\s+kết|update)", same_line_before
+        )[-1]
+        if any(
+            marker in tail_after_report_kw
+            for marker in ("homework", "bài tập", "tại file")
+        ):
+            continue
         return int(match.group(1))
     return None
 

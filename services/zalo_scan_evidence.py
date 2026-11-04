@@ -46,6 +46,7 @@ from services.report_status import (
 )
 from services.zalo_target_matching import (
     BcnbScanTarget,
+    TARGET_EXACT,
     TARGET_SAME_DAY_NO_DATE,
     TARGET_SAME_DAY_WRONG_DATE,
     TARGET_SESSION_AMBIGUOUS,
@@ -1069,6 +1070,8 @@ async def scan_open_zalo_chat(
     verified_report_state = SUBMITTED_VERIFIED
     warnings: list[str] = []
     has_ambiguous_target_candidate = False
+    base_date_context = dict(date_context)
+    provisional_state: dict[str, Any] | None = None
 
     for message in reversed(messages):
         await ensure_not_cancelled()
@@ -1226,8 +1229,16 @@ async def scan_open_zalo_chat(
                 if target_match.decision == TARGET_SESSION_AMBIGUOUS:
                     has_ambiguous_target_candidate = True
                 continue
+            if provisional_state is not None and target_match.decision != TARGET_EXACT:
+                continue
             delay = (ui_sent_at.date() - target.class_date.date()).days
             date_reference = "bcnb_target_date"
+
+        if provisional_state is not None:
+            date_context.clear()
+            date_context.update(base_date_context)
+            warnings.clear()
+            verified_report_state = SUBMITTED_VERIFIED
 
         if delay is not None:
             if delay < 0:
@@ -1337,7 +1348,40 @@ async def scan_open_zalo_chat(
                 "matched_ui_sent_at": ui_sent_at.date().isoformat(),
             }
         )
+        if target is not None and target_match is not None and target_match.decision != TARGET_EXACT:
+            provisional_state = {
+                "report_found": report_found,
+                "submitted_for_bcnb": submitted_for_bcnb,
+                "report_detail": report_detail,
+                "matched_message": matched_message,
+                "verified_report_state": verified_report_state,
+                "warnings": list(warnings),
+                "date_context": dict(date_context),
+                "has_ambiguous_target_candidate": has_ambiguous_target_candidate,
+                "ai_candidate_pool": list(ai_candidate_pool),
+                "classifier_result": {
+                    **classifier_result,
+                    "candidates": [dict(c) for c in classifier_result["candidates"]],
+                },
+            }
+            continue
+        if provisional_state is not None:
+            provisional_state = None
         break
+
+    if provisional_state is not None:
+        report_found = provisional_state["report_found"]
+        submitted_for_bcnb = provisional_state["submitted_for_bcnb"]
+        report_detail = provisional_state["report_detail"]
+        matched_message = provisional_state["matched_message"]
+        verified_report_state = provisional_state["verified_report_state"]
+        warnings = list(provisional_state["warnings"])
+        date_context.clear()
+        date_context.update(provisional_state["date_context"])
+        has_ambiguous_target_candidate = provisional_state["has_ambiguous_target_candidate"]
+        ai_candidate_pool = list(provisional_state["ai_candidate_pool"])
+        classifier_result.clear()
+        classifier_result.update(provisional_state["classifier_result"])
 
     if (
         not report_found
