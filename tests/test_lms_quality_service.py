@@ -1472,6 +1472,574 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(summary_outage["lms_fetch_unavailable"])
         note_post_mock.assert_not_awaited()
 
+    async def test_expired_jwt_rejection_sso_login_and_auth_recovery_retry(
+        self,
+    ) -> None:
+        import base64
+        import contextlib
+        import json
+        import subprocess
+        import time
+        from types import SimpleNamespace
+        from googleform_autosubmit.config import Config
+        from services.lms_quality_service import _is_usable_lms_token
+
+        def _make_jwt(exp_epoch: int) -> str:
+            hdr = (
+                base64.urlsafe_b64encode(
+                    json.dumps({"alg": "RS256", "typ": "JWT"}).encode("utf-8")
+                )
+                .decode("ascii")
+                .rstrip("=")
+            )
+            body = (
+                base64.urlsafe_b64encode(
+                    json.dumps({"sub": "u1", "exp": exp_epoch}).encode("utf-8")
+                )
+                .decode("ascii")
+                .rstrip("=")
+            )
+            return f"{hdr}.{body}.synthetic_signature_part_123456"
+
+        now_sec = int(time.time())
+        expired_jwt = _make_jwt(now_sec - 600)
+        valid_jwt = _make_jwt(now_sec + 3600)
+
+        self.assertFalse(_is_usable_lms_token(expired_jwt, now_epoch=now_sec))
+        self.assertTrue(_is_usable_lms_token(valid_jwt, now_epoch=now_sec))
+        self.assertFalse(
+            _is_usable_lms_token(
+                valid_jwt,
+                expiration_time=(now_sec - 10) * 1000,
+                now_epoch=now_sec,
+            )
+        )
+
+        # 1. Expired JWT in storage_state is ignored; page navigates to LMS_URL -> redirects to id.mindx.edu.vn/login ->
+        #    _login_lms_if_needed logs in and lands back on lms.mindx.edu.vn -> fresh token captured via request listener.
+        class _SsoLoginPage:
+            def __init__(self) -> None:
+                self.url = "about:blank"
+                self.listeners: dict[str, object] = {}
+                self.goto_calls: list[str] = []
+                self.eval_calls: list[dict] = []
+                self.context = SimpleNamespace(
+                    storage_state=AsyncMock(
+                        return_value={
+                            "origins": [
+                                {
+                                    "origin": "https://lms.mindx.edu.vn",
+                                    "localStorage": [
+                                        {"name": "id_token", "value": expired_jwt}
+                                    ],
+                                }
+                            ]
+                        }
+                    )
+                )
+
+            def on(self, event: str, cb: object) -> None:
+                self.listeners[event] = cb
+
+            def remove_listener(self, event: str, cb: object) -> None:
+                self.listeners.pop(event, None)
+
+            async def goto(self, target_url: str) -> None:
+                self.goto_calls.append(target_url)
+                if len(self.goto_calls) == 1:
+                    self.url = "https://id.mindx.edu.vn/login"
+                    req_cb = self.listeners.get("request")
+                    if callable(req_cb):
+                        # Stale request with expired token must be ignored
+                        req_cb(
+                            SimpleNamespace(
+                                url="https://lms-api.mindx.edu.vn/",
+                                method="POST",
+                                headers={"authorization": f"Bearer {expired_jwt}"},
+                                post_data="{}",
+                            )
+                        )
+                else:
+                    self.url = target_url
+
+            async def wait_for_load_state(self, state: str) -> None:
+                return None
+
+            async def evaluate(self, script: str, arg: dict) -> dict:
+                if isinstance(arg, dict) and "classCodes" in arg:
+                    self.eval_calls.append(dict(arg))
+                    if arg.get("preResolvedToken") == f"Bearer {valid_jwt}":
+                        return {
+                            c: [
+                                {
+                                    "_id": "s1",
+                                    "index": 0,
+                                    "date": "2026-10-31T07:00:00.000Z",
+                                    "summary": "Buổi 1: Lập trình điều khiển cảm biến khoảng cách",
+                                    "studentAttendance": [],
+                                }
+                            ]
+                            for c in arg["classCodes"]
+                        }
+                    return {
+                        "__auth_error__": True,
+                        "__failure_reason__": "missing_or_expired_token",
+                        **{c: [{"fetch_error": True}] for c in arg["classCodes"]},
+                    }
+                return {}
+
+        sso_page = _SsoLoginPage()
+
+        async def _fake_sso_login(p: _SsoLoginPage) -> None:
+            p.url = "https://lms.mindx.edu.vn/admin/class-sessions"
+            req_cb = p.listeners.get("request")
+            if callable(req_cb):
+                req_cb(
+                    SimpleNamespace(
+                        url="https://lms-api.mindx.edu.vn/",
+                        method="POST",
+                        headers={"authorization": f"Bearer {valid_jwt}"},
+                        post_data='{"variables":{"centres":["62d170076063450019b720be"]}}',
+                    )
+                )
+
+        with (
+            patch.dict(os.environ, {"ZALO_QUALITY_ISOLATED": "0"}),
+            patch.object(
+                Config, "LMS_URL", "https://lms.mindx.edu.vn/admin/class-sessions"
+            ),
+            patch(
+                "services.lms_service._login_lms_if_needed",
+                side_effect=_fake_sso_login,
+            ) as sso_login_mock,
+        ):
+            fetched_sso = await fetch_lms_class_slots_via_page(
+                sso_page, class_names=["VT-ROB-ARMB20"]
+            )
+            self.assertEqual(sso_login_mock.await_count, 1)
+            self.assertEqual(len(sso_page.eval_calls), 1)
+            self.assertEqual(
+                sso_page.eval_calls[0]["preResolvedToken"],
+                f"Bearer {valid_jwt}",
+            )
+            self.assertFalse(
+                fetched_sso["VT-ROB-ARMB20"][0].get("fetch_error", False)
+            )
+
+        # 2. JS findToken() ignores expired JWT in localStorage and picks valid JWT;
+        #    and when 401/UNAUTHENTICATED occurs, JS short-circuits with __auth_error__=True.
+        runner_auth_js = r"""
+        const fs = require('fs');
+        const { script, args, expiredTok, validTok, mode } = JSON.parse(fs.readFileSync(0, 'utf8'));
+        global.window = { location: { hostname: 'lms.mindx.edu.vn' } };
+        const items = mode === 'fallback_valid'
+            ? [['id_token', expiredTok], ['access_token', validTok]]
+            : [['id_token', validTok]];
+        global.localStorage = {
+            length: items.length,
+            key: (i) => items[i][0],
+            getItem: (k) => (items.find((x) => x[0] === k) || [null, ''])[1]
+        };
+        let fetchCount = 0;
+        global.fetch = async (_url, req) => {
+            fetchCount += 1;
+            const authHdr = req.headers.authorization || '';
+            if (mode === 'graphql_401' || authHdr.includes(expiredTok)) {
+                return {
+                    ok: true,
+                    status: 200,
+                    json: async () => ({
+                        errors: [{ message: 'Unauthenticated', extensions: { code: 'UNAUTHENTICATED' } }]
+                    })
+                };
+            }
+            const code = JSON.parse(req.body).variables.search;
+            return {
+                ok: true,
+                status: 200,
+                json: async () => ({
+                    data: {
+                        classesMissAttendOrComment: {
+                            data: [{
+                                name: code,
+                                slots: [{
+                                    _id: 's1',
+                                    index: 0,
+                                    date: '2026-10-31T07:00:00.000Z',
+                                    summary: 'Buổi 1: Lập trình Scratch cơ bản',
+                                    studentAttendance: []
+                                }]
+                            }]
+                        }
+                    }
+                })
+            };
+        };
+        (async () => {
+            const res = await eval('(' + script + ')')(args);
+            res.__fetch_count__ = fetchCount;
+            process.stdout.write(JSON.stringify(res));
+        })();
+        """
+
+        class _NodeAuthEvalPage:
+            def __init__(self, mode: str) -> None:
+                self.mode = mode
+                self.last_raw: dict = {}
+
+            async def evaluate(self, script: str, args: dict) -> dict:
+                payload_json = json.dumps(
+                    {
+                        "script": script,
+                        "args": args,
+                        "expiredTok": expired_jwt,
+                        "validTok": valid_jwt,
+                        "mode": self.mode,
+                    }
+                )
+                inline_js = (
+                    f"const {{ script, args, expiredTok, validTok, mode }} = {payload_json};\n"
+                    + runner_auth_js.replace(
+                        "const fs = require('fs');\n        const { script, args, expiredTok, validTok, mode } = JSON.parse(fs.readFileSync(0, 'utf8'));",
+                        "",
+                    )
+                )
+                proc = subprocess.run(
+                    ["node", "-e", inline_js],
+                    text=True,
+                    capture_output=True,
+                    check=True,
+                )
+                self.last_raw = json.loads(proc.stdout)
+                return self.last_raw
+
+        with patch.dict(os.environ, {"ZALO_QUALITY_ISOLATED": "0"}):
+            page_valid_fallback = _NodeAuthEvalPage("fallback_valid")
+            res_fb = await fetch_lms_class_slots_via_page(
+                page_valid_fallback, class_names=["VT-C4K-SA28"]
+            )
+            self.assertFalse(res_fb["VT-C4K-SA28"][0].get("fetch_error", False))
+
+            page_401 = _NodeAuthEvalPage("graphql_401")
+            res_401 = await fetch_lms_class_slots_via_page(
+                page_401,
+                class_names=["VT-C4K-SA28", "VT-C4K-GB43", "VT-ROB-ARMB20"],
+            )
+            self.assertTrue(page_401.last_raw.get("__auth_error__"))
+            # Short-circuits on first UNAUTHENTICATED without retrying every class twice
+            self.assertLessEqual(page_401.last_raw.get("__fetch_count__", 99), 3)
+            self.assertTrue(res_401["VT-C4K-SA28"][0].get("fetch_error"))
+
+        # 3. Clearing lms_fetch_unavailable when subsequent evaluation succeeds
+        rec_row = {
+            "evidence_state": "SUBMITTED_VERIFIED",
+            "scan_target": {
+                "class_code": "VT-C4K-SA28",
+                "lesson": "1",
+                "class_date": "31/10/2026",
+                "class_date_iso": "2026-10-31",
+            },
+        }
+        inspect_and_attach_quality_issues(
+            [rec_row],
+            lms_slots_by_class={"VT-C4K-SA28": [{"fetch_error": True}]},
+        )
+        self.assertTrue(rec_row.get("lms_fetch_unavailable"))
+        self.assertTrue(rec_row["scan_target"].get("lms_fetch_unavailable"))
+
+        inspect_and_attach_quality_issues(
+            [rec_row],
+            lms_slots_by_class={
+                "VT-C4K-SA28": [
+                    {
+                        "_id": "s1",
+                        "index": 0,
+                        "date": "2026-10-31T07:00:00.000Z",
+                        "summary": "Buổi 1: Tìm hiểu giao diện lập trình Scratch và hệ trục tọa độ",
+                        "studentAttendance": [
+                            {
+                                "status": "ATTENDED",
+                                "comment": (
+                                    "Điểm mạnh: Con hiểu bài rất nhanh và thao tác tốt.\n"
+                                    "Điểm cần cải thiện: Cần chú ý đặt tên biến rõ ràng hơn.\n"
+                                    "Lời khuyên: Về nhà con ôn lại bài và hoàn thành bài tập trên LMS nhé."
+                                ),
+                            }
+                        ],
+                    }
+                ]
+            },
+        )
+        self.assertIsNone(rec_row.get("lms_fetch_unavailable"))
+        self.assertIsNone(rec_row["scan_target"].get("lms_fetch_unavailable"))
+        self.assertEqual(rec_row.get("lms_quality_issues"), [])
+
+        # 4. Post-login HTTP downgrade (http://lms.mindx.edu.vn) must be rejected without evaluating js_script
+        http_downgrade_page = _SsoLoginPage()
+
+        async def _fake_http_downgrade_login(p: _SsoLoginPage) -> None:
+            p.url = "http://lms.mindx.edu.vn/admin/class-sessions"
+
+        with (
+            patch.dict(os.environ, {"ZALO_QUALITY_ISOLATED": "0"}),
+            patch.object(
+                Config, "LMS_URL", "https://lms.mindx.edu.vn/admin/class-sessions"
+            ),
+            patch(
+                "services.lms_service._login_lms_if_needed",
+                side_effect=_fake_http_downgrade_login,
+            ),
+        ):
+            res_http = await fetch_lms_class_slots_via_page(
+                http_downgrade_page, class_names=["VT-ROB-ARMB20"]
+            )
+            self.assertEqual(len(http_downgrade_page.eval_calls), 0)
+            self.assertTrue(res_http["VT-ROB-ARMB20"][0].get("fetch_error"))
+
+        # 5. Auth recovery from about:blank when pre_resolved_token is not expired locally but rejected by server:
+        #    must navigate to https://lms.mindx.edu.vn first, clear stale storage there, reload, login, and retry.
+        class _BlankRecoveryPage(_SsoLoginPage):
+            def __init__(self) -> None:
+                super().__init__()
+                self.clear_storage_origins: list[str] = []
+                self.context = SimpleNamespace(
+                    storage_state=AsyncMock(
+                        return_value={
+                            "origins": [
+                                {
+                                    "origin": "https://lms.mindx.edu.vn",
+                                    "localStorage": [
+                                        {
+                                            "name": "id_token",
+                                            "value": _make_jwt(now_sec + 1800),
+                                        }
+                                    ],
+                                }
+                            ]
+                        }
+                    )
+                )
+
+            async def goto(self, target_url: str) -> None:
+                self.goto_calls.append(target_url)
+                self.url = target_url
+
+            async def evaluate(self, script: str, arg: dict) -> dict:
+                if isinstance(arg, dict) and "allowedTokenKeys" in arg and "classCodes" not in arg:
+                    self.clear_storage_origins.append(self.url)
+                    return {}
+                if isinstance(arg, dict) and "classCodes" in arg:
+                    self.eval_calls.append(dict(arg))
+                    if len(self.eval_calls) == 1:
+                        return {
+                            "__auth_error__": True,
+                            "__failure_reason__": "graphql_auth_rejected",
+                            **{c: [{"fetch_error": True}] for c in arg["classCodes"]},
+                        }
+                    return {
+                        c: [
+                            {
+                                "_id": "s1",
+                                "index": 0,
+                                "date": "2026-10-31T07:00:00.000Z",
+                                "summary": "Buổi 1: Khôi phục phiên LMS thành công",
+                                "studentAttendance": [],
+                            }
+                        ]
+                        for c in arg["classCodes"]
+                    }
+                return {}
+
+        blank_rec_page = _BlankRecoveryPage()
+        with (
+            patch.dict(os.environ, {"ZALO_QUALITY_ISOLATED": "0"}),
+            patch.object(
+                Config, "LMS_URL", "https://lms.mindx.edu.vn/admin/class-sessions"
+            ),
+            patch(
+                "services.lms_service._login_lms_if_needed",
+                side_effect=_fake_sso_login,
+            ) as rec_login_mock,
+        ):
+            res_rec = await fetch_lms_class_slots_via_page(
+                blank_rec_page, class_names=["VT-ROB-ARMB20"]
+            )
+            self.assertEqual(
+                blank_rec_page.clear_storage_origins,
+                ["https://lms.mindx.edu.vn/admin/class-sessions"],
+            )
+            self.assertEqual(rec_login_mock.await_count, 1)
+            self.assertEqual(len(blank_rec_page.eval_calls), 2)
+            self.assertFalse(res_rec["VT-ROB-ARMB20"][0].get("fetch_error", False))
+
+        # 6. Concurrent write_workers wait on lms_prefetch_retry_lock until the single retry finishes,
+        #    and both workers receive the refreshed LMS slots before update_bcnb_reports runs.
+        import asyncio
+        from datetime import datetime
+        from core.time_utils import BUSINESS_TIMEZONE
+        import services.zalo_parallel_service as par
+        from tests.test_zalo_parallel_service import (
+            FakeParallelBrowser,
+            InMemoryBatchRepository,
+            _make_search_target,
+            _verified_scan_result,
+        )
+
+        t_w34 = _make_search_target(1)
+        t_w34["week"] = 34
+        t_w34["year"] = 2026
+        t_w34["lesson"] = "1"
+        t_w35 = _make_search_target(2)
+        t_w35["week"] = 35
+        t_w35["year"] = 2026
+        t_w35["lesson"] = "1"
+
+        fetch_calls = 0
+        observed_worker_slots: list[dict] = []
+
+        async def _fake_pw_fetch(_page: object, codes: list[str]) -> dict:
+            nonlocal fetch_calls
+            fetch_calls += 1
+            if fetch_calls == 1:
+                return {c: [{"fetch_error": True}] for c in codes}
+            await asyncio.sleep(0.02)
+            return {
+                c: [
+                    {
+                        "_id": "s1",
+                        "index": 0,
+                        "date": "2026-08-20T17:00:00.000Z",
+                        "summary": "Buổi 1: Nội dung bài học sau khi retry thành công",
+                        "studentAttendance": [
+                            {
+                                "status": "ATTENDED",
+                                "comment": (
+                                    "Điểm mạnh: Con nắm bài tốt.\n"
+                                    "Điểm cần cải thiện: Chú ý cú pháp.\n"
+                                    "Lời khuyên: Ôn lại bài ở nhà."
+                                ),
+                            }
+                        ],
+                    }
+                ]
+                for c in codes
+            }
+
+        async def _fake_update_bcnb(
+            _page: object,
+            *,
+            scan_results: list[dict],
+            period_filter: set | None = None,
+            lms_slots_by_class: dict | None = None,
+            **_kwargs: object,
+        ) -> dict:
+            observed_worker_slots.append(dict(lms_slots_by_class or {}))
+            outcomes = []
+            for r in scan_results:
+                st = r.get("scan_target") or {}
+                pair = (int(st.get("week") or 0), int(st.get("year") or 0))
+                if period_filter is None or pair in period_filter:
+                    outcomes.append(
+                        {
+                            "class_code": st.get("class_code"),
+                            "lesson": st.get("lesson"),
+                            "week": pair[0],
+                            "year": pair[1],
+                            "class_date_iso": st.get("class_date_iso"),
+                            "status": "DRY_RUN",
+                        }
+                    )
+            return {
+                "selected_weeks": [],
+                "updated_count": len(outcomes),
+                "target_outcomes": outcomes,
+                "lms_fetch_unavailable": False,
+            }
+
+        base_browser = FakeParallelBrowser([{}, {}, {}, {}])
+
+        class _LiveBrowserAdapter:
+            @contextlib.asynccontextmanager
+            async def persistent_session(self):
+                async with base_browser.persistent_session() as sess:
+                    LiveSessCls = type(
+                        "_LiveSessionProxy",
+                        (type(sess),),
+                        {"__module__": "services.external_gateways"},
+                    )
+                    sess.__class__ = LiveSessCls
+                    yield sess
+
+        pw_gw = PlaywrightLmsQualityGateway(timeout_ms=5000)
+        par_repo = InMemoryBatchRepository()
+        par_runtime = SimpleNamespace(
+            external=SimpleNamespace(
+                browser=_LiveBrowserAdapter(),
+                lms_quality=pw_gw,
+            ),
+            zalo_scan_concurrency=1,
+            bcnb_write_concurrency=2,
+            batch_systemic_failure_limit=3,
+            batch_abnormal_percent_limit=20,
+        )
+        with (
+            patch.dict(os.environ, {"ZALO_QUALITY_ISOLATED": "0"}),
+            patch.object(
+                par.Config,
+                "LMS_URL",
+                "https://lms.mindx.edu.vn/admin/class-sessions",
+            ),
+            patch.object(pw_gw, "fetch_class_slots", side_effect=_fake_pw_fetch),
+            patch.object(par, "ZaloBatchRepository", return_value=par_repo),
+            patch.object(
+                par,
+                "ensure_zalo_history_synced",
+                AsyncMock(return_value={"verified": True, "reason": "fixture"}),
+            ),
+            patch.object(par, "_login_bcnb_if_needed", AsyncMock()),
+            patch.object(
+                par,
+                "_scan_one_target",
+                AsyncMock(
+                    side_effect=lambda _p, **kw: _verified_scan_result(
+                        kw["target"]
+                    )
+                ),
+            ),
+            patch.object(par, "update_bcnb_reports", new=_fake_update_bcnb),
+            patch.object(par, "log_message"),
+        ):
+            par_res = await par.run_parallel_zalo_batch(
+                job_id=2002,
+                execution_mode="dry-run",
+                scan_plan={
+                    "selected_weeks": [
+                        {"week": 34, "year": 2026},
+                        {"week": 35, "year": 2026},
+                    ],
+                    "latest_week": {"week": 35, "year": 2026},
+                    "targets": [t_w34, t_w35],
+                },
+                today=datetime(2026, 8, 25, tzinfo=BUSINESS_TIMEZONE),
+                scan_started_at=datetime(2026, 8, 25, tzinfo=BUSINESS_TIMEZONE),
+                evidence_root="unused-evidence-root",
+                screenshots_dir="unused-screenshots-dir",
+                runtime=par_runtime,
+                job_repo=SimpleNamespace(
+                    ensure_not_cancelled=AsyncMock(), update_job=AsyncMock()
+                ),
+                audit_repo=object(),
+                evidence_repo=SimpleNamespace(register_scan_results=AsyncMock()),
+            )
+        # 1 initial prefetch + 1 shared retry across both concurrent write_workers = 2 calls total
+        self.assertEqual(fetch_calls, 2)
+        self.assertEqual(len(observed_worker_slots), 2)
+        for worker_map in observed_worker_slots:
+            self.assertEqual(set(worker_map.keys()), {"VT-SYN01", "VT-SYN02"})
+            for c_slots in worker_map.values():
+                self.assertFalse(c_slots[0].get("fetch_error", False))
+        self.assertFalse(par_res["lms_fetch_unavailable"])
+
 
 if __name__ == "__main__":
     unittest.main()

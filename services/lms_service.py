@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import json
 import secrets
 import traceback
@@ -167,20 +168,36 @@ async def _login_lms_if_needed(page) -> None:
     if await submit_btn.count() == 0:
         raise LmsSafetyError("Không tìm thấy nút đăng nhập trên trang LMS.")
     await submit_btn.click()
-    await page.wait_for_load_state("networkidle")
+    with contextlib.suppress(Exception):
+        await page.wait_for_load_state("networkidle")
 
     current_url = str(getattr(page, "url", "") or "")
-    if "login" in current_url:
+    if "login" in current_url.lower() or "id.mindx.edu.vn" in current_url.lower():
         for _ in range(50):
             await asyncio.sleep(0.5)
             current_url = str(getattr(page, "url", "") or "")
-            if "login" not in current_url:
+            if (
+                "login" not in current_url.lower()
+                and "id.mindx.edu.vn" not in current_url.lower()
+            ):
                 break
+    else:
+        for _ in range(20):
+            pw_still_visible = False
+            with contextlib.suppress(Exception):
+                pw_still_visible = (
+                    await password_input.count() > 0
+                    and await password_input.is_visible()
+                )
+            if not pw_still_visible:
+                break
+            await asyncio.sleep(0.5)
 
     current_url = str(getattr(page, "url", "") or "")
     if current_url and "class-sessions" not in current_url:
         await page.goto(Config.LMS_URL)
-        await page.wait_for_load_state("networkidle")
+        with contextlib.suppress(Exception):
+            await page.wait_for_load_state("networkidle")
 
     await _wait_for_lms_login_or_table(page)
 

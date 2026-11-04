@@ -2588,6 +2588,7 @@ async def run_parallel_zalo_batch(
 
         scan_results = list(scan_results_by_key.values())
         prefetched_lms_slots: dict[str, list[dict[str, Any]]] | None = None
+        pre_codes: list[str] = []
         pre_gw = getattr(runtime.external, "lms_quality", None)
         if (
             not policy.halted.is_set()
@@ -2751,6 +2752,49 @@ async def run_parallel_zalo_batch(
         ]
         summaries: list[dict[str, Any]] = []
         notes_only_sync_failures = 0
+        lms_prefetch_retry_lock = asyncio.Lock()
+        lms_prefetch_retried = False
+
+        async def _retry_lms_prefetch_if_unavailable(worker_page: Any) -> None:
+            nonlocal prefetched_lms_slots, lms_prefetch_retried
+            if (
+                not pre_codes
+                or pre_gw is None
+                or type(pre_gw).__name__ != "PlaywrightLmsQualityGateway"
+                or os.getenv("ZALO_QUALITY_ISOLATED") == "1"
+                or str(getattr(type(session), "__module__", "") or "").startswith(
+                    "tests."
+                )
+            ):
+                return
+            async with lms_prefetch_retry_lock:
+                if lms_prefetch_retried or (
+                    prefetched_lms_slots is not None
+                    and not is_lms_fetch_unavailable(prefetched_lms_slots)
+                ):
+                    return
+                lms_prefetch_retried = True
+                try:
+                    retried_slots = await pre_gw.fetch_class_slots(
+                        worker_page, pre_codes
+                    )
+                    if isinstance(retried_slots, dict) and retried_slots:
+                        prefetched_lms_slots = retried_slots
+                        inspect_and_attach_quality_issues(
+                            scan_results,
+                            lms_slots_by_class=prefetched_lms_slots,
+                        )
+                        if hasattr(repository, "update_target_result"):
+                            for r_key, r_val in scan_results_by_key.items():
+                                if r_key in scan_result_ids and isinstance(r_val, dict):
+                                    await repository.update_target_result(
+                                        scan_result_ids[r_key],
+                                        result=r_val,
+                                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    pass
 
         async def write_worker(index: int, assigned: list[tuple[int, int]]) -> None:
             if not assigned:
@@ -2831,6 +2875,8 @@ async def run_parallel_zalo_batch(
 
                 if reconciliation_only:
                     return
+
+                await _retry_lms_prefetch_if_unavailable(page)
 
                 claimed: list[dict[str, Any]] = []
                 while not policy.halted.is_set():
