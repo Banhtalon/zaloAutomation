@@ -2,6 +2,7 @@
 
 import asyncio
 from collections.abc import Callable, Sequence
+import contextlib
 import inspect
 import json
 import re
@@ -158,7 +159,48 @@ async def execute_verified_checkbox_action(
             )
             raise BcnbBeforeWriteError("Batch đã halt trước checkbox click.")
         write_started = True
-        await checkbox.check(force=True)
+        try:
+            await checkbox.check(force=True)
+        except Exception as check_error:
+            if "did not change its state" not in str(check_error).lower():
+                raise
+            await asyncio.sleep(0.25)
+            await dismiss_current_week_notice(page)
+            await job_repo.ensure_not_cancelled(job_id)
+            if should_halt is not None and should_halt():
+                raise
+            if callable(getattr(checkbox, "evaluate", None)):
+                with contextlib.suppress(Exception):
+                    await checkbox.evaluate(
+                        "el => { if (el && typeof el.scrollIntoView === 'function') "
+                        "el.scrollIntoView({block: 'center', inline: 'center'}); }"
+                    )
+            await job_repo.ensure_not_cancelled(job_id)
+            if should_halt is not None and should_halt():
+                raise
+            try:
+                await checkbox.check(force=True)
+            except Exception as retry_check_error:
+                if (
+                    "did not change its state"
+                    not in str(retry_check_error).lower()
+                    or not callable(getattr(checkbox, "evaluate", None))
+                ):
+                    raise
+                await job_repo.ensure_not_cancelled(job_id)
+                if should_halt is not None and should_halt():
+                    raise
+                raw_dom_clicked = None
+                with contextlib.suppress(Exception):
+                    raw_dom_clicked = await checkbox.evaluate(
+                        _CLICK_CHECKBOX_FALLBACK_JS,
+                        {
+                            "classCode": str(class_code or "").strip(),
+                            "lesson": str(lesson or "").strip() if lesson is not None else "",
+                        },
+                    )
+                if raw_dom_clicked is not True:
+                    raise
         await asyncio.sleep(settle_seconds)
         try:
             after_checked = await verify_checkbox_persisted(
@@ -226,6 +268,90 @@ async def execute_verified_checkbox_action(
             level="ERROR",
         )
         raise
+
+
+_CLICK_CHECKBOX_FALLBACK_JS = (
+    """
+(el, args) => {
+  const CLASS_HEADER_SUBSTRINGS = """
+    + json.dumps(list(BCNB_CLASS_HEADER_SUBSTRINGS))
+    + """;
+  const CLASS_HEADER_EXACT = """
+    + json.dumps(list(BCNB_CLASS_HEADER_EXACT))
+    + """;
+  const LESSON_HEADER_SUBSTRINGS = """
+    + json.dumps(list(BCNB_LESSON_HEADER_SUBSTRINGS))
+    + """;
+  const normCode = (val) =>
+    String(val || '')
+      .trim()
+      .toUpperCase()
+      .replace(/[\\u2013\\u2014]/g, '-')
+      .replace(/\\s+/g, '');
+  const foldHeader = (val) =>
+    String(val || '')
+      .normalize('NFD')
+      .replace(/[\\u0300-\\u036f]/g, '')
+      .replace(/[\\u0111\\u0110]/g, 'd')
+      .toLowerCase()
+      .trim();
+  if (!el || el.disabled) return false;
+  const expectedCode = normCode(args && args.classCode);
+  const expectedLesson = String((args && args.lesson) || '').trim();
+  if (!expectedCode) return false;
+  const row = typeof el.closest === 'function' ? el.closest('tr') : null;
+  if (!row || typeof row.querySelectorAll !== 'function') return false;
+  const rowCells = Array.from(row.querySelectorAll('td'));
+  if (rowCells.length === 0) return false;
+  const table = typeof row.closest === 'function' ? row.closest('table') : null;
+  const allTrs =
+    table && typeof table.querySelectorAll === 'function'
+      ? Array.from(table.querySelectorAll('tr'))
+      : typeof document !== 'undefined' && typeof document.querySelectorAll === 'function'
+        ? Array.from(document.querySelectorAll('table tr'))
+        : [];
+  const headerCells =
+    allTrs.length > 0 && typeof allTrs[0].querySelectorAll === 'function'
+      ? Array.from(allTrs[0].querySelectorAll('th, td'))
+      : [];
+  const classIndexes = headerCells
+    .map((c, idx) => ({ idx, text: foldHeader(c.innerText || c.textContent) }))
+    .filter(
+      (x) =>
+        CLASS_HEADER_SUBSTRINGS.some((sub) => x.text.includes(sub)) ||
+        CLASS_HEADER_EXACT.includes(x.text)
+    )
+    .map((x) => x.idx);
+  if (classIndexes.length !== 1 || classIndexes[0] >= rowCells.length) {
+    return false;
+  }
+  const observedCode = normCode(
+    rowCells[classIndexes[0]].innerText || rowCells[classIndexes[0]].textContent
+  );
+  if (observedCode !== expectedCode) {
+    return false;
+  }
+  if (expectedLesson) {
+    const lessonIndexes = headerCells
+      .map((c, idx) => ({ idx, text: foldHeader(c.innerText || c.textContent) }))
+      .filter((x) => LESSON_HEADER_SUBSTRINGS.some((sub) => x.text.includes(sub)))
+      .map((x) => x.idx);
+    if (lessonIndexes.length !== 1 || lessonIndexes[0] >= rowCells.length) {
+      return false;
+    }
+    const observedLesson = String(
+      rowCells[lessonIndexes[0]].innerText || rowCells[lessonIndexes[0]].textContent || ''
+    ).trim();
+    if (observedLesson !== expectedLesson) {
+      return false;
+    }
+  }
+  if (!el.checked && typeof el.click === 'function') {
+    el.click();
+  }
+  return Boolean(el.checked);
+}"""
+)
 
 
 _UPDATE_CHECKER_NOTE_JS = (

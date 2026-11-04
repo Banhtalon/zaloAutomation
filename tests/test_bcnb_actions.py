@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from core.time_utils import BUSINESS_TIMEZONE
 from services.bcnb_actions import (
+    _CLICK_CHECKBOX_FALLBACK_JS,
     _UPDATE_CHECKER_NOTE_JS,
     BcnbBeforeWriteError,
     BcnbConflictAfterWriteError,
@@ -217,6 +218,262 @@ class BcnbActionTests(unittest.IsolatedAsyncioTestCase):
             audit_repo.complete_action.await_args.kwargs,
             {"outcome": "VERIFIED", "after_state": {"checked": True}},
         )
+
+    async def test_check_state_unchanged_retries_and_falls_back_to_dom_click_with_readback(self):
+        # Case A: First check(force=True) fails with "did not change its state", second check(force=True) succeeds
+        page, checkbox, audit_repo, job_repo = self.make_dependencies()
+        checkbox.check = AsyncMock(
+            side_effect=[
+                RuntimeError("Locator.check: Clicking the checkbox did not change its state"),
+                None,
+            ]
+        )
+        checkbox.evaluate = AsyncMock(return_value=None)
+        with (
+            patch("services.bcnb_actions.verify_checkbox_persisted", AsyncMock(return_value=True)),
+            patch("services.bcnb_actions.asyncio.sleep", AsyncMock()),
+        ):
+            result_a = await execute_verified_checkbox_action(
+                page=page,
+                checkbox=checkbox,
+                audit_repo=audit_repo,
+                job_repo=job_repo,
+                job_id=440,
+                action_key="retry-check-ok",
+                action_type="BCNB_REPORT_TICK",
+                class_code="VT-ROB-PREI14",
+                column_kind="report",
+                week=44,
+                year=2026,
+                lesson="4",
+                execution_mode="production",
+                reason={"test": True},
+            )
+        self.assertEqual(result_a, "VERIFIED")
+        self.assertEqual(checkbox.check.await_count, 2)
+
+        # Case B: Both check(force=True) attempts fail with "did not change its state";
+        # row-verified DOM click evaluate returns True and server readback confirms persistence
+        page_b, checkbox_b, audit_repo_b, job_repo_b = self.make_dependencies()
+        checkbox_b.check = AsyncMock(
+            side_effect=[
+                RuntimeError("Locator.check: Clicking the checkbox did not change its state"),
+                RuntimeError("Locator.check: Clicking the checkbox did not change its state"),
+            ]
+        )
+        checkbox_b.evaluate = AsyncMock(side_effect=[None, True])
+        with (
+            patch("services.bcnb_actions.verify_checkbox_persisted", AsyncMock(return_value=True)),
+            patch("services.bcnb_actions.asyncio.sleep", AsyncMock()),
+        ):
+            result_b = await execute_verified_checkbox_action(
+                page=page_b,
+                checkbox=checkbox_b,
+                audit_repo=audit_repo_b,
+                job_repo=job_repo_b,
+                job_id=440,
+                action_key="dom-fallback-ok",
+                action_type="BCNB_REPORT_TICK",
+                class_code="VT-ROB-PREI14",
+                column_kind="report",
+                week=44,
+                year=2026,
+                lesson="4",
+                execution_mode="production",
+                reason={"test": True},
+            )
+        self.assertEqual(result_b, "VERIFIED")
+        self.assertEqual(checkbox_b.check.await_count, 2)
+        self.assertEqual(checkbox_b.evaluate.await_count, 2)
+
+        # Case C: Both check(force=True) attempts fail and DOM fallback returns False -> fails closed
+        page_c, checkbox_c, audit_repo_c, job_repo_c = self.make_dependencies()
+        checkbox_c.check = AsyncMock(
+            side_effect=[
+                RuntimeError("Locator.check: Clicking the checkbox did not change its state"),
+                RuntimeError("Locator.check: Clicking the checkbox did not change its state"),
+            ]
+        )
+        checkbox_c.evaluate = AsyncMock(side_effect=[None, False])
+        with (
+            patch("services.bcnb_actions.verify_checkbox_persisted", AsyncMock(return_value=False)),
+            patch("services.bcnb_actions.asyncio.sleep", AsyncMock()),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "did not change its state"):
+                await execute_verified_checkbox_action(
+                    page=page_c,
+                    checkbox=checkbox_c,
+                    audit_repo=audit_repo_c,
+                    job_repo=job_repo_c,
+                    job_id=440,
+                    action_key="dom-fallback-fail",
+                    action_type="BCNB_REPORT_TICK",
+                    class_code="VT-ROB-PREI14",
+                    column_kind="report",
+                    week=44,
+                    year=2026,
+                    lesson="4",
+                    execution_mode="production",
+                    reason={"test": True},
+                )
+        self.assertEqual(
+            audit_repo_c.complete_action.await_args.kwargs["outcome"], "FAILED"
+        )
+
+        # Case D: Cancellation or should_halt triggered during the second check(force=True)
+        # must abort BEFORE calling the DOM click fallback evaluate
+        page_d1, checkbox_d1, audit_repo_d1, job_repo_d1 = self.make_dependencies()
+        checkbox_d1.check = AsyncMock(
+            side_effect=[
+                RuntimeError("Locator.check: Clicking the checkbox did not change its state"),
+                RuntimeError("Locator.check: Clicking the checkbox did not change its state"),
+            ]
+        )
+        checkbox_d1.evaluate = AsyncMock(side_effect=[None, True])
+        job_repo_d1.ensure_not_cancelled = AsyncMock(
+            side_effect=[None, None, None, None, RuntimeError("Job cancelled before DOM fallback")]
+        )
+        with (
+            patch("services.bcnb_actions.verify_checkbox_persisted", AsyncMock(return_value=False)),
+            patch("services.bcnb_actions.asyncio.sleep", AsyncMock()),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "Job cancelled before DOM fallback"):
+                await execute_verified_checkbox_action(
+                    page=page_d1,
+                    checkbox=checkbox_d1,
+                    audit_repo=audit_repo_d1,
+                    job_repo=job_repo_d1,
+                    job_id=440,
+                    action_key="cancel-before-dom-fallback",
+                    action_type="BCNB_REPORT_TICK",
+                    class_code="VT-ROB-PREI14",
+                    column_kind="report",
+                    week=44,
+                    year=2026,
+                    lesson="4",
+                    execution_mode="production",
+                    reason={"test": True},
+                )
+        # Only scrollIntoView evaluate ran (1 call); DOM click evaluate was never called
+        self.assertEqual(checkbox_d1.evaluate.await_count, 1)
+
+        page_d2, checkbox_d2, audit_repo_d2, job_repo_d2 = self.make_dependencies()
+        halt_checks = 0
+
+        def _halt_on_fallback_check() -> bool:
+            nonlocal halt_checks
+            halt_checks += 1
+            return halt_checks >= 4
+
+        checkbox_d2.check = AsyncMock(
+            side_effect=[
+                RuntimeError("Locator.check: Clicking the checkbox did not change its state"),
+                RuntimeError("Locator.check: Clicking the checkbox did not change its state"),
+            ]
+        )
+        checkbox_d2.evaluate = AsyncMock(side_effect=[None, True])
+        with (
+            patch("services.bcnb_actions.verify_checkbox_persisted", AsyncMock(return_value=False)),
+            patch("services.bcnb_actions.asyncio.sleep", AsyncMock()),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "did not change its state"):
+                await execute_verified_checkbox_action(
+                    page=page_d2,
+                    checkbox=checkbox_d2,
+                    audit_repo=audit_repo_d2,
+                    job_repo=job_repo_d2,
+                    job_id=440,
+                    action_key="halt-before-dom-fallback",
+                    action_type="BCNB_REPORT_TICK",
+                    class_code="VT-ROB-PREI14",
+                    column_kind="report",
+                    week=44,
+                    year=2026,
+                    lesson="4",
+                    execution_mode="production",
+                    reason={"test": True},
+                    should_halt=_halt_on_fallback_check,
+                )
+        self.assertEqual(checkbox_d2.evaluate.await_count, 1)
+
+        # Case E: Execute _CLICK_CHECKBOX_FALLBACK_JS directly in Node.js to verify strict
+        # column-bound matching (preventing STT/ordinal 4 from matching expected lesson 4 when actual lesson is 5)
+        js_harness = f"""
+        const fn = {_CLICK_CHECKBOX_FALLBACK_JS};
+        const makeCell = (text) => ({{ innerText: text, textContent: text }});
+        const makeDom = ({{ headers, rowCells, hasRow = true, disabled = false }}) => {{
+          let clicks = 0;
+          const headerTr = {{
+            querySelectorAll: (sel) => (sel.includes('th') ? headers.map(makeCell) : []),
+          }};
+          const dataTr = {{
+            querySelectorAll: (sel) => (sel === 'td' ? rowCells.map(makeCell) : []),
+          }};
+          const table = {{
+            querySelectorAll: (sel) => (sel === 'tr' ? [headerTr, dataTr] : []),
+          }};
+          dataTr.closest = (sel) => (sel === 'table' ? table : null);
+          const el = {{
+            disabled,
+            checked: false,
+            closest: (sel) => (sel === 'tr' && hasRow ? dataTr : null),
+            click: () => {{
+              clicks += 1;
+              el.checked = true;
+            }},
+          }};
+          return {{ el, getClicks: () => clicks }};
+        }};
+
+        const stdHeaders = ['STT', 'Mã lớp', 'Buổi', 'Ngày học', 'NX Zalo'];
+
+        // 1) Exact match on Mã lớp and Buổi columns -> clicks once and returns true
+        const c1 = makeDom({{ headers: stdHeaders, rowCells: ['13', 'VT-ROB-PREI14', '4', '31/10/2026', ''] }});
+        const r1 = fn(c1.el, {{ classCode: 'VT-ROB-PREI14', lesson: '4' }});
+
+        // 2) STT is '4', Mã lớp matches, but actual Buổi column is '5' -> MUST NOT click
+        const c2 = makeDom({{ headers: stdHeaders, rowCells: ['4', 'VT-ROB-PREI14', '5', '31/10/2026', ''] }});
+        const r2 = fn(c2.el, {{ classCode: 'VT-ROB-PREI14', lesson: '4' }});
+
+        // 3) Class code mismatch -> MUST NOT click
+        const c3 = makeDom({{ headers: stdHeaders, rowCells: ['4', 'VT-OTHER-01', '4', '31/10/2026', ''] }});
+        const r3 = fn(c3.el, {{ classCode: 'VT-ROB-PREI14', lesson: '4' }});
+
+        // 4) Missing containing <tr> -> MUST NOT click
+        const c4 = makeDom({{ headers: stdHeaders, rowCells: ['4', 'VT-ROB-PREI14', '4', '31/10/2026', ''], hasRow: false }});
+        const r4 = fn(c4.el, {{ classCode: 'VT-ROB-PREI14', lesson: '4' }});
+
+        // 5) Missing Buổi header when lesson is specified -> MUST NOT click
+        const c5 = makeDom({{ headers: ['STT', 'Mã lớp', 'Ngày học'], rowCells: ['4', 'VT-ROB-PREI14', '31/10/2026'] }});
+        const r5 = fn(c5.el, {{ classCode: 'VT-ROB-PREI14', lesson: '4' }});
+
+        // 6) Disabled checkbox -> MUST NOT click
+        const c6 = makeDom({{ headers: stdHeaders, rowCells: ['13', 'VT-ROB-PREI14', '4', '31/10/2026', ''], disabled: true }});
+        const r6 = fn(c6.el, {{ classCode: 'VT-ROB-PREI14', lesson: '4' }});
+
+        console.log(JSON.stringify({{
+          r1: {{ ok: r1, clicks: c1.getClicks() }},
+          r2: {{ ok: r2, clicks: c2.getClicks() }},
+          r3: {{ ok: r3, clicks: c3.getClicks() }},
+          r4: {{ ok: r4, clicks: c4.getClicks() }},
+          r5: {{ ok: r5, clicks: c5.getClicks() }},
+          r6: {{ ok: r6, clicks: c6.getClicks() }},
+        }}));
+        """
+        proc = subprocess.run(
+            ["node", "-e", js_harness],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=10,
+        )
+        js_out = json.loads(proc.stdout.strip())
+        self.assertEqual(js_out["r1"], {"ok": True, "clicks": 1})
+        self.assertEqual(js_out["r2"], {"ok": False, "clicks": 0})
+        self.assertEqual(js_out["r3"], {"ok": False, "clicks": 0})
+        self.assertEqual(js_out["r4"], {"ok": False, "clicks": 0})
+        self.assertEqual(js_out["r5"], {"ok": False, "clicks": 0})
+        self.assertEqual(js_out["r6"], {"ok": False, "clicks": 0})
 
     def test_merge_and_split_checker_issue_note_preserve_manual_and_nested_brackets(self):
         self.assertEqual(split_checker_issue_note("+ Ghi chú QC"), ("", []))

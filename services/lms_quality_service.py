@@ -53,7 +53,9 @@ MIN_SUBSTANTIVE_SUMMARY_CHARS = 15
 MIN_REGULAR_COMMENT_CHARS = 110
 LMS_GRAPHQL_ENDPOINT = "https://lms-api.mindx.edu.vn/"
 LMS_ALLOWED_HOSTNAME = "lms.mindx.edu.vn"
-LMS_ALLOWED_LOGIN_HOSTNAMES = frozenset({"lms.mindx.edu.vn", "id.mindx.edu.vn"})
+LMS_ALLOWED_LOGIN_HOSTNAMES = frozenset(
+    {"lms.mindx.edu.vn", "id.mindx.edu.vn", "base.mindx.edu.vn"}
+)
 ALLOWED_LMS_TOKEN_KEYS = frozenset(
     {"id_token", "access_token", "lms_token", "auth_token", "token"}
 )
@@ -1757,12 +1759,13 @@ async def fetch_lms_class_slots_via_page(
                         or str(after_login.hostname or "").lower() != LMS_ALLOWED_HOSTNAME
                     ):
                         return "untrusted_redirect"
-                for _ in range(20):
-                    tok_candidate = captured_auth.get("token")
-                    if _is_usable_lms_token(tok_candidate):
-                        pre_resolved_token = str(tok_candidate)
-                        break
-                    await asyncio.sleep(0.25)
+                if listener_page is not None:
+                    for _ in range(20):
+                        tok_candidate = captured_auth.get("token")
+                        if _is_usable_lms_token(tok_candidate):
+                            pre_resolved_token = str(tok_candidate)
+                            break
+                        await asyncio.sleep(0.25)
                 return "ok"
             except asyncio.CancelledError:
                 raise

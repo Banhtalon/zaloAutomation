@@ -3,6 +3,7 @@ import contextlib
 import json
 import secrets
 import traceback
+from urllib.parse import urlsplit
 
 from googleform_autosubmit.config import Config
 from logger_utils import log_message
@@ -96,12 +97,12 @@ async def _extract_missing_classes(
 
 async def _wait_for_lms_login_or_table(page, max_attempts: int = 40) -> None:
     for _ in range(max_attempts):
-        password_input = page.locator(
-            'input[type="password"], input[name="password"]'
-        ).first
-        if await password_input.count() > 0 and await password_input.is_visible():
-            return
         try:
+            password_input = page.locator(
+                'input[type="password"], input[name="password"]'
+            ).first
+            if await password_input.count() > 0 and await password_input.is_visible():
+                return
             th_loc = page.locator("table th")
             if hasattr(th_loc, "count"):
                 th_count = await th_loc.count()
@@ -139,12 +140,40 @@ async def _wait_for_lms_login_or_table(page, max_attempts: int = 40) -> None:
         await asyncio.sleep(0.5)
 
 
+async def _restore_lms_target_url_if_needed(page) -> bool:
+    raw_url = getattr(page, "url", None)
+    current_url = raw_url.strip() if isinstance(raw_url, str) else ""
+    if not current_url:
+        return False
+    parsed_current = urlsplit(current_url)
+    current_host = str(parsed_current.hostname or "").lower()
+    current_path = str(parsed_current.path or "")
+    current_query = str(parsed_current.query or "")
+    parsed_target = urlsplit(str(Config.LMS_URL or ""))
+    target_path = str(parsed_target.path or "")
+    target_query = str(parsed_target.query or "")
+    needs_restore = (
+        (current_host and current_host != "lms.mindx.edu.vn")
+        or ("class-sessions" in target_path and "class-sessions" not in current_path)
+        or (target_query and not current_query)
+        or ("type=" in target_query and "type=" not in current_query)
+    )
+    if not needs_restore:
+        return False
+    await page.goto(Config.LMS_URL)
+    with contextlib.suppress(Exception):
+        await page.wait_for_load_state("networkidle")
+    return True
+
+
 async def _login_lms_if_needed(page) -> None:
     await _wait_for_lms_login_or_table(page)
     password_input = page.locator(
         'input[type="password"], input[name="password"]'
     ).first
     if await password_input.count() == 0 or not await password_input.is_visible():
+        if await _restore_lms_target_url_if_needed(page):
+            await _wait_for_lms_login_or_table(page)
         return
 
     if not Config.LMS_USERNAME or not Config.LMS_PASSWORD:
@@ -172,14 +201,26 @@ async def _login_lms_if_needed(page) -> None:
         await page.wait_for_load_state("networkidle")
 
     current_url = str(getattr(page, "url", "") or "")
-    if "login" in current_url.lower() or "id.mindx.edu.vn" in current_url.lower():
+    parsed_login_url = urlsplit(current_url)
+    login_host = str(parsed_login_url.hostname or "").lower()
+    login_path = str(parsed_login_url.path or "").lower()
+    if (
+        "login" in login_path
+        or "login" in current_url.lower()
+        or login_host in {"id.mindx.edu.vn", "base.mindx.edu.vn"}
+    ):
         for _ in range(50):
             await asyncio.sleep(0.5)
             current_url = str(getattr(page, "url", "") or "")
+            parsed_login_url = urlsplit(current_url)
+            login_host = str(parsed_login_url.hostname or "").lower()
+            login_path = str(parsed_login_url.path or "").lower()
             if (
-                "login" not in current_url.lower()
-                and "id.mindx.edu.vn" not in current_url.lower()
+                "login" not in login_path
+                and login_host not in {"id.mindx.edu.vn", "base.mindx.edu.vn"}
             ):
+                break
+            if login_host == "base.mindx.edu.vn" and "login" not in login_path:
                 break
     else:
         for _ in range(20):
@@ -193,12 +234,7 @@ async def _login_lms_if_needed(page) -> None:
                 break
             await asyncio.sleep(0.5)
 
-    current_url = str(getattr(page, "url", "") or "")
-    if current_url and "class-sessions" not in current_url:
-        await page.goto(Config.LMS_URL)
-        with contextlib.suppress(Exception):
-            await page.wait_for_load_state("networkidle")
-
+    await _restore_lms_target_url_if_needed(page)
     await _wait_for_lms_login_or_table(page)
 
 

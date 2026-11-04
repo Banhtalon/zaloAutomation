@@ -1626,6 +1626,38 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
                 fetched_sso["VT-ROB-ARMB20"][0].get("fetch_error", False)
             )
 
+        # 1b. Redirect to https://base.mindx.edu.vn/login?callbackUrl=... is also trusted
+        class _BaseSsoLoginPage(_SsoLoginPage):
+            async def goto(self, target_url: str) -> None:
+                self.goto_calls.append(target_url)
+                if len(self.goto_calls) == 1:
+                    self.url = (
+                        "https://base.mindx.edu.vn/login?callbackUrl="
+                        "https://lms.mindx.edu.vn/admin/class-sessions"
+                    )
+                else:
+                    self.url = target_url
+
+        base_sso_page = _BaseSsoLoginPage()
+        with (
+            patch.dict(os.environ, {"ZALO_QUALITY_ISOLATED": "0"}),
+            patch.object(
+                Config, "LMS_URL", "https://lms.mindx.edu.vn/admin/class-sessions"
+            ),
+            patch(
+                "services.lms_service._login_lms_if_needed",
+                side_effect=_fake_sso_login,
+            ) as base_sso_login_mock,
+        ):
+            fetched_base_sso = await fetch_lms_class_slots_via_page(
+                base_sso_page, class_names=["VT-ROB-ARMB20"]
+            )
+            self.assertEqual(base_sso_login_mock.await_count, 1)
+            self.assertEqual(len(base_sso_page.eval_calls), 1)
+            self.assertFalse(
+                fetched_base_sso["VT-ROB-ARMB20"][0].get("fetch_error", False)
+            )
+
         # 2. JS findToken() ignores expired JWT in localStorage and picks valid JWT;
         #    and when 401/UNAUTHENTICATED occurs, JS short-circuits with __auth_error__=True.
         runner_auth_js = r"""

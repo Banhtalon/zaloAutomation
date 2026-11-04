@@ -540,6 +540,41 @@ class LmsServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(auth_page.pass_loc.values, ["secret-pass"])
         self.assertEqual(auth_page.submit_loc.click_count, 1)
 
+        # Also verify base.mindx.edu.vn/login?callbackUrl=...class-sessions... navigates to full Config.LMS_URL
+        base_auth_page = FakeLmsAuthPage()
+        base_auth_page.url = (
+            "https://base.mindx.edu.vn/login?callbackUrl="
+            "https://lms.mindx.edu.vn/admin/class-sessions?centres=[%22644346f794300678908f79bc%22]"
+        )
+        full_lms_url = (
+            "https://lms.mindx.edu.vn/admin/class-sessions?"
+            "centres=[%22644346f794300678908f79bc%22]&type=[%22MISS_ATTEND%22,%22DUE_COMMENT%22]"
+        )
+        with (
+            patch.object(service.Config, "LMS_URL", full_lms_url),
+            patch.object(service.Config, "LMS_USERNAME", "teacher@mindx.edu.vn"),
+            patch.object(service.Config, "LMS_PASSWORD", "secret-pass"),
+            patch.object(service.asyncio, "sleep", AsyncMock()),
+        ):
+            await service._login_lms_if_needed(base_auth_page)
+        self.assertEqual(base_auth_page.goto_urls, [full_lms_url])
+        self.assertEqual(base_auth_page.url, full_lms_url)
+
+        # Silent SSO auto-login (no password input visible) that lands on a truncated
+        # callbackUrl missing `type=` must also restore full Config.LMS_URL
+        silent_sso_page = FakeLmsAuthPage()
+        silent_sso_page.pass_loc = FakeLoginLocator(count=0, visible=False)
+        silent_sso_page.url = (
+            "https://lms.mindx.edu.vn/admin/class-sessions?centres=[%22644346f794300678908f79bc%22]"
+        )
+        with (
+            patch.object(service.Config, "LMS_URL", full_lms_url),
+            patch.object(service, "_wait_for_lms_login_or_table", AsyncMock()),
+        ):
+            await service._login_lms_if_needed(silent_sso_page)
+        self.assertEqual(silent_sso_page.goto_urls, [full_lms_url])
+        self.assertEqual(silent_sso_page.url, full_lms_url)
+
         page = FakeAutomationPage()
         runtime, browser = self.runtime(page=page)
         snapshot = [
