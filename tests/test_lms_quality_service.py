@@ -866,9 +866,9 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
                 "lesson": str((idx % 9) + 1),
                 "class_date": "24/10/2026",
                 "zalo_status": "✅ Đã nộp – Có minh chứng" if idx % 2 == 0 else "❌ Chưa tìm thấy báo cáo",
-                "lms_status": "✅ Đã nộp LMS",
+                "lms_status": "❌ Chưa nhận xét (Buổi 2)" if idx % 2 == 0 else "✅ Đã nộp LMS",
                 "evaluation_status": (
-                    "⚠️ Đã nộp nhận xét nhưng còn lỗi chất lượng nội dung"
+                    "⏳ Đã hoàn tất nhận xét Zalo, chưa nhận xét LMS"
                     if idx % 2 == 0
                     else "⏳ Đã hoàn tất nhận xét LMS, chưa nhận xét Zalo"
                 ),
@@ -879,6 +879,17 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
         ]
         for r in ten_rows:
             self.assertTrue(is_failed_weekly_summary_row(r))
+        self.assertFalse(
+            is_failed_weekly_summary_row(
+                {
+                    "class_code": "VT-C4K-QUAL01",
+                    "zalo_status": "✅ Đã nộp – Có minh chứng",
+                    "lms_status": "✅ Đã nộp LMS",
+                    "evaluation_status": "✅ Đã hoàn thành nhận xét",
+                    "issue_description": "[LMS] Chưa ghi nội dung bài học",
+                }
+            )
+        )
 
         pkg10 = build_failed_classes_email_package(
             week=43,

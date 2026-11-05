@@ -4,6 +4,22 @@ Tài liệu này ghi lại toàn bộ quá trình hình thành, phát triển ki
 
 ---
 
+## [2026-11-05] — Cập Nhật Quy Tắc Tính Lỗi Giáo Viên (`DEC-041`: Chỉ Tính Lỗi Khi Chưa Nhận Xét LMS Hoặc Chưa Báo Cáo Zalo) & Nâng Cấp Độ Nét + Phóng To Ảnh Minh Chứng Zalo (`DEC-036`, `DEC-040`)
+
+### ✨ Thay đổi quy tắc nghiệp vụ & Nâng cấp trải nghiệm vận hành
+- **Phần 1 — Thay đổi quy tắc tính lỗi giáo viên (`is_failed` / `issue_severity`) (`DEC-041` — `services/report_status.py`, `repositories/report_repository.py`, `static/js/jobs.js`, `tests/test_report_status.py`, `tests/test_api_routes_unit.py`, `tests/test_lms_quality_service.py`, `tests/check_template_js.js`)**:
+  - **Chỉ tính lỗi (`is_failed = True`) khi chưa báo cáo Zalo hoặc chưa nhận xét LMS**: Một buổi học chỉ bị tính là lỗi (tô đỏ trên Dashboard, đếm vào ô `#count-failed` / bộ lọc `"Cần xem lại"`, đưa vào danh sách lớp lỗi gửi Email Quản lý / CSV) khi **chưa nộp hoặc cần kiểm tra lại báo cáo Zalo** (`categorize_row(row) ∈ {MISSING, REVIEW}`) hoặc **chưa hoàn tất nhận xét LMS** (`lms_status` bắt đầu bằng `❌`/`⚠️` hoặc `nx_lms_checked is False` khi chưa có `lms_status`). Không dùng chuỗi `evaluation_status` cũ làm điều kiện kích hoạt lỗi độc lập.
+  - **Vi phạm chất lượng nội dung là nhắc nhở (`NOTE` / `Ghi chú QC`), vẫn ghi đầy đủ lên Teaching**: Khi giáo viên đã hoàn thành cả báo cáo Zalo (`DONE`/`LATE`/`EXEMPT`) và nhận xét LMS (`✅`), các lỗi chất lượng nội dung bài học hoặc nhận xét học viên (`[LMS] Chưa ghi nội dung bài học`, `[LMS] Nhận xét thiếu ý`, `[Zalo] ...`) được hiển thị ở mức nhắc nhở (`Ghi chú QC: ...` màu trung tính trên Dashboard, `Tình trạng đánh giá: ✅ Đã hoàn thành nhận xét`, `is_failed = False`), đồng thời **vẫn được ghi tự động đầy đủ vào cột `Mô tả vấn đề (TE/TF/QC)` trên trang Teaching** (`execute_verified_checker_note_action`).
+- **Phần 2 — Kết hợp Hướng 1 (Tăng độ nét Retina 2x + Cắt gọn khung chat khi chụp ảnh mới) & Hướng 3 (Click phóng to + Thanh công cụ Zoom trên Dashboard cho cả ảnh cũ lẫn ảnh mới) (`services/external_gateways.py`, `services/zalo_scan_evidence.py`, `templates/partials/image_modal.html`, `static/js/modals.js`, `tests/test_external_gateways.py`, `tests/test_zalo_scan_evidence.py`, `tests/check_template_js.js`)**:
+  - **Hướng 1 — Chụp ảnh minh chứng mới sắc nét gấp đôi và cắt bỏ vùng thừa**:
+    - Bổ sung `"device_scale_factor": 2` vào `_persistent_launch_options` (`services/external_gateways.py`) để Chromium kết xuất font chữ tiếng Việt có dấu ở mật độ điểm ảnh Retina 2x trong khi giữ nguyên bố cục viewport `1920x1200`.
+    - Bổ sung `_resolve_zalo_chat_clip(page)` trong `services/zalo_scan_evidence.py` tự động tính vùng `clip` của khung nội dung hội thoại Zalo (cắt bỏ cột danh sách nhóm bên trái ~`340px` và khoảng trắng dư bên phải, giữ trọn tiêu đề nhóm, pill mốc ngày ở giữa và bong bóng báo cáo), kèm cơ chế fallback an toàn về `page.screenshot(path=file_path)` khi không đọc được DOM hoặc trong môi trường mock.
+  - **Hướng 3 — Phóng to tương tác (`Click-to-Zoom` + Thanh công cụ `- / 100% / + / Vừa khung`) trên Dashboard**:
+    - Nâng cấp `templates/partials/image_modal.html` và `static/js/modals.js`: hỗ trợ nhấp trực tiếp vào ảnh minh chứng (`toggleImageModalZoom`) để phóng to tuần tự `100% → 185% → 260% → 100%` (tự động căn cuộn vào đúng vị trí con trỏ chuột vừa bấm) hoặc dùng nút `-` / `+` (`100% ↔ 140% ↔ 185% ↔ 225% ↔ 260%`) và `Vừa khung` (`resetImageModalZoom`).
+    - Sử dụng khung cuộn `block` (`#modal-image-scroll`) kết hợp `block shrink-0` và tự động gỡ `max-w-full`/`max-h-[82dvh]` khi `zoom > 100%`, đảm bảo ảnh phóng to đúng tỷ lệ thực tế (`100% = 1050px < 185% = 2087px < 260% = 2933px`) và kéo thanh cuộn xem được trọn vẹn cả 4 mép ảnh.
+
+---
+
 ## [2026-11-04] — Hotfix Hỗ Trợ SSO `base.mindx.edu.vn` & Fallback Tick Checkbox BCNB (`Job #440`), Tự Động Phục Hồi Phiên Đăng Nhập LMS (`Jobs #434, #435, #438`), Sửa 3 Điểm Báo Lỗi Giả / Kẹt Lỗi Cũ (`W44/2026` Job `#419`) & Quy Tắc Đồng Bộ GitHub (`DEC-036`, `DEC-040`)
 
 ### 🛠️ Sửa lỗi & Củng cố độ chính xác kiểm định Zalo/LMS/BCNB

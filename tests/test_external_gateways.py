@@ -1233,6 +1233,7 @@ class ProbeLifecycleGatewayTests(unittest.IsolatedAsyncioTestCase):
                     "--window-size=1920,1200",
                 ],
                 "viewport": {"width": 1920, "height": 1200},
+                "device_scale_factor": 2,
             },
         )
         self.assertEqual(context.new_page_calls, 1)

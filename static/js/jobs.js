@@ -1035,7 +1035,7 @@
 
         function resolveRowIssueSeverity(r) {
             if (!r || typeof r !== 'object') return 'FAIL';
-            if (typeof r.is_failed === 'boolean' && r.is_failed === false) {
+            if (!resolveRowIsFailed(r)) {
                 return 'NOTE';
             }
             const st = r.scan_target && typeof r.scan_target === 'object' ? r.scan_target : {};
@@ -1082,9 +1082,7 @@
             const category = resolveRowCategory(r);
             if (category === 'MISSING' || category === 'REVIEW') return true;
             const lmsStatus = resolveDashboardRowLmsStatus(r);
-            if (lmsStatus.startsWith('❌')) return true;
-            const issueText = resolveDashboardRowIssueDescription(r);
-            if (issueText && resolveRowIssueSeverity(r) === 'FAIL') return true;
+            if (lmsStatus.startsWith('❌') || lmsStatus.startsWith('⚠️')) return true;
             return false;
         }
 
@@ -1207,7 +1205,7 @@
         function resolveDashboardRowLmsStatus(r) {
             if (!r || typeof r !== 'object') return 'Chưa quét LMS';
             const st = r.scan_target && typeof r.scan_target === 'object' ? r.scan_target : {};
-            const rawLms = String(r.lms_status || '').trim();
+            const rawLms = String(r.lms_status || st.lms_status || '').trim();
             if (rawLms && rawLms !== 'Chưa quét LMS') return rawLms;
             const nxLms = typeof r.nx_lms_checked === 'boolean'
                 ? r.nx_lms_checked
@@ -1302,7 +1300,17 @@
             const zaloDone = ['DONE', 'LATE', 'EXEMPT'].includes(category);
             const lmsDone = lmsStatus.startsWith('✅') || lmsStatus.includes('Dry-run LMS') || lmsStatus.includes('Chờ tích BCNB');
             if (explicitEval) {
-                if (zaloDone && lmsDone && /^⏳/.test(explicitEval)) {
+                if (
+                    zaloDone
+                    && lmsDone
+                    && (
+                        /^⏳/.test(explicitEval)
+                        || (
+                            /lỗi\s+chất\s+lượng\s+nội\s+dung/i.test(explicitEval)
+                            && !/chưa\s+nhận\s+xét|chưa\s+hoàn\s+thành|cần\s+kiểm\s+tra/i.test(explicitEval)
+                        )
+                    )
+                ) {
                     return '✅ Đã hoàn thành nhận xét';
                 }
                 return explicitEval;

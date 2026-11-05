@@ -1986,8 +1986,45 @@ async function checkWeeklyHistoryAndCsvExport() {
         issue_description: '[LMS] Chưa ghi nội dung bài học'
       })`,
       harness.context,
-    ) === true,
-    'resolveRowIsFailed must flag rows with FAIL quality issue_description even when Zalo and LMS are submitted',
+    ) === false &&
+      vm.runInContext(
+        `resolveRowIsFailed({
+          class_code: 'VT-C4K-STALE01',
+          zalo_status: '✅ Đã nộp – Có minh chứng',
+          lms_status: '✅ Đã nộp LMS',
+          evaluation_status: '⚠️ Đã hoàn tất nhận xét LMS, Zalo cần kiểm tra'
+        })`,
+        harness.context,
+      ) === false &&
+      vm.runInContext(
+        `resolveRowIsFailed({
+          class_code: 'VT-C4K-UNSCAN01',
+          zalo_status: 'Chưa quét Zalo',
+          lms_status: '✅ Đã nộp LMS',
+          evaluation_status: '⏳ Đã hoàn tất nhận xét LMS, chưa nhận xét Zalo'
+        })`,
+        harness.context,
+      ) === false &&
+      vm.runInContext(
+        `resolveRowIssueSeverity({
+          class_code: 'VT-C4K-PTB16',
+          zalo_status: '✅ Đã nộp – Có minh chứng',
+          lms_status: '✅ Đã nộp LMS',
+          issue_description: '[LMS] Chưa ghi nội dung bài học'
+        })`,
+        harness.context,
+      ) === 'NOTE' &&
+      vm.runInContext(
+        `resolveRowIsFailed({
+          class_code: 'VT-C4K-GI35',
+          zalo_status: '✅ Đã nộp – Có minh chứng',
+          lms_status: '❌ Chưa nhận xét (Buổi 3)',
+          evaluation_status: '⏳ Đã hoàn tất nhận xét Zalo, chưa nhận xét LMS',
+          issue_description: '[LMS] Chưa nhận xét học viên (6/6 HS)'
+        })`,
+        harness.context,
+      ) === true,
+    'resolveRowIsFailed must only count rows as failed when Zalo or LMS is not completed; quality violations on completed rows are NOTE reminders',
   );
   assertFrontend(
     vm.runInContext(
@@ -2883,6 +2920,51 @@ async function checkPhase57FrontendHardening() {
     harness.elements.get('count-failed').innerText === 0 &&
       harness.elements.get('count-success').innerText === 1,
     '5.8.5: Row with LMS_MANUAL_CHECK NOTE must stay is_failed=false and count as success',
+  );
+
+  // Evidence viewer zoom controls: openImageModal resets to 100%, toggleImageModalZoom cycles 100% -> 185% -> 260% -> 100%
+  vm.runInContext(scriptSourceByPath.get('/static/js/modals.js'), harness.context);
+  vm.runInContext(
+    `openImageModal('/screenshots/test.png')`,
+    harness.context,
+  );
+  assertFrontend(
+    harness.elements.get('modal-image-zoom-label').textContent === '100%' &&
+      harness.elements.get('modal-image').style.width === '' &&
+      harness.elements.get('modal-image').style.flexShrink === '0' &&
+      harness.elements.get('modal-image').classList.contains('max-w-full') &&
+      harness.elements.get('modal-image').classList.contains('max-h-[82dvh]'),
+    'openImageModal must initialize evidence image at 100% fit-to-frame zoom',
+  );
+  vm.runInContext(`toggleImageModalZoom()`, harness.context);
+  assertFrontend(
+    harness.elements.get('modal-image-zoom-label').textContent === '185%' &&
+      harness.elements.get('modal-image').style.width === '185%' &&
+      harness.elements.get('modal-image').style.maxWidth === 'none' &&
+      harness.elements.get('modal-image').style.flexShrink === '0' &&
+      !harness.elements.get('modal-image').classList.contains('max-w-full') &&
+      !harness.elements.get('modal-image').classList.contains('max-h-[82dvh]'),
+    'toggleImageModalZoom must zoom in to 185% on first click and remove max-w-full/max-h constraints',
+  );
+  vm.runInContext(`stepImageModalZoom(1)`, harness.context);
+  assertFrontend(
+    harness.elements.get('modal-image-zoom-label').textContent === '225%' &&
+      harness.elements.get('modal-image').style.width === '225%',
+    'stepImageModalZoom(1) must step zoom up to 225%',
+  );
+  vm.runInContext(`stepImageModalZoom(1)`, harness.context);
+  assertFrontend(
+    harness.elements.get('modal-image-zoom-label').textContent === '260%' &&
+      harness.elements.get('modal-image').style.width === '260%',
+    'stepImageModalZoom(1) must step zoom up to 260%',
+  );
+  vm.runInContext(`resetImageModalZoom()`, harness.context);
+  assertFrontend(
+    harness.elements.get('modal-image-zoom-label').textContent === '100%' &&
+      harness.elements.get('modal-image').style.width === '' &&
+      harness.elements.get('modal-image').classList.contains('max-w-full') &&
+      harness.elements.get('modal-image').classList.contains('max-h-[82dvh]'),
+    'resetImageModalZoom must restore 100% fit-to-frame zoom and max-w-full/max-h classes',
   );
 }
 

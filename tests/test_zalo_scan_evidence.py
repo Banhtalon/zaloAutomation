@@ -2107,6 +2107,63 @@ class ZaloScanEvidenceTests(unittest.IsolatedAsyncioTestCase):
                 1,
             )
 
+    async def test_capture_zalo_evidence_uses_cropped_chat_pane_clip_with_safe_fallback(self):
+        from services.zalo_scan_evidence import (
+            _capture_zalo_evidence,
+            _resolve_zalo_chat_clip,
+        )
+
+        class ClipAwarePage:
+            def __init__(self, eval_result):
+                self._eval_result = eval_result
+                self.screenshot_calls = []
+
+            async def evaluate(self, _script):
+                if isinstance(self._eval_result, Exception):
+                    raise self._eval_result
+                return self._eval_result
+
+            async def screenshot(self, **kwargs):
+                self.screenshot_calls.append(kwargs)
+                with open(kwargs["path"], "wb") as handle:
+                    handle.write(b"CROPPED_PNG_BYTES")
+
+        dummy_msg = FakeMessage("Báo cáo buổi 1", "01/11/2026")
+        with tempfile.TemporaryDirectory() as root:
+            page_with_clip = ClipAwarePage(
+                {"x": 388, "y": 46, "width": 890, "height": 1154}
+            )
+            resolved_clip = await _resolve_zalo_chat_clip(page_with_clip)
+            self.assertEqual(
+                resolved_clip,
+                {"x": 388.0, "y": 46.0, "width": 890.0, "height": 1154.0},
+            )
+            ev = await _capture_zalo_evidence(
+                page_with_clip,
+                dummy_msg,
+                job_id=990,
+                screenshots_dir=root,
+                label="report",
+            )
+            self.assertIsNotNone(ev)
+            self.assertEqual(len(page_with_clip.screenshot_calls), 1)
+            self.assertEqual(
+                page_with_clip.screenshot_calls[0]["clip"],
+                {"x": 388.0, "y": 46.0, "width": 890.0, "height": 1154.0},
+            )
+
+            page_broken_eval = ClipAwarePage(RuntimeError("DOM unavailable"))
+            ev_fallback = await _capture_zalo_evidence(
+                page_broken_eval,
+                dummy_msg,
+                job_id=991,
+                screenshots_dir=root,
+                label="report",
+            )
+            self.assertIsNotNone(ev_fallback)
+            self.assertEqual(len(page_broken_eval.screenshot_calls), 1)
+            self.assertNotIn("clip", page_broken_eval.screenshot_calls[0])
+
 
 if __name__ == "__main__":
     unittest.main()

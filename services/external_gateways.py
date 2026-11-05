@@ -3159,6 +3159,7 @@ class PlaywrightBrowserGateway:
                 f"--window-size={width},{height}",
             ],
             "viewport": {"width": width, "height": height},
+            "device_scale_factor": 2,
         }
         return launch_options
 

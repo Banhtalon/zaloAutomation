@@ -1,9 +1,30 @@
     <!-- Image Modal -->
-    <div id="image-modal" class="safe-area-modal fixed inset-0 bg-gray-900 bg-opacity-80 hidden flex items-center justify-center z-50 transition-opacity" onclick="closeImageModal()" role="dialog" aria-modal="true" aria-label="Xem ảnh bằng chứng">
-        <div class="relative max-w-5xl max-h-dvh p-4" onclick="event.stopPropagation()">
-            <button type="button" aria-label="Đóng ảnh báo cáo" onclick="closeImageModal()" class="absolute -top-4 -right-4 m-4 text-white hover:text-gray-300 focus:outline-none bg-red-600 rounded-full w-8 h-8 flex items-center justify-center">
-                <i class="fa-solid fa-xmark"></i>
-            </button>
-            <img id="modal-image" src="" class="max-w-full max-h-[90vh] object-contain rounded-lg shadow-2xl border border-gray-700">
+    <div id="image-modal" class="safe-area-modal fixed inset-0 bg-gray-900 bg-opacity-85 hidden flex items-center justify-center z-50 transition-opacity p-2 sm:p-4" onclick="closeImageModal()" role="dialog" aria-modal="true" aria-label="Xem ảnh bằng chứng">
+        <div class="relative w-full max-w-6xl max-h-[95dvh] flex flex-col rounded-xl shadow-2xl overflow-hidden" onclick="event.stopPropagation()">
+            <div class="flex flex-wrap items-center justify-between gap-2 px-4 py-2.5 bg-slate-900 text-slate-100 border-b border-slate-700">
+                <div class="flex items-center gap-2 text-xs font-bold text-slate-200">
+                    <i class="fa-solid fa-magnifying-glass-plus text-blue-400"></i>
+                    <span>Xem ảnh minh chứng (nhấp vào ảnh để phóng to / thu nhỏ)</span>
+                </div>
+                <div class="flex items-center gap-1.5">
+                    <button type="button" id="btn-image-zoom-out" aria-label="Thu nhỏ ảnh" onclick="stepImageModalZoom(-1)" class="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-100 text-xs font-extrabold border border-slate-600">
+                        <i class="fa-solid fa-minus"></i>
+                    </button>
+                    <span id="modal-image-zoom-label" class="px-2.5 py-1 rounded bg-slate-950 text-blue-300 font-mono text-xs font-bold border border-slate-700 min-w-[56px] text-center">100%</span>
+                    <button type="button" id="btn-image-zoom-in" aria-label="Phóng to ảnh" onclick="stepImageModalZoom(1)" class="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-100 text-xs font-extrabold border border-slate-600">
+                        <i class="fa-solid fa-plus"></i>
+                    </button>
+                    <button type="button" id="btn-image-zoom-reset" aria-label="Đặt lại kích thước vừa khung" onclick="resetImageModalZoom()" class="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold border border-slate-600">
+                        Vừa khung
+                    </button>
+                    <button type="button" aria-label="Đóng ảnh báo cáo" onclick="closeImageModal()" class="ml-1 bg-rose-600 hover:bg-rose-500 text-white rounded-lg px-3 py-1 text-xs font-extrabold flex items-center gap-1.5 focus:outline-none">
+                        <i class="fa-solid fa-xmark"></i>
+                        <span>Đóng</span>
+                    </button>
+                </div>
+            </div>
+            <div id="modal-image-scroll" class="overflow-auto flex-1 bg-slate-950 p-3 max-h-[86dvh]">
+                <img id="modal-image" src="" onclick="toggleImageModalZoom(event)" title="Nhấp chuột để phóng to / thu nhỏ ảnh bằng chứng" class="block shrink-0 max-w-full max-h-[82dvh] object-contain rounded-lg shadow-2xl border border-slate-700 cursor-zoom-in select-none mx-auto">
+            </div>
         </div>
     </div>

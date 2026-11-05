@@ -454,6 +454,101 @@ async def ensure_zalo_history_synced(
     )
 
 
+async def _resolve_zalo_chat_clip(page) -> dict[str, float] | None:
+    """Resolve a tight viewport clip for the Zalo chat pane (cropping left sidebar & excess right dead-space)."""
+    eval_fn = getattr(page, "evaluate", None)
+    if not callable(eval_fn):
+        return None
+    try:
+        raw_clip = await asyncio.wait_for(
+            eval_fn(
+                """
+                () => {
+                    const vpW = Number(window.innerWidth || 0);
+                    const vpH = Number(window.innerHeight || 0);
+                    if (vpW < 900 || vpH < 400) return null;
+
+                    let chatLeft = 0;
+                    const searchInput = document.querySelector('#contact-search-input');
+                    if (searchInput) {
+                        let node = searchInput;
+                        while (node && node !== document.body) {
+                            const rect = node.getBoundingClientRect();
+                            if (rect.left <= 90 && rect.width >= 240 && rect.width <= vpW * 0.45 && rect.height >= vpH * 0.4) {
+                                chatLeft = Math.max(chatLeft, Math.round(rect.right));
+                            }
+                            node = node.parentElement;
+                        }
+                        if (chatLeft < 240) {
+                            const sRect = searchInput.getBoundingClientRect();
+                            if (sRect.right >= 200 && sRect.right <= vpW * 0.45) {
+                                chatLeft = Math.round(sRect.right + 16);
+                            }
+                        }
+                    }
+
+                    const bubbles = Array.from(document.querySelectorAll('[data-component="bubble-message"]'));
+                    let minBubbleLeft = vpW;
+                    let maxContentRight = 0;
+                    for (const el of bubbles) {
+                        const r = el.getBoundingClientRect();
+                        if (r.width <= 0 || r.height <= 0) continue;
+                        if (r.bottom < 0 || r.top > vpH) continue;
+                        if (r.left > 180 && r.left < minBubbleLeft) {
+                            minBubbleLeft = r.left;
+                        }
+                        if (r.right > maxContentRight) {
+                            maxContentRight = r.right;
+                        }
+                    }
+
+                    if (chatLeft <= 0 && minBubbleLeft < vpW && minBubbleLeft >= 240 && minBubbleLeft <= vpW * 0.45) {
+                        chatLeft = Math.max(0, Math.round(minBubbleLeft - 28));
+                    }
+                    if (chatLeft < 200 || chatLeft > vpW * 0.45) {
+                        chatLeft = searchInput ? Math.min(360, Math.round(vpW * 0.2)) : 0;
+                    }
+
+                    const paneCenterRight = chatLeft + Math.round((vpW - chatLeft) * 0.56);
+                    const desiredRight = Math.max(
+                        Math.round(maxContentRight + 72),
+                        paneCenterRight,
+                        chatLeft + 960
+                    );
+                    const clipRight = Math.min(vpW, desiredRight);
+                    const clipWidth = clipRight - chatLeft;
+                    if (clipWidth < 600 || clipWidth >= vpW - 40) {
+                        return null;
+                    }
+                    return {
+                        x: chatLeft,
+                        y: 0,
+                        width: clipWidth,
+                        height: vpH,
+                    };
+                }
+                """
+            ),
+            timeout=1.5,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        return None
+    if not isinstance(raw_clip, dict):
+        return None
+    try:
+        x = float(raw_clip["x"])
+        y = float(raw_clip["y"])
+        width = float(raw_clip["width"])
+        height = float(raw_clip["height"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if x < 0 or y < 0 or width < 400 or height < 300:
+        return None
+    return {"x": x, "y": y, "width": width, "height": height}
+
+
 async def _capture_zalo_evidence(
     page,
     target_message,
@@ -510,9 +605,19 @@ async def _capture_zalo_evidence(
         )
         return None
 
+    clip_box = await _resolve_zalo_chat_clip(page)
     try:
+        async def _take_screenshot() -> None:
+            if clip_box is not None:
+                try:
+                    await page.screenshot(path=file_path, clip=clip_box)
+                    return
+                except TypeError:
+                    pass
+            await page.screenshot(path=file_path)
+
         await asyncio.wait_for(
-            page.screenshot(path=file_path),
+            _take_screenshot(),
             timeout=max(0.001, float(CAPTURE_SCREENSHOT_TIMEOUT_SECONDS)),
         )
     except asyncio.CancelledError:

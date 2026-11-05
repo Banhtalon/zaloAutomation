@@ -534,6 +534,13 @@ def _resolve_row_evaluation_status(
         return "⚠️ Cần kiểm tra nhận xét"
     if clean_raw.startswith(("⚠️", "❌")) or "cần kiểm tra" in clean_raw.lower():
         if zalo_done and lms_done:
+            if (
+                "lỗi chất lượng nội dung" in clean_raw.lower()
+                and "chưa nhận xét" not in clean_raw.lower()
+                and "chưa hoàn thành" not in clean_raw.lower()
+                and "cần kiểm tra" not in clean_raw.lower()
+            ):
+                return "✅ Đã hoàn thành nhận xét"
             return clean_raw
     if zalo_done and lms_done:
         return "✅ Đã hoàn thành nhận xét"

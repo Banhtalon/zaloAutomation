@@ -2318,7 +2318,7 @@ class ApiRoutesUnitTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("Tình trạng đánh giá", smtp_sent_resp["html_table"])
                 self.assertIn("┌", smtp_sent_resp["text_table"])
                 self.assertIn("VT-C4K-GI35", smtp_sent_resp["text_table"])
-                self.assertTrue(
+                self.assertFalse(
                     ReportRepository.is_failed_weekly_summary_row(
                         {
                             "class_code": "VT-QUAL-ERR",
@@ -2326,6 +2326,17 @@ class ApiRoutesUnitTests(unittest.IsolatedAsyncioTestCase):
                             "lms_status": "✅ Đã nộp LMS",
                             "evaluation_status": "⚠️ Đã nộp nhận xét nhưng còn lỗi chất lượng nội dung",
                             "issue_description": "[LMS] Chưa ghi nội dung bài học",
+                        }
+                    )
+                )
+                self.assertTrue(
+                    ReportRepository.is_failed_weekly_summary_row(
+                        {
+                            "class_code": "VT-LMS-MISS",
+                            "zalo_status": "✅ Đã nộp – Có minh chứng",
+                            "lms_status": "❌ Chưa nhận xét (Buổi 2)",
+                            "evaluation_status": "⏳ Đã hoàn tất nhận xét Zalo, chưa nhận xét LMS",
+                            "issue_description": "[LMS] Chưa nhận xét học viên (5/5 HS)",
                         }
                     )
                 )

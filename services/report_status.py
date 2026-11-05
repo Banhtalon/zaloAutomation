@@ -663,14 +663,14 @@ def _row_issue_severities(row: Mapping[str, Any]) -> tuple[bool, bool]:
 
 
 def is_failed(row: Any) -> bool:
-    """Return True when a row/result has a Zalo error, confirmed LMS non-submission, or FAIL QC issue.
+    """Return True only when Zalo report is missing/unverified or LMS comment is not completed.
 
-    Per Owner Decisions D1 & D4:
+    Per Owner rule update:
+    - Only missing/unverified Zalo report (``MISSING``, ``REVIEW``) or uncompleted LMS comment
+      (``lms_status`` starting with ``❌``/``⚠️`` or ``nx_lms_checked is False``) counts as a teacher error.
     - ``LATE`` (🟡 nộp trễ), ``DONE``, ``EXEMPT``, and ``NOT_SCANNED`` are not Zalo errors.
-    - ``NOTE`` issues (e.g. ``LMS_MANUAL_CHECK``, ``ZALO_MISSING_OR_WRONG_DATE_SAME_DAY``,
-      ``ZALO_REPORT_NO_DATE``, ``ZALO_REPORT_WRONG_DATE``) do not mark a row as failed.
-    - Confirmed LMS non-submission / non-evaluation (``lms_status`` or ``evaluation_status`` starting
-      with ``❌``/``⚠️``) and ``FAIL`` issues still mark the row as failed.
+    - Content quality violations (``[LMS] ...``, ``[Zalo] ...``) are reminders (``NOTE``) written to
+      Teaching's ``Mô tả vấn đề (TE/TF/QC)`` column and do NOT mark the row as failed.
     """
     if not isinstance(row, Mapping):
         return False
@@ -689,31 +689,9 @@ def is_failed(row: Any) -> bool:
         nx_lms = st.get("nx_lms_checked")
     if lms_status in {"", "Chưa quét LMS"} and nx_lms is False:
         lms_status = "❌ Chưa nộp LMS"
-    eval_status = str(
-        row.get("evaluation_status") or st.get("evaluation_status") or ""
-    ).strip()
-    eval_lower = eval_status.lower()
-
-    if category == CATEGORY_EXEMPT and (
-        "zalo cần kiểm tra" in eval_lower or "chưa nhận xét zalo" in eval_lower
-    ):
-        eval_status = ""
-        eval_lower = ""
-    elif category == CATEGORY_LATE and (
-        "chưa nhận xét zalo" in eval_lower or "nộp trễ" in eval_lower
-    ):
-        eval_status = ""
-        eval_lower = ""
-
-    has_fail_issue, has_any_issue = _row_issue_severities(row)
 
     lms_failed = lms_status.startswith(("❌", "⚠️"))
-    if has_any_issue and not has_fail_issue and "lỗi chất lượng nội dung" in eval_lower:
-        eval_failed = False
-    else:
-        eval_failed = eval_status.startswith(("❌", "⚠️"))
-
-    return zalo_failed or lms_failed or eval_failed or has_fail_issue
+    return zalo_failed or lms_failed
 
 
 def validate_two_week_plan(

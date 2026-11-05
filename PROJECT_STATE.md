@@ -1,9 +1,18 @@
 # PROJECT STATE — Zalo Automation
 
-> Snapshot hiện tại, cập nhật 2026-11-04. Source và kiểm tra runtime mới có độ
+> Snapshot hiện tại, cập nhật 2026-11-05. Source và kiểm tra runtime mới có độ
 > tin cậy cao hơn tài liệu. Không dùng file này làm quyền chạy thao tác thật.
 
 ## Trạng thái ngắn
+
+- 2026-11-05 (Thay đổi quy tắc tính lỗi giáo viên `DEC-041` & Nâng cấp độ nét + phóng to ảnh minh chứng Zalo — source/local, `DEC-036`, `DEC-040`, `DEC-041`):
+  - **Phần 1 — Quy tắc tính lỗi giáo viên mới (`DEC-041` — `services/report_status.py`, `repositories/report_repository.py`, `static/js/jobs.js`)**:
+    - Chỉ tính lỗi (`is_failed = True`) khi **chưa báo cáo Zalo hoặc báo cáo Zalo cần kiểm tra** (`categorize_row(row) ∈ {MISSING, REVIEW}`) hoặc **chưa hoàn tất nhận xét LMS** (`lms_status` bắt đầu bằng `❌`/`⚠️` hoặc `nx_lms_checked is False` khi chưa có `lms_status`); không dùng chuỗi `evaluation_status` cũ làm điều kiện lỗi độc lập.
+    - Các vi phạm chất lượng nội dung (`quality_issues`, `lms_quality_issues`, `zalo_content_issues`, `issue_description`) khi Zalo và LMS đã hoàn thành được xử lý là **nhắc nhở (`NOTE` / `Ghi chú QC: ...`)**, không tính lỗi (`is_failed = False`, `Tình trạng đánh giá: ✅ Đã hoàn thành nhận xét`), nhưng **vẫn được ghi tự động đầy đủ lên cột `Mô tả vấn đề (TE/TF/QC)` của trang Teaching**.
+  - **Phần 2 — Kết hợp Hướng 1 (Tăng độ nét 2x + Cắt gọn khung chat khi chụp ảnh mới) & Hướng 3 (Click phóng to + Thanh công cụ Zoom trên Dashboard) (`services/external_gateways.py`, `services/zalo_scan_evidence.py`, `templates/partials/image_modal.html`, `static/js/modals.js`)**:
+    - Bổ sung `"device_scale_factor": 2` vào `_persistent_launch_options` (`services/external_gateways.py`) và hàm `_resolve_zalo_chat_clip(page)` trong `_capture_zalo_evidence` (`services/zalo_scan_evidence.py`) để cắt bỏ cột danh sách hội thoại bên trái + khoảng trắng thừa bên phải khi chụp ảnh minh chứng mới (kèm fallback an toàn về full-viewport screenshot khi không lấy được `clip`).
+    - Nâng cấp modal xem ảnh minh chứng (`templates/partials/image_modal.html`, `static/js/modals.js`) hỗ trợ nhấp trực tiếp lên ảnh để phóng to tuần tự `100% → 185% → 260% → 100%` (căn cuộn theo tọa độ click) cùng thanh công cụ `-`, `100%`, `+`, `Vừa khung`, `Đóng` với khung cuộn `block shrink-0` (đã kiểm chứng trên Chromium headless: `100% = 1050px < 185% = 2087px < 260% = 2933px`, `scrollWidth = 2957px`).
+  - **Bằng chứng**: Unit test mục tiêu (`188/188 OK`), `node tests/check_template_js.js` pass (`scripts=7 handlers=37 behavior=13`), `.\CHECK_QUALITY.ps1 -Isolated` exit `0` (`QUALITY GATE PASSED`, Ruff 0, Mypy 0 trên 78 files, coverage `78.2%`), `git diff --check` exit `0`; Independent Review `gpt-6.1-sol (high)` R1 `NEEDS_FIX` (đã sửa hết 2 điểm & kiểm chứng layout bằng Chromium) -> R2 `VERDICT: PASS` (session `01a1ab11-f798-79e3-aea6-0bfe99eea431`).
 
 - 2026-11-04 (Hotfix hỗ trợ cổng SSO `base.mindx.edu.vn` & xử lý lỗi `Clicking the checkbox did not change its state` khi tick BCNB trên `Job #440` — source/local, `DEC-036`, `DEC-040`):
   - **Nguyên nhân gốc (`Job #440`)**:

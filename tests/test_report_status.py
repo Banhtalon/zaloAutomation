@@ -173,11 +173,43 @@ class ReportStatusSingleSourceTests(unittest.IsolatedAsyncioTestCase):
                 False,
             ),
             (
-                "done_with_fail_issue_is_failed",
+                "done_with_quality_violation_not_failed_when_lms_completed",
                 {
                     "status": SUBMITTED_STATUS,
                     "evidence_state": SUBMITTED_VERIFIED,
                     "lms_status": "✅ Đã nộp LMS",
+                    "lms_quality_issues": [fail_lms_issue],
+                },
+                CATEGORY_DONE,
+                False,
+            ),
+            (
+                "done_with_stale_evaluation_status_not_failed_when_zalo_and_lms_completed",
+                {
+                    "status": SUBMITTED_STATUS,
+                    "evidence_state": SUBMITTED_VERIFIED,
+                    "lms_status": "✅ Đã nộp LMS",
+                    "evaluation_status": "⚠️ Đã hoàn tất nhận xét LMS, Zalo cần kiểm tra",
+                },
+                CATEGORY_DONE,
+                False,
+            ),
+            (
+                "not_scanned_zalo_with_completed_lms_is_not_failed",
+                {
+                    "zalo_status": "Chưa quét Zalo",
+                    "lms_status": "✅ Đã nộp LMS",
+                    "evaluation_status": "⏳ Đã hoàn tất nhận xét LMS, chưa nhận xét Zalo",
+                },
+                CATEGORY_NOT_SCANNED,
+                False,
+            ),
+            (
+                "done_with_missing_lms_comment_is_failed",
+                {
+                    "status": SUBMITTED_STATUS,
+                    "evidence_state": SUBMITTED_VERIFIED,
+                    "lms_status": "❌ Chưa nhận xét (Buổi 2)",
                     "lms_quality_issues": [fail_lms_issue],
                 },
                 CATEGORY_DONE,
@@ -392,7 +424,7 @@ class ReportStatusSingleSourceTests(unittest.IsolatedAsyncioTestCase):
                             "status": SUBMITTED_STATUS,
                             "evidence_state": SUBMITTED_VERIFIED,
                             "nx_zalo_checked": True,
-                            "nx_lms_checked": True,
+                            "nx_lms_checked": False,
                             "lms_quality_issues": [fail_issue],
                             "quality_issues": [fail_issue],
                             "scan_target": {
@@ -620,12 +652,13 @@ class ReportStatusSingleSourceTests(unittest.IsolatedAsyncioTestCase):
                     },
                 )
 
-                # Explicit [FAIL:CODE] prefix on issue_description is authoritative and never downgraded to NOTE (even if qc_issue_note has uncoded NOTE text)
+                # Explicit [FAIL:CODE] prefix on issue_description is preserved by issue_severity,
+                # while is_failed only triggers when Zalo or LMS is not completed (content quality violations are reminders).
                 self.assertEqual(
                     issue_severity("[FAIL:ZALO_CONTENT_FAIL] [Zalo] Báo cáo không ghi ngày/buổi"),
                     SEVERITY_FAIL,
                 )
-                self.assertTrue(
+                self.assertFalse(
                     is_failed(
                         {
                             "category": CATEGORY_DONE,
@@ -636,6 +669,20 @@ class ReportStatusSingleSourceTests(unittest.IsolatedAsyncioTestCase):
                             "nx_lms_checked": True,
                             "qc_issue_note": "[Zalo] Báo cáo không ghi ngày/buổi",
                             "issue_description": "[FAIL:ZALO_CONTENT_FAIL] [Zalo] Báo cáo không ghi ngày/buổi",
+                        }
+                    )
+                )
+                self.assertTrue(
+                    is_failed(
+                        {
+                            "category": CATEGORY_DONE,
+                            "zalo_status": SUBMITTED_STATUS,
+                            "evidence_state": SUBMITTED_VERIFIED,
+                            "lms_status": "❌ Chưa nhận xét (Buổi 1)",
+                            "nx_zalo_checked": True,
+                            "nx_lms_checked": False,
+                            "qc_issue_note": "[LMS] Chưa nhận xét học viên (6/6 HS)",
+                            "issue_description": "[LMS] Chưa nhận xét học viên (6/6 HS)",
                         }
                     )
                 )
