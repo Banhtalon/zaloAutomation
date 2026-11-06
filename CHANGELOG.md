@@ -4,6 +4,24 @@ Tài liệu này ghi lại toàn bộ quá trình hình thành, phát triển ki
 
 ---
 
+## [2026-11-06] — Sửa Lỗi Tự Động Gửi Email Báo Cáo Lớp Lỗi Cho Quản Lý Qua SMTP Gmail (`DEC-036`, `DEC-040`)
+
+### 🛠️ Sửa lỗi & Chuẩn hóa cấu hình SMTP
+- **Tự động nhận diện & chuẩn hóa thông tin đăng nhập SMTP (`googleform_autosubmit/config.py`, `services/report_email_service.py`)**:
+  - Khi `SMTP_USERNAME` để placeholder (`email_gui_di_cua_ban@gmail.com`) nhưng `SMTP_FROM` đã điền email thật của người gửi, hệ thống tự động fallback dùng `SMTP_FROM` làm tài khoản xác thực SMTP.
+  - Tự động chuẩn hóa App Password của Gmail (`smtp.gmail.com` / `smtp.googlemail.com`): loại bỏ toàn bộ khoảng trắng phân cách 4x4 do Google sinh ra mà người dùng copy dán vào, đồng thời giữ nguyên mật khẩu có khoảng trắng cho các máy chủ SMTP ngoài Gmail.
+  - Hỗ trợ tải cấu hình SMTP động từ file `.env` khi chạy dịch vụ thực tế mà không cần restart lại server, đồng thời giữ nguyên tính cô lập hermetic của các unit test.
+- **Tương tác thông minh trên giao diện gửi email báo cáo (`static/js/jobs.js`, `tests/check_template_js.js`)**:
+  - Khi máy chủ trả về `DUPLICATE_EMAIL_SEND` (do vừa bấm gửi cách đây ít phút), giao diện hiển thị hộp thoại xác nhận trực quan hỏi người vận hành có muốn gửi lại ngay không và tự động truyền `confirm_duplicate=true`.
+  - Phân biệt rõ trạng thái gửi: khi `delivery_status === 'SENT'`, thông báo gửi email tự động thành công và không mở thêm tab Gmail; chỉ mở khung Gmail Web Compose và copy bảng vào Clipboard khi ở chế độ `DRY_RUN_PREVIEW` hoặc `SMTP_NOT_CONFIGURED`.
+- **Bằng chứng kiểm chứng**:
+  - Unit test mục tiêu `tests.test_api_routes_unit`: `41/41 OK`.
+  - Kiểm tra hợp đồng JavaScript giao diện: `node tests/check_template_js.js` pass (`scripts=7 handlers=37 behavior=13`).
+  - Full isolated quality gate: `.\CHECK_QUALITY.ps1 -Isolated` exit `0` (`QUALITY GATE PASSED`, 663 tests, Ruff 0, Mypy 0 trên 78 source files, branch coverage 78.2%).
+  - Independent Review: `gpt-6.1-sol (high)` Round 3 `VERDICT: PASS` (session `01a1b013-0ed7-7472-8247-a77458d5743f`).
+
+---
+
 ## [2026-11-05] — Cập Nhật Quy Tắc Tính Lỗi Giáo Viên (`DEC-041`: Chỉ Tính Lỗi Khi Chưa Nhận Xét LMS Hoặc Chưa Báo Cáo Zalo) & Nâng Cấp Độ Nét + Phóng To Ảnh Minh Chứng Zalo (`DEC-036`, `DEC-040`)
 
 ### ✨ Thay đổi quy tắc nghiệp vụ & Nâng cấp trải nghiệm vận hành

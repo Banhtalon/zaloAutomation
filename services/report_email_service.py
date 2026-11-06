@@ -9,9 +9,11 @@ import hashlib
 import html
 import json
 import os
+from pathlib import Path
 import re
 import smtplib
 import ssl
+import sys
 from typing import Any
 import unicodedata
 from urllib.parse import quote
@@ -26,6 +28,8 @@ from repositories.report_repository import (
     normalize_zalo_status_text,
     sanitize_csv_cell,
 )
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 EMAIL_TABLE_HEADERS: tuple[str, ...] = (
     "STT",
@@ -48,6 +52,23 @@ DEFAULT_REPORT_EMAIL_RECIPIENTS: tuple[str, ...] = (OWNER_TRIAL_EMAIL,)
 _EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
 _URL_SAFE_CHARS = "/,:()-._~"
 MAX_GMAIL_COMPOSE_URL_LEN = 5400
+_PLACEHOLDER_SMTP_EMAILS: frozenset[str] = frozenset(
+    {
+        "email_gui_di_cua_ban@gmail.com",
+        "your_email@gmail.com",
+        "your_smtp_username",
+        "your_smtp_from",
+        "example@gmail.com",
+    }
+)
+_PLACEHOLDER_SMTP_PASSWORDS: frozenset[str] = frozenset(
+    {
+        "xxxx_xxxx_xxxx_xxxx",
+        "xxxx xxxx xxxx xxxx",
+        "your_smtp_password",
+        "your_app_password",
+    }
+)
 
 
 class ReportEmailError(ValueError):
@@ -709,6 +730,119 @@ def _deliver_smtp_message(
         raise
 
 
+def normalize_smtp_credentials(
+    *,
+    smtp_host: str,
+    smtp_username: str,
+    smtp_password: str,
+    smtp_from: str,
+) -> tuple[str, str, str, str]:
+    clean_host = _clean_single_line(smtp_host, "")
+    clean_user = _clean_single_line(smtp_username, "")
+    clean_from = _clean_single_line(smtp_from, "")
+    if clean_user.lower() in _PLACEHOLDER_SMTP_EMAILS:
+        clean_user = ""
+    if clean_from.lower() in _PLACEHOLDER_SMTP_EMAILS:
+        clean_from = ""
+    if not clean_user and clean_from and _EMAIL_RE.match(clean_from):
+        clean_user = clean_from
+    if not clean_from and clean_user:
+        clean_from = clean_user
+
+    raw_pwd = str(smtp_password or "").strip()
+    if raw_pwd.lower() in _PLACEHOLDER_SMTP_PASSWORDS:
+        raw_pwd = ""
+    elif raw_pwd and (
+        "gmail.com" in clean_host.lower()
+        or "googlemail.com" in clean_host.lower()
+    ):
+        raw_pwd = re.sub(r"\s+", "", raw_pwd)
+    return clean_host, clean_user, raw_pwd, clean_from
+
+
+def _resolve_effective_smtp_config(
+    settings: Any,
+    *,
+    env_file: Path | None = None,
+    isolated_quality: bool = False,
+) -> dict[str, Any]:
+    configured_recipients: Any = getattr(
+        settings, "report_email_recipients", DEFAULT_REPORT_EMAIL_RECIPIENTS
+    )
+    smtp_host = _clean_single_line(
+        getattr(settings, "smtp_host", "smtp.gmail.com"), ""
+    )
+    raw_port = getattr(settings, "smtp_port", 587)
+    try:
+        smtp_port = max(1, min(65535, int(raw_port or 587)))
+    except (TypeError, ValueError):
+        smtp_port = 587
+    smtp_username = _clean_single_line(getattr(settings, "smtp_username", ""), "")
+    smtp_password = str(getattr(settings, "smtp_password", "") or "").strip()
+    smtp_from = _clean_single_line(getattr(settings, "smtp_from", ""), "")
+    smtp_use_tls = bool(getattr(settings, "smtp_use_tls", True))
+
+    should_read_dotenv = False
+    target_env_file = env_file
+    if target_env_file is not None:
+        should_read_dotenv = True
+    elif (
+        not isolated_quality
+        and "unittest" not in sys.modules
+        and settings is not None
+        and type(settings).__name__ == "AppSettings"
+    ):
+        target_env_file = _PROJECT_ROOT / ".env"
+        should_read_dotenv = True
+
+    if should_read_dotenv and target_env_file is not None and target_env_file.is_file():
+        try:
+            from dotenv import dotenv_values
+
+            env_vals = dotenv_values(target_env_file)
+        except Exception:
+            env_vals = {}
+        raw_rec = (env_vals.get("REPORT_EMAIL_RECIPIENTS") or "").strip()
+        if raw_rec:
+            configured_recipients = tuple(
+                item.strip() for item in raw_rec.split(",") if item.strip()
+            )
+        raw_host = _clean_single_line(env_vals.get("SMTP_HOST"), "")
+        if raw_host:
+            smtp_host = raw_host
+        raw_env_port = (env_vals.get("SMTP_PORT") or "").strip()
+        if raw_env_port:
+            try:
+                smtp_port = max(1, min(65535, int(raw_env_port)))
+            except ValueError:
+                pass
+        if "SMTP_USERNAME" in env_vals and env_vals.get("SMTP_USERNAME") is not None:
+            smtp_username = _clean_single_line(env_vals.get("SMTP_USERNAME"), "")
+        if "SMTP_PASSWORD" in env_vals and env_vals.get("SMTP_PASSWORD") is not None:
+            smtp_password = str(env_vals.get("SMTP_PASSWORD") or "").strip()
+        if "SMTP_FROM" in env_vals and env_vals.get("SMTP_FROM") is not None:
+            smtp_from = _clean_single_line(env_vals.get("SMTP_FROM"), "")
+        raw_tls = (env_vals.get("SMTP_USE_TLS") or "").strip().lower()
+        if raw_tls:
+            smtp_use_tls = raw_tls != "false"
+
+    norm_host, norm_user, norm_pwd, norm_from = normalize_smtp_credentials(
+        smtp_host=smtp_host,
+        smtp_username=smtp_username,
+        smtp_password=smtp_password,
+        smtp_from=smtp_from,
+    )
+    return {
+        "configured_recipients": configured_recipients,
+        "smtp_host": norm_host,
+        "smtp_port": smtp_port,
+        "smtp_username": norm_user,
+        "smtp_password": norm_pwd,
+        "smtp_from": norm_from,
+        "smtp_use_tls": smtp_use_tls,
+    }
+
+
 async def send_failed_classes_report_email(
     *,
     settings: Any,
@@ -724,6 +858,7 @@ async def send_failed_classes_report_email(
     execution_mode_badge: str | None = None,
     audit_repo: Any = None,
     report_repo: Any = None,
+    env_file: Path | None = None,
 ) -> dict[str, Any]:
     """Validate failed-classes rows, build CSV package, and dispatch via SMTP if configured."""
     resolved_report_repo = report_repo or ReportRepository()
@@ -756,9 +891,13 @@ async def send_failed_classes_report_email(
             status_code=409,
         )
 
-    configured_recipients = getattr(
-        settings, "report_email_recipients", DEFAULT_REPORT_EMAIL_RECIPIENTS
+    isolated_quality = os.getenv("ZALO_QUALITY_ISOLATED") == "1"
+    smtp_cfg = _resolve_effective_smtp_config(
+        settings,
+        env_file=env_file,
+        isolated_quality=isolated_quality,
     )
+    configured_recipients = smtp_cfg["configured_recipients"]
     recipients = resolve_report_email_recipients(
         requested_recipients=requested_recipients,
         configured_recipients=configured_recipients,
@@ -788,16 +927,12 @@ async def send_failed_classes_report_email(
     content_payload = f"{package['subject']}\n{package['text_body']}\n{package['csv_text']}"
     content_sha256 = hashlib.sha256(content_payload.encode("utf-8")).hexdigest()
 
-    smtp_host = _clean_single_line(getattr(settings, "smtp_host", "smtp.gmail.com"), "")
-    smtp_port = int(getattr(settings, "smtp_port", 587) or 587)
-    smtp_username = _clean_single_line(getattr(settings, "smtp_username", ""), "")
-    smtp_password = str(getattr(settings, "smtp_password", "") or "").strip()
-    smtp_from = _clean_single_line(
-        getattr(settings, "smtp_from", "") or smtp_username,
-        "",
-    )
-    smtp_use_tls = bool(getattr(settings, "smtp_use_tls", True))
-    isolated_quality = os.getenv("ZALO_QUALITY_ISOLATED") == "1"
+    smtp_host = smtp_cfg["smtp_host"]
+    smtp_port = smtp_cfg["smtp_port"]
+    smtp_username = smtp_cfg["smtp_username"]
+    smtp_password = smtp_cfg["smtp_password"]
+    smtp_from = smtp_cfg["smtp_from"] or smtp_username
+    smtp_use_tls = smtp_cfg["smtp_use_tls"]
 
     smtp_ready = bool(
         smtp_host and smtp_username and smtp_password and not isolated_quality

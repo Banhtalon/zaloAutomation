@@ -2405,6 +2405,84 @@ class ApiRoutesUnitTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertTrue(observed_tls_contexts[-1].check_hostname)
 
+                # Placeholder SMTP_USERNAME fallback to SMTP_FROM + Google App Password space stripping + .env hot-reload
+                from services.report_email_service import (
+                    _resolve_effective_smtp_config,
+                    normalize_smtp_credentials,
+                )
+
+                norm_h, norm_u, norm_p, norm_f = normalize_smtp_credentials(
+                    smtp_host="smtp.gmail.com",
+                    smtp_username="email_gui_di_cua_ban@gmail.com",
+                    smtp_password="abcd efgh ijkl mnop",
+                    smtp_from="sender.real@gmail.com",
+                )
+                self.assertEqual(norm_h, "smtp.gmail.com")
+                self.assertEqual(norm_u, "sender.real@gmail.com")
+                self.assertEqual(norm_p, "abcdefghijklmnop")
+                self.assertEqual(norm_f, "sender.real@gmail.com")
+
+                _, hash_u, hash_p, _ = normalize_smtp_credentials(
+                    smtp_host="smtp.example.com",
+                    smtp_username="sender@example.com",
+                    smtp_password="abc #def",
+                    smtp_from="sender@example.com",
+                )
+                self.assertEqual(hash_u, "sender@example.com")
+                self.assertEqual(hash_p, "abc #def")
+
+                _, non_gmail_u, non_gmail_p, _ = normalize_smtp_credentials(
+                    smtp_host="smtp.example.com",
+                    smtp_username="sender@example.com",
+                    smtp_password="abcd efgh ijkl mnop",
+                    smtp_from="sender@example.com",
+                )
+                self.assertEqual(non_gmail_u, "sender@example.com")
+                self.assertEqual(non_gmail_p, "abcd efgh ijkl mnop")
+
+                _, empty_u, empty_p, empty_f = normalize_smtp_credentials(
+                    smtp_host="smtp.gmail.com",
+                    smtp_username="email_gui_di_cua_ban@gmail.com",
+                    smtp_password="xxxx xxxx xxxx xxxx",
+                    smtp_from="email_gui_di_cua_ban@gmail.com",
+                )
+                self.assertEqual(empty_u, "")
+                self.assertEqual(empty_p, "")
+                self.assertEqual(empty_f, "")
+
+                hot_env_path = Path(tmp_dir) / "hot_smtp.env"
+                hot_env_path.write_text(
+                    "REPORT_EMAIL_RECIPIENTS=quangda@mindx.net.vn,tuanpa@mindx.com.vn\n"
+                    "SMTP_HOST=smtp.gmail.com\n"
+                    "SMTP_PORT=587\n"
+                    "SMTP_USERNAME=email_gui_di_cua_ban@gmail.com\n"
+                    "SMTP_PASSWORD=qwer tyui opas dfgh\n"
+                    "SMTP_FROM=operator.real@gmail.com\n"
+                    "SMTP_USE_TLS=true\n",
+                    encoding="utf-8",
+                )
+                stale_settings = SimpleNamespace(
+                    report_email_recipients=("quangda@mindx.net.vn",),
+                    smtp_host="smtp.gmail.com",
+                    smtp_port=587,
+                    smtp_username="",
+                    smtp_password="",
+                    smtp_from="",
+                    smtp_use_tls=True,
+                )
+                hot_cfg = _resolve_effective_smtp_config(
+                    stale_settings,
+                    env_file=hot_env_path,
+                    isolated_quality=False,
+                )
+                self.assertEqual(
+                    hot_cfg["configured_recipients"],
+                    ("quangda@mindx.net.vn", "tuanpa@mindx.com.vn"),
+                )
+                self.assertEqual(hot_cfg["smtp_username"], "operator.real@gmail.com")
+                self.assertEqual(hot_cfg["smtp_from"], "operator.real@gmail.com")
+                self.assertEqual(hot_cfg["smtp_password"], "qwertyuiopasdfgh")
+
                 with (
                     patch("services.report_email_service.os.getenv", return_value="0"),
                     patch(

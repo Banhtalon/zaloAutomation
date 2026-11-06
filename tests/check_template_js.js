@@ -1777,6 +1777,7 @@ async function checkWeeklyHistoryAndCsvExport() {
   let pendingW42LiveResolver = null;
   let rejectNextEmailRequest = false;
   let forceSmtpNotConfigured = false;
+  let forceDuplicateEmailOnce = false;
   const emailPayloads = [];
   const harness = createFrontendHarness(async (url, options = {}) => {
     requestedUrls.push(url);
@@ -1786,6 +1787,19 @@ async function checkWeeklyHistoryAndCsvExport() {
       if (rejectNextEmailRequest) {
         rejectNextEmailRequest = false;
         throw new Error('network dropped after POST /api/reports/send-failed-csv-email');
+      }
+      if (forceDuplicateEmailOnce && !parsedBody.confirm_duplicate) {
+        forceDuplicateEmailOnce = false;
+        return {
+          ok: false,
+          status: 409,
+          json: async () => ({
+            detail: {
+              code: 'DUPLICATE_EMAIL_SEND',
+              message: 'Email báo cáo tuần W41/2026 vừa được gửi cách đây 12s.',
+            },
+          }),
+        };
       }
       if (Number(parsedBody.week) === 42) {
         return {
@@ -2137,6 +2151,23 @@ async function checkWeeklyHistoryAndCsvExport() {
     harness.alerts.at(-1).includes('Không thể tự động sao chép bảng báo cáo vào Clipboard') &&
       promptedDefaultText.includes('BẢNG ĐẦY ĐỦ 10 LỚP: VT-C4K-GI35'),
     'Failed clipboard copy on SMTP_NOT_CONFIGURED must warn operator and surface full report text via window.prompt',
+  );
+
+  // 3f. DUPLICATE_EMAIL_SEND prompts operator to confirm resend with confirm_duplicate=true
+  forceDuplicateEmailOnce = true;
+  let duplicateConfirmPrompt = '';
+  const origConfirm = harness.context.confirm;
+  harness.context.confirm = (msg) => {
+    duplicateConfirmPrompt = String(msg || '');
+    return true;
+  };
+  const resentCsv = await vm.runInContext('exportAndEmailFailedClassesCsv()', harness.context);
+  harness.context.confirm = origConfirm;
+  assertFrontend(
+    duplicateConfirmPrompt.includes('Bạn có muốn gửi lại email báo cáo này ngay bây giờ không?') &&
+      emailPayloads.at(-1).confirm_duplicate === true &&
+      resentCsv.includes('VT-C4K-GI35'),
+    'DUPLICATE_EMAIL_SEND must prompt operator and retry once with confirm_duplicate=true when confirmed',
   );
 
   // 4. Exporting an empty week (W40) while viewing W41 must NOT leak W41 rows into W40 CSV

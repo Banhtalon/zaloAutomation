@@ -2642,6 +2642,7 @@
 
             if (sendEmail) {
                 const defaultFailedFilename = `Bao_Cao_Lop_Loi_Tuan_W${String(period.week).padStart(2, '0')}_${period.year}.csv`;
+                const confirmDuplicate = Boolean(options && options.confirmDuplicate);
                 try {
                     const emailPayload = {
                         week: Number(period.week),
@@ -2650,6 +2651,9 @@
                     };
                     if (requestedRecipients && requestedRecipients.length > 0) {
                         emailPayload.recipients = requestedRecipients;
+                    }
+                    if (confirmDuplicate) {
+                        emailPayload.confirm_duplicate = true;
                     }
                     const emailRes = await fetch('/api/reports/send-failed-csv-email', {
                         method: 'POST',
@@ -2674,7 +2678,10 @@
                             ? emailData.recipients.join(', ')
                             : 'quangda@mindx.net.vn';
                         let clipboardFallbackWarning = '';
-                        if (emailData.delivery_status === 'SMTP_NOT_CONFIGURED') {
+                        if (
+                            emailData.delivery_status === 'SMTP_NOT_CONFIGURED'
+                            || emailData.delivery_status === 'DRY_RUN_PREVIEW'
+                        ) {
                             const copiedOk = await copyFailedEmailReportToClipboard(emailData);
                             if (!copiedOk) {
                                 clipboardFallbackWarning =
@@ -2717,6 +2724,22 @@
                     const errMsg = detail && typeof detail === 'object'
                         ? (detail.message || detail.code || 'Không thể gửi email báo cáo.')
                         : (detail || 'Không thể gửi email báo cáo.');
+                    if (errCode === 'DUPLICATE_EMAIL_SEND' && !confirmDuplicate) {
+                        const confirmFn = (typeof window !== 'undefined' && typeof window.confirm === 'function')
+                            ? window.confirm.bind(window)
+                            : (typeof confirm === 'function' ? confirm : null);
+                        if (confirmFn && confirmFn(`${errMsg}\n\nBạn có muốn gửi lại email báo cáo này ngay bây giờ không?`)) {
+                            return exportWeeklySummaryCsv({
+                                ...(options && typeof options === 'object' ? options : {}),
+                                failedOnly,
+                                sendEmail: true,
+                                downloadCsv,
+                                confirmDuplicate: true,
+                            });
+                        }
+                        alert(errMsg);
+                        return '';
+                    }
                     if (
                         detail
                         && typeof detail === 'object'

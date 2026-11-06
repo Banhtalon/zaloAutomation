@@ -21,6 +21,53 @@ def _csv_env(name: str, default: str = "") -> tuple[str, ...]:
     )
 
 
+_PLACEHOLDER_SMTP_EMAILS = frozenset(
+    {
+        "email_gui_di_cua_ban@gmail.com",
+        "your_email@gmail.com",
+        "your_smtp_username",
+        "your_smtp_from",
+        "example@gmail.com",
+    }
+)
+_PLACEHOLDER_SMTP_PASSWORDS = frozenset(
+    {
+        "xxxx_xxxx_xxxx_xxxx",
+        "xxxx xxxx xxxx xxxx",
+        "your_smtp_password",
+        "your_app_password",
+    }
+)
+
+
+def _normalize_smtp_env(
+    host: str,
+    username: str,
+    password: str,
+    sender: str,
+) -> tuple[str, str, str, str]:
+    clean_host = (host or "").strip()
+    clean_user = (username or "").strip()
+    clean_from = (sender or "").strip()
+    if clean_user.lower() in _PLACEHOLDER_SMTP_EMAILS:
+        clean_user = ""
+    if clean_from.lower() in _PLACEHOLDER_SMTP_EMAILS:
+        clean_from = ""
+    if not clean_user and clean_from and "@" in clean_from:
+        clean_user = clean_from
+    if not clean_from and clean_user:
+        clean_from = clean_user
+    clean_pwd = (password or "").strip()
+    if clean_pwd.lower() in _PLACEHOLDER_SMTP_PASSWORDS:
+        clean_pwd = ""
+    elif clean_pwd and (
+        "gmail.com" in clean_host.lower()
+        or "googlemail.com" in clean_host.lower()
+    ):
+        clean_pwd = "".join(clean_pwd.split())
+    return clean_host, clean_user, clean_pwd, clean_from
+
+
 def _auth_users_env() -> tuple[tuple[str, str, str], ...]:
     """Read only pre-hashed web users; never accept plaintext passwords."""
     raw = os.getenv("AUTH_USERS_JSON", "").strip()
@@ -182,9 +229,11 @@ class Config:
     REPORT_EMAIL_RECIPIENTS = _csv_env(
         "REPORT_EMAIL_RECIPIENTS", "quangda@mindx.net.vn"
     )
-    SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com").strip()
+    SMTP_HOST, SMTP_USERNAME, SMTP_PASSWORD, SMTP_FROM = _normalize_smtp_env(
+        os.getenv("SMTP_HOST", "smtp.gmail.com"),
+        os.getenv("SMTP_USERNAME", ""),
+        os.getenv("SMTP_PASSWORD", ""),
+        os.getenv("SMTP_FROM", ""),
+    )
     SMTP_PORT = max(1, min(65535, int(os.getenv("SMTP_PORT", 587))))
-    SMTP_USERNAME = os.getenv("SMTP_USERNAME", "").strip()
-    SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "").strip()
-    SMTP_FROM = os.getenv("SMTP_FROM", "").strip()
     SMTP_USE_TLS = os.getenv("SMTP_USE_TLS", "true").strip().lower() != "false"

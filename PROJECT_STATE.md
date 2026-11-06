@@ -1,9 +1,17 @@
 # PROJECT STATE — Zalo Automation
 
-> Snapshot hiện tại, cập nhật 2026-11-05. Source và kiểm tra runtime mới có độ
+> Snapshot hiện tại, cập nhật 2026-11-06. Source và kiểm tra runtime mới có độ
 > tin cậy cao hơn tài liệu. Không dùng file này làm quyền chạy thao tác thật.
 
 ## Trạng thái ngắn
+
+- 2026-11-06 (Sửa lỗi tự động gửi Email báo cáo lớp lỗi cho Quản lý qua SMTP Gmail — source/local, `DEC-036`, `DEC-040`):
+  - **Khắc phục lỗi xác thực SMTP Gmail (`googleform_autosubmit/config.py`, `services/report_email_service.py`, `static/js/jobs.js`)**:
+    - Tự động chuẩn hóa tài khoản gửi đi: nếu `SMTP_USERNAME` để chuỗi placeholder (`email_gui_di_cua_ban@gmail.com`) nhưng `SMTP_FROM` đã điền email thật của người gửi (`quangvt18111987@gmail.com`), hệ thống tự động fallback dùng `SMTP_FROM` làm tài khoản login SMTP.
+    - Tự động chuẩn hóa Google App Password: loại bỏ các khoảng trắng phân cách nhóm 4x4 do Google hiển thị (`abcd efgh ijkl mnop` -> `abcdefghijklmnop`), đồng thời giữ nguyên mật khẩu có khoảng trắng cho các máy chủ SMTP ngoài Gmail.
+    - Hỗ trợ nạp cấu hình SMTP nóng từ file `.env` trong `_resolve_effective_smtp_config` mà không cần khởi động lại toàn bộ tiến trình FastAPI, bảo toàn tính hermetic cho môi trường kiểm thử cô lập.
+    - Nâng cấp giao diện người dùng (`static/js/jobs.js`): khi gặp lỗi trùng lặp `DUPLICATE_EMAIL_SEND`, hiển thị hộp thoại xác nhận gửi lại với `confirm_duplicate=true`; khi gửi thành công (`SENT`), hiển thị thông báo gửi tự động và không mở tab Gmail thừa.
+  - **Bằng chứng**: Unit test mục tiêu `tests.test_api_routes_unit` (`41/41 OK`), `node tests/check_template_js.js` pass (`scripts=7 handlers=37 behavior=13`), `.\CHECK_QUALITY.ps1 -Isolated` exit `0` (`QUALITY GATE PASSED`, 663 tests, Ruff 0, Mypy 0 trên 78 source files, coverage `78.2%`), `git diff --check` exit `0`; Independent Review `gpt-6.1-sol (high)` Round 1 `NEEDS_FIX` -> Round 2 `NEEDS_FIX` -> Round 3 `VERDICT: PASS` (session `01a1b013-0ed7-7472-8247-a77458d5743f`).
 
 - 2026-11-05 (Thay đổi quy tắc tính lỗi giáo viên `DEC-041` & Nâng cấp độ nét + phóng to ảnh minh chứng Zalo — source/local, `DEC-036`, `DEC-040`, `DEC-041`):
   - **Phần 1 — Quy tắc tính lỗi giáo viên mới (`DEC-041` — `services/report_status.py`, `repositories/report_repository.py`, `static/js/jobs.js`)**:
