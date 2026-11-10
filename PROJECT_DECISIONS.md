@@ -1166,3 +1166,31 @@
   3. **Nâng cấp chụp và xem ảnh minh chứng (`services/external_gateways.py`, `services/zalo_scan_evidence.py`, `templates/partials/image_modal.html`, `static/js/modals.js`)**: Đặt `"device_scale_factor": 2` trong `_persistent_launch_options`, cắt khung hội thoại bằng `_resolve_zalo_chat_clip(page)` (có fallback an toàn về full-viewport screenshot), và trang bị bộ điều khiển phóng to tương tác `100% → 185% → 260%` trên modal xem ảnh Dashboard.
 - Consequences: Giảm báo lỗi đỏ đối với các lớp đã hoàn thành đầy đủ nghĩa vụ nộp báo cáo Zalo và nhận xét LMS nhưng chỉ cần nhắc nhở cải thiện chất lượng nội dung trên Teaching; đồng thời giúp QC đọc rõ chữ trong ảnh minh chứng Zalo trên cả ảnh cũ lẫn ảnh mới.
 - Supersedes: Cập nhật điều kiện `is_failed(row)` trong `DEC-038` mục 4 và `DEC-039` mục 3.
+
+## DEC-042 — Kiểm định nộp Sản Phẩm Cuối Khóa (SPCK) ở Buổi 12, 13, 14 trên MindX LMS; Phương án A (`0/N` = Lỗi `FAIL`, thiếu thành phần phụ = Nhắc nhở QC `NOTE`) & Quy tắc Robotics (`ROB`)
+
+- Date: 2026-11-10
+- Status: Accepted by Owner (`gpt-6.1-sol high` Round 3 `VERDICT: PASS`, session `01a1c424-8254-74a2-94a3-28b2ecaefafb`)
+- Context: Owner khảo sát trang LMS qua lớp mẫu `VT-JSB15` và yêu cầu bổ sung kiểm soát việc **Nộp sản phẩm cuối khóa (SPCK)** ở **Buổi 12, 13 và 14** với 2 quyết định nghiệp vụ đã chốt:
+  1. **Phương án A (Theo quy tắc `DEC-041` hiện hành)**: Nếu chưa nộp SPCK (`0/N` học viên đi học) thì tính là **Lỗi (`is_failed = True` — báo đỏ & đưa vào Email Quản lý / CSV)**; còn nếu đã nộp SPCK (`>0/N` học viên) nhưng thiếu số lượng học viên hoặc thiếu thành phần phụ (thiếu thông tin học viên, thiếu ảnh thumbnail/ảnh chụp, thiếu file đính kèm, nhận xét sơ sài, thiếu link YouTube/Slide ở Buổi 14) thì tính là **Nhắc nhở QC (`NOTE`, `is_failed = False`)** và ghi tự động đầy đủ lên cột **`Mô tả vấn đề (TE/TF/QC)`** trên trang Teaching.
+  2. **Quy tắc "File đính kèm (`attachmentUrls`)" với khối Robotics (`ROB`)**: Các lớp Robot chỉ cần ảnh và nhận xét, không bắt lỗi file đính kèm, nhưng vẫn có **nhắc nhở bên QC (`NOTE`)** ghi lên cột `Mô tả vấn đề (TE/TF/QC)`.
+- Decision:
+  1. **Truy vấn `findAllStudentWorks` & khử PII học viên ngay trong trình duyệt (`services/lms_quality_service.py`)**:
+     - Trong `fetch_lms_class_slots_via_page`, bổ sung trường `id` của lớp và `id` của từng học viên trong `students`; với các lớp có buổi học `index ∈ {11, 12, 13}` (Buổi 12, 13, 14), gọi batch GraphQL `findAllStudentWorks(filter: { classId_in: [...] })` (kèm fallback theo từng `classId` nếu filter `_in` không được hỗ trợ).
+     - Trước khi dữ liệu rời trình duyệt về Python: đối chiếu tên học viên (`fullName` hoặc cụm 2 từ tên đệm + tên chính không dấu) với `work.title` để gán cờ boolean `hasStudentInfoInTitle`, sau đó thay thế mọi xuất hiện của tên học viên trong `title`/`description`/`comment` bằng `[HS]` và ẩn danh hóa `studentId` thành `stu_1`, `stu_2`, ... (bảo đảm 100% không lộ PII học viên vào Python, SQLite hay log).
+  2. **Tiêu chí kiểm định SPCK theo từng học viên đi học (`ATTENDED` / `LATE_ARRIVED`) ở Buổi 12, 13, 14 (`evaluate_lms_spck_quality`)**:
+     - **Mức `FAIL` (`ISSUE_CODE_LMS_SPCK_MISSING = "LMS_SPCK_MISSING"`, `is_failed = True`)**: Khi `attended_count > 0` và `submitted_count == 0` $\rightarrow$ `[LMS] Chưa nộp SPCK ({attended}/{attended} HS)`, tô đỏ trên Dashboard, cập nhật `Tình trạng đánh giá: ❌ Chưa nộp SPCK trên LMS` (khi Zalo và nhận xét LMS đã hoàn tất), đưa vào Email Quản lý / CSV và ghi tự động lên Teaching.
+     - **Mức `NOTE` (`ISSUE_CODE_LMS_SPCK_NOTE = "LMS_SPCK_NOTE"`, `is_failed = False`)** khi `submitted_count > 0`:
+       - Nộp thiếu học viên (`0 < submitted_count < attended_count`): `[LMS] Thiếu nộp SPCK ({missing}/{attended} HS)`
+       - Thiếu thông tin học viên trong tiêu đề (`title`): `[LMS] SPCK thiếu thông tin học viên ({count}/{submitted} HS)`
+       - Thiếu ảnh thumbnail hoặc ảnh chụp sản phẩm (`thumbnail` + `imageUrl`): `[LMS] SPCK thiếu ảnh thumbnail/ảnh chụp ({count}/{submitted} HS)`
+       - Thiếu file đính kèm (`attachmentUrls`, áp dụng mức `NOTE` cho cả Coding lẫn Robotics theo Quyết định 2): `[LMS] SPCK thiếu file đính kèm ({count}/{submitted} HS)`
+       - Chưa có nhận xét sản phẩm (`comment` rỗng): `[LMS] SPCK chưa có nhận xét ({count}/{submitted} HS)`
+       - Nhận xét sản phẩm sơ sài/chỉ chấm dấu (`_is_substantive_spck_comment`: yêu cầu $\ge 12$ từ, $\ge 6$ từ khác nhau, $\ge 50$ ký tự, $\ge 2$ mệnh đề/câu và $\ge 2$ từ khóa chuyên môn/đánh giá sản phẩm): `[LMS] Nhận xét SPCK sơ sài ({count}/{submitted} HS)`
+       - **Riêng Buổi 14 bắt buộc thêm 2 mục** (Buổi 12 và 13 không bắt buộc):
+         - Link YouTube (`videoUrls` / `relatedUrls` / `attachmentUrls` khớp `youtube.com/watch?v=...`, `shorts/`, `embed/`, `live/`, `playlist?list=` hoặc `youtu.be/<id>`): `[LMS] SPCK Buổi 14 thiếu link YouTube ({count}/{submitted} HS)`
+         - Link hoặc File Slide thuyết trình (`relatedUrls` / `attachmentUrls` khớp `canva.com`, `docs.google.com/presentation`, `slideshare.net`, `prezi.com`, `pitch.com`, `gamma.app`, `onedrive`, hoặc đuôi `.pptx`/`.ppt`/`.pdf`/`.key`/`.odp`, hoặc chứa từ khóa `slide`/`thuyết trình`/`presentation`): `[LMS] SPCK Buổi 14 thiếu link/file Slide thuyết trình ({count}/{submitted} HS)`
+  3. **Mở khóa kiểm định & ghi chú QC trên Teaching cho Buổi 14 (`services/lms_quality_service.py`, `services/zalo_bcnb_service.py`, `repositories/report_repository.py`, `static/js/jobs.js`)**:
+     - Giữ nguyên miễn trừ báo cáo Zalo cho Buổi 14 (`CATEGORY_EXEMPT`), nhưng cho phép `inspect_and_attach_quality_issues` và `_maybe_update_row_checker_note` đánh giá LMS SPCK và đồng bộ cột `Mô tả vấn đề (TE/TF/QC)` trên Teaching cho cả Buổi 14.
+- Consequences: Tự động kiểm soát chặt chẽ nghĩa vụ nộp SPCK ở Buổi 12, 13, 14 theo đúng chuẩn học vụ MindX; phân biệt chính xác lỗi chưa nộp (`0/N` $\rightarrow$ báo đỏ & gửi Email Quản lý) với nhắc nhở hoàn thiện thành phần phụ (`NOTE` $\rightarrow$ ghi tự động lên Teaching cho TE/TF/QC), đồng thời bảo vệ tuyệt đối PII học viên.
+- Supersedes: Mở rộng `DEC-038` và `DEC-041` với ngoại lệ lỗi `LMS_SPCK_MISSING` (`0/N` học viên nộp SPCK ở Buổi 12, 13, 14).

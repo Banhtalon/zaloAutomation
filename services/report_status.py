@@ -113,6 +113,8 @@ SEVERITY_FAIL = "FAIL"
 SEVERITY_NOTE = "NOTE"
 
 ISSUE_CODE_LMS_MANUAL_CHECK = "LMS_MANUAL_CHECK"
+ISSUE_CODE_LMS_SPCK_MISSING = "LMS_SPCK_MISSING"
+ISSUE_CODE_LMS_SPCK_NOTE = "LMS_SPCK_NOTE"
 ISSUE_CODE_ZALO_MISSING_OR_WRONG_DATE_SAME_DAY = (
     "ZALO_MISSING_OR_WRONG_DATE_SAME_DAY"
 )
@@ -125,6 +127,7 @@ ISSUE_CODE_LEGACY_UNCLASSIFIED_FAIL = "LEGACY_UNCLASSIFIED_FAIL"
 NOTE_ISSUE_CODES = frozenset(
     {
         ISSUE_CODE_LMS_MANUAL_CHECK,
+        ISSUE_CODE_LMS_SPCK_NOTE,
         ISSUE_CODE_ZALO_MISSING_OR_WRONG_DATE_SAME_DAY,
         ISSUE_CODE_ZALO_REPORT_NO_DATE,
         ISSUE_CODE_ZALO_REPORT_WRONG_DATE,
@@ -142,6 +145,14 @@ _PREFIXED_ISSUE_RE = re.compile(
 )
 _LEGACY_D4_MANUAL_CHECK_RE = re.compile(
     r"^\[LMS\].*cần\s+kiểm\s+tra\s+thủ\s+công\.?$",
+    flags=re.IGNORECASE,
+)
+_LMS_SPCK_MISSING_RE = re.compile(
+    r"^\[LMS\]\s*Chưa\s+nộp\s+SPCK\b",
+    flags=re.IGNORECASE,
+)
+_LMS_SPCK_NOTE_RE = re.compile(
+    r"^\[LMS\]\s*(?:Thiếu\s+nộp\s+SPCK\b|SPCK\b|(?:Nhận|Nhan)\s+x[eé]t\s+SPCK\b)",
     flags=re.IGNORECASE,
 )
 _D2_NO_DATE_RE = re.compile(
@@ -379,6 +390,18 @@ def _adapt_legacy_issue(issue: Any) -> dict[str, str]:
     if _LEGACY_D4_MANUAL_CHECK_RE.match(text):
         return {
             "code": ISSUE_CODE_LMS_MANUAL_CHECK,
+            "severity": SEVERITY_NOTE,
+            "text": text,
+        }
+    if _LMS_SPCK_MISSING_RE.match(text):
+        return {
+            "code": ISSUE_CODE_LMS_SPCK_MISSING,
+            "severity": SEVERITY_FAIL,
+            "text": text,
+        }
+    if _LMS_SPCK_NOTE_RE.match(text):
+        return {
+            "code": ISSUE_CODE_LMS_SPCK_NOTE,
             "severity": SEVERITY_NOTE,
             "text": text,
         }
@@ -662,15 +685,50 @@ def _row_issue_severities(row: Mapping[str, Any]) -> tuple[bool, bool]:
     return has_fail, has_any
 
 
-def is_failed(row: Any) -> bool:
-    """Return True only when Zalo report is missing/unverified or LMS comment is not completed.
+def has_spck_missing_fail(row: Any) -> bool:
+    """Return True when a row has a 0/N missing SPCK submission fault (``LMS_SPCK_MISSING``)."""
+    if not isinstance(row, Mapping):
+        return False
+    raw_st = row.get("scan_target")
+    st: Mapping[str, Any] = raw_st if isinstance(raw_st, Mapping) else {}
+    for source in (row, st):
+        for list_key in ("lms_quality_issues", "quality_issues"):
+            items = source.get(list_key)
+            if isinstance(items, (list, tuple)):
+                for item in items:
+                    if issue_code(item) == ISSUE_CODE_LMS_SPCK_MISSING:
+                        return True
+                    txt = issue_text(item)
+                    if txt and _LMS_SPCK_MISSING_RE.match(txt):
+                        return True
+    for text_val in (
+        row.get("issue_description"),
+        row.get("qc_issue_note"),
+        st.get("qc_issue_note"),
+    ):
+        raw_str = " ".join(str(text_val or "").split()).strip()
+        if not raw_str:
+            continue
+        if re.search(
+            r"(?:^|[;|\[])\s*(?:Auto\s+QC:\s*)?(?:\[(?:FAIL|NOTE)\s*:\s*[A-Z0-9_]+\]\s*)?\[LMS\]\s*Chưa\s+nộp\s+SPCK\b",
+            raw_str,
+            flags=re.IGNORECASE,
+        ):
+            return True
+    return False
 
-    Per Owner rule update:
-    - Only missing/unverified Zalo report (``MISSING``, ``REVIEW``) or uncompleted LMS comment
-      (``lms_status`` starting with ``❌``/``⚠️`` or ``nx_lms_checked is False``) counts as a teacher error.
+
+def is_failed(row: Any) -> bool:
+    """Return True only when Zalo report is missing/unverified, LMS comment is not completed, or SPCK is 0/N unsubmitted.
+
+    Per Owner rule update (DEC-041 & DEC-042):
+    - Missing/unverified Zalo report (``MISSING``, ``REVIEW``), uncompleted LMS comment
+      (``lms_status`` starting with ``❌``/``⚠️`` or ``nx_lms_checked is False``), or 0/N SPCK
+      submission in sessions 12, 13, 14 (``LMS_SPCK_MISSING``) counts as a teacher error.
     - ``LATE`` (🟡 nộp trễ), ``DONE``, ``EXEMPT``, and ``NOT_SCANNED`` are not Zalo errors.
-    - Content quality violations (``[LMS] ...``, ``[Zalo] ...``) are reminders (``NOTE``) written to
-      Teaching's ``Mô tả vấn đề (TE/TF/QC)`` column and do NOT mark the row as failed.
+    - Content quality violations and partial SPCK sub-component issues (``LMS_SPCK_NOTE``) are
+      reminders (``NOTE``) written to Teaching's ``Mô tả vấn đề (TE/TF/QC)`` column and do NOT mark
+      the row as failed.
     """
     if not isinstance(row, Mapping):
         return False
@@ -691,7 +749,8 @@ def is_failed(row: Any) -> bool:
         lms_status = "❌ Chưa nộp LMS"
 
     lms_failed = lms_status.startswith(("❌", "⚠️"))
-    return zalo_failed or lms_failed
+    spck_failed = has_spck_missing_fail(row)
+    return zalo_failed or lms_failed or spck_failed
 
 
 def validate_two_week_plan(
@@ -1041,6 +1100,8 @@ __all__ = [
     "ISSUE_CODE_LEGACY_UNCLASSIFIED_FAIL",
     "ISSUE_CODE_LMS_MANUAL_CHECK",
     "ISSUE_CODE_LMS_QUALITY_FAIL",
+    "ISSUE_CODE_LMS_SPCK_MISSING",
+    "ISSUE_CODE_LMS_SPCK_NOTE",
     "ISSUE_CODE_ZALO_CONTENT_FAIL",
     "ISSUE_CODE_ZALO_REPORT_NO_DATE",
     "ISSUE_CODE_ZALO_REPORT_WRONG_DATE",
@@ -1066,6 +1127,7 @@ __all__ = [
     "VERIFIED_EVIDENCE_STATES",
     "categorize_row",
     "coerce_structured_issue",
+    "has_spck_missing_fail",
     "identity_tokens",
     "is_failed",
     "is_lesson_14",

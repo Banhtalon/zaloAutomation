@@ -19,6 +19,7 @@ from services.report_status import (
     LESSON_14_EXEMPTION,
     LESSON_14_STATUS,
     categorize_row,
+    has_spck_missing_fail,
     is_failed,
     is_lesson_14,
     issue_text,
@@ -526,6 +527,8 @@ def _resolve_row_evaluation_status(
         or ("Chờ tích BCNB" in lms_status)
         or (lms_status in {"", "Chưa quét LMS"} and bool(nx_lms_checked))
     )
+    if row is not None and has_spck_missing_fail(row) and zalo_done and lms_done:
+        return "❌ Chưa nộp SPCK trên LMS"
     if lms_status.startswith("⚠️") or zalo_review:
         if zalo_done and lms_status.startswith("⚠️"):
             return "⚠️ Đã nhận xét Zalo, LMS cần kiểm tra"

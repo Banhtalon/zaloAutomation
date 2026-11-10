@@ -31,8 +31,11 @@ from logger_utils import log_message
 from services.bcnb_safety import fold_text, normalize_auto_issue_text
 from services.report_status import (
     ISSUE_CODE_LMS_MANUAL_CHECK,
+    ISSUE_CODE_LMS_SPCK_MISSING,
+    ISSUE_CODE_LMS_SPCK_NOTE,
     ISSUE_CODE_ZALO_REPORT_NO_DATE,
     ISSUE_CODE_ZALO_REPORT_WRONG_DATE,
+    SEVERITY_FAIL,
     SEVERITY_NOTE,
     SUBMITTED_EVIDENCE_STATES,
     VERIFIED_EVIDENCE_STATES,
@@ -51,6 +54,10 @@ MAX_LMS_SLOTS_PER_CLASS = 20
 MAX_LMS_STUDENTS_PER_SLOT = 50
 MIN_SUBSTANTIVE_SUMMARY_CHARS = 15
 MIN_REGULAR_COMMENT_CHARS = 110
+MIN_SPCK_COMMENT_CHARS = 50
+MIN_SPCK_COMMENT_WORDS = 12
+SPCK_REQUIRED_LESSONS = frozenset({12, 13, 14})
+SPCK_SLIDE_YOUTUBE_LESSONS = frozenset({14})
 LMS_GRAPHQL_ENDPOINT = "https://lms-api.mindx.edu.vn/"
 LMS_ALLOWED_HOSTNAME = "lms.mindx.edu.vn"
 LMS_ALLOWED_LOGIN_HOSTNAMES = frozenset(
@@ -630,6 +637,663 @@ def evaluate_lms_student_comments(
     }
 
 
+SPCK_TITLE_PLACEHOLDER_PATTERNS = (
+    r"^spck(?:\s*(?:buoi|b|lesson|slot)?\s*\d+)?$",
+    r"^san\s+pham(?:\s+cuoi\s+khoa)?(?:\s*(?:buoi|b|lesson|slot)?\s*\d+)?$",
+    r"^cuoi\s+khoa(?:\s*(?:buoi|b|lesson|slot)?\s*\d+)?$",
+    r"^project(?:\s+cuoi\s+khoa|\s+final)?(?:\s*\d+)?$",
+    r"^final(?:\s+project)?(?:\s*\d+)?$",
+    r"^bai\s+(?:nop|tap|thi|kiem\s+tra)(?:\s+cuoi\s+khoa)?(?:\s*\d+)?$",
+    r"^nop\s+(?:bai|spck|san\s+pham)(?:\s*\d+)?$",
+    r"^(?:b|bai|buoi|lesson|session|slot)\s*(?:so\s*)?\d+$",
+    r"^test(?:\s*\d+)?$",
+    r"^demo(?:\s*\d+)?$",
+    r"^untitled$",
+    r"^n/?a$",
+)
+
+SPCK_COMMENT_PLACEHOLDER_PATTERNS = (
+    r"^(?:tot|rat\s+tot|kha|ok|okay|good|great|nice|well\s+done|excellent|pass|"
+    r"dat|hoan\s+thanh|da\s+nop|da\s+cham|cham\s+bai|da\s+kiem\s+tra|n/?a|done|"
+    r"yes|no|10|10/10|100|100%|a\+?)[\s.!?,;:]*$",
+)
+
+SPCK_COMMENT_DOMAIN_SIGNALS = (
+    "san pham",
+    "du an",
+    "project",
+    "spck",
+    "y tuong",
+    "chu de",
+    "bo cuc",
+    "giao dien",
+    "thiet ke",
+    "chuc nang",
+    "tinh nang",
+    "code",
+    "lap trinh",
+    "thuat toan",
+    "logic",
+    "ung dung",
+    "website",
+    "trang web",
+    "web",
+    "game",
+    "tro choi",
+    "nhan vat",
+    "hinh anh",
+    "am thanh",
+    "hieu ung",
+    "mau sac",
+    "tuong tac",
+    "thao tac",
+    "dieu khien",
+    "hoan thien",
+    "hoan thanh",
+    "thuyet trinh",
+    "trinh bay",
+    "slide",
+    "video",
+    "demo",
+    "robot",
+    "mo hinh",
+    "lap rap",
+    "cam bien",
+    "dong co",
+    "ket qua",
+    "diem manh",
+    "uu diem",
+    "cai thien",
+    "gop y",
+    "loi khuyen",
+    "phat trien",
+    "bo sung",
+    "sang tao",
+    "chinh chu",
+    "chi tiet",
+    "kien thuc",
+    "ky nang",
+    "thai do",
+    "van dung",
+    "ap dung",
+)
+
+_YOUTUBE_URL_RE = re.compile(
+    r"(?:https?://)?(?:[\w-]+\.)?(?:youtube\.com/(?:watch\?[^\s\"'<>]*v=|shorts/|embed/|live/|playlist\?[^\s\"'<>]*list=)|youtu\.be/[\w-]{4,})",
+    flags=re.IGNORECASE,
+)
+
+_SLIDE_URL_HOST_PATTERNS = (
+    "canva.com",
+    "canva.link",
+    "docs.google.com/presentation",
+    "slideshare.net",
+    "prezi.com",
+    "pitch.com",
+    "gamma.app",
+    "1drv.ms/p/",
+    "onedrive.live.com",
+    "slides.com",
+    "powerpoint",
+)
+
+_SLIDE_FILE_EXT_RE = re.compile(
+    r"\.(?:pptx|ppt|pdf|key|odp)(?:$|[?#])",
+    flags=re.IGNORECASE,
+)
+
+_SLIDE_NAME_KEYWORDS = (
+    "slide",
+    "thuyet trinh",
+    "thuyet-trinh",
+    "thuyet_trinh",
+    "thuyettrinh",
+    "presentation",
+    "canva",
+    "powerpoint",
+    "bai trinh bay",
+)
+
+
+def _has_spck_student_info_in_title(
+    work: Mapping[str, Any],
+    *,
+    student_full_name: str = "",
+) -> bool:
+    """Return True when StudentWork.title includes student identity/info (not empty or generic placeholder)."""
+    raw_title = _strip_html(str(work.get("title") or "")).strip()
+    if not raw_title or len(raw_title) < 3:
+        return False
+    folded_title = fold_text(raw_title).strip(" -–—:.,;!?()[]{}\"'")
+    if not folded_title:
+        return False
+    for pattern in SPCK_TITLE_PLACEHOLDER_PATTERNS:
+        if re.fullmatch(pattern, folded_title):
+            return False
+    explicit_flag = work.get("hasStudentInfoInTitle")
+    if isinstance(explicit_flag, bool):
+        return explicit_flag
+    if "[hs]" in raw_title.lower():
+        return True
+    if student_full_name:
+        folded_name = fold_text(student_full_name).strip()
+        if len(folded_name) >= 3 and folded_name in folded_title:
+            return True
+        name_tokens = [t for t in folded_name.split() if t]
+        if len(name_tokens) >= 2:
+            tail_two = " ".join(name_tokens[-2:])
+            if len(tail_two) >= 4 and tail_two in folded_title:
+                return True
+        return False
+    parts = [
+        p.strip()
+        for p in re.split(r"\s*(?:[-–—|:]|_)\s*", raw_title)
+        if p.strip()
+    ]
+    if len(parts) >= 2:
+        non_generic_parts = 0
+        for part in parts:
+            fp = fold_text(part).strip(" -–—:.,;!?()[]{}\"'")
+            if not fp:
+                continue
+            if any(re.fullmatch(pat, fp) for pat in SPCK_TITLE_PLACEHOLDER_PATTERNS):
+                continue
+            non_generic_parts += 1
+        if non_generic_parts >= 2:
+            return True
+    return False
+
+
+def _has_spck_thumbnail_and_images(work: Mapping[str, Any]) -> bool:
+    """Return True when StudentWork has both a thumbnail URL and at least 1 screenshot in imageUrl."""
+    thumb = str(work.get("thumbnail") or "").strip()
+    if len(thumb) < 5:
+        return False
+    raw_images = work.get("imageUrl")
+    if not isinstance(raw_images, Sequence) or isinstance(raw_images, (str, bytes)):
+        return False
+    valid_images = [
+        str(u).strip()
+        for u in raw_images
+        if isinstance(u, str) and len(u.strip()) >= 5
+    ]
+    return len(valid_images) >= 1
+
+
+def _has_spck_attachment_file(work: Mapping[str, Any]) -> bool:
+    """Return True when StudentWork has at least 1 attached file URL in attachmentUrls."""
+    raw_attachments = work.get("attachmentUrls")
+    if not isinstance(raw_attachments, Sequence) or isinstance(
+        raw_attachments, (str, bytes)
+    ):
+        return False
+    valid_files = [
+        str(u).strip()
+        for u in raw_attachments
+        if isinstance(u, str) and len(u.strip()) >= 5
+    ]
+    return len(valid_files) >= 1
+
+
+def _is_substantive_spck_comment(
+    raw_comment: str | None,
+    *,
+    student_full_name: str = "",
+) -> bool:
+    """Return True when a teacher's SPCK comment is substantive and product-specific (not 1-2 words or placeholder)."""
+    body = _strip_comment_header_and_student_name(
+        raw_comment,
+        student_full_name=student_full_name,
+    )
+    if not body:
+        return False
+    body_no_hs = re.sub(r"\[hs\]", " ", body, flags=re.IGNORECASE).strip()
+    folded = fold_text(body_no_hs).strip(" -–—:.,;!?()[]{}\"'")
+    if not folded or len(folded) < MIN_SPCK_COMMENT_CHARS:
+        return False
+    for pattern in SPCK_COMMENT_PLACEHOLDER_PATTERNS:
+        if re.fullmatch(pattern, folded):
+            return False
+    words = [w for w in re.findall(r"[a-z0-9]+", folded) if len(w) >= 2]
+    if len(words) < MIN_SPCK_COMMENT_WORDS or len(set(words)) < 6:
+        return False
+    if _is_valid_regular_student_comment(body) or _is_valid_checkpoint_student_comment(
+        body
+    ):
+        return True
+    clauses = [
+        seg.strip()
+        for seg in re.split(r"(?:[\n•\-*]+|[.!?;:]+(?:\s+|$))", body_no_hs)
+        if len(seg.strip()) >= 8
+    ]
+    if len(clauses) < 2:
+        return False
+    domain_hits = sum(1 for kw in SPCK_COMMENT_DOMAIN_SIGNALS if kw in folded)
+    return domain_hits >= 2
+
+
+def _has_spck_youtube_link(work: Mapping[str, Any]) -> bool:
+    """Return True when StudentWork contains a valid YouTube link in videoUrls or relatedUrls."""
+    candidates: list[str] = []
+    for list_key in ("videoUrls", "attachmentUrls"):
+        raw_list = work.get(list_key)
+        if isinstance(raw_list, Sequence) and not isinstance(raw_list, (str, bytes)):
+            for item in raw_list:
+                if isinstance(item, str) and item.strip():
+                    candidates.append(item.strip())
+    raw_related = work.get("relatedUrls")
+    if isinstance(raw_related, Sequence) and not isinstance(raw_related, (str, bytes)):
+        for rel in raw_related:
+            if isinstance(rel, Mapping):
+                u = str(rel.get("url") or "").strip()
+                if u:
+                    candidates.append(u)
+            elif isinstance(rel, str) and rel.strip():
+                candidates.append(rel.strip())
+    return any(bool(_YOUTUBE_URL_RE.search(url)) for url in candidates)
+
+
+def _has_spck_slide_link_or_file(work: Mapping[str, Any]) -> bool:
+    """Return True when StudentWork contains a presentation slide link (relatedUrls) or slide file (attachmentUrls)."""
+    raw_related = work.get("relatedUrls")
+    if isinstance(raw_related, Sequence) and not isinstance(raw_related, (str, bytes)):
+        for rel in raw_related:
+            if isinstance(rel, Mapping):
+                rel_url = str(rel.get("url") or "").strip()
+                rel_name = fold_text(str(rel.get("name") or "")).strip()
+            elif isinstance(rel, str):
+                rel_url = rel.strip()
+                rel_name = ""
+            else:
+                continue
+            if len(rel_url) < 5 or _YOUTUBE_URL_RE.search(rel_url):
+                continue
+            lower_url = rel_url.lower()
+            folded_url = fold_text(rel_url)
+            if any(host in lower_url for host in _SLIDE_URL_HOST_PATTERNS):
+                return True
+            if _SLIDE_FILE_EXT_RE.search(lower_url):
+                return True
+            if any(kw in rel_name or kw in folded_url for kw in _SLIDE_NAME_KEYWORDS):
+                return True
+
+    raw_attachments = work.get("attachmentUrls")
+    if isinstance(raw_attachments, Sequence) and not isinstance(
+        raw_attachments, (str, bytes)
+    ):
+        for att in raw_attachments:
+            if not isinstance(att, str):
+                continue
+            att_url = att.strip()
+            if len(att_url) < 5 or _YOUTUBE_URL_RE.search(att_url):
+                continue
+            lower_att = att_url.lower()
+            folded_att = fold_text(att_url)
+            if _SLIDE_FILE_EXT_RE.search(lower_att):
+                return True
+            if any(host in lower_att for host in _SLIDE_URL_HOST_PATTERNS):
+                return True
+            if any(kw in folded_att for kw in _SLIDE_NAME_KEYWORDS):
+                return True
+    return False
+
+
+def _merge_student_works(works: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Combine multiple non-deleted StudentWork entries for the same student in a single slot."""
+    if len(works) == 1:
+        return dict(works[0])
+    merged: dict[str, Any] = dict(works[0])
+    best_title = ""
+    has_info_flags: list[bool] = []
+    best_thumb = ""
+    images: list[str] = []
+    attachments: list[str] = []
+    videos: list[str] = []
+    related: list[Any] = []
+    best_comment = ""
+    for w in works:
+        flag = w.get("hasStudentInfoInTitle")
+        if isinstance(flag, bool):
+            has_info_flags.append(flag)
+        t = str(w.get("title") or "").strip()
+        if t and (
+            not best_title
+            or (flag is True and not merged.get("hasStudentInfoInTitle"))
+            or len(t) > len(best_title)
+        ):
+            best_title = t
+        th = str(w.get("thumbnail") or "").strip()
+        if len(th) >= 5 and not best_thumb:
+            best_thumb = th
+        for u in w.get("imageUrl") or []:
+            if isinstance(u, str) and u.strip() and u.strip() not in images:
+                images.append(u.strip())
+        for u in w.get("attachmentUrls") or []:
+            if isinstance(u, str) and u.strip() and u.strip() not in attachments:
+                attachments.append(u.strip())
+        for u in w.get("videoUrls") or []:
+            if isinstance(u, str) and u.strip() and u.strip() not in videos:
+                videos.append(u.strip())
+        for r in w.get("relatedUrls") or []:
+            if r not in related:
+                related.append(r)
+        c = str(w.get("comment") or "").strip()
+        if len(c) > len(best_comment):
+            best_comment = c
+    merged["title"] = best_title
+    if has_info_flags:
+        merged["hasStudentInfoInTitle"] = any(has_info_flags)
+    merged["thumbnail"] = best_thumb
+    merged["imageUrl"] = images
+    merged["attachmentUrls"] = attachments
+    merged["videoUrls"] = videos
+    merged["relatedUrls"] = related
+    merged["comment"] = best_comment
+    return merged
+
+
+def evaluate_lms_spck_quality(
+    slot_data: Mapping[str, Any] | None,
+    *,
+    class_code: str = "",
+    khoi: str = "",
+    lesson: str | int | None = "",
+) -> dict[str, Any]:
+    """Evaluate final project (SPCK) submissions on LMS for Lessons 12, 13, and 14 (DEC-042)."""
+    lesson_num = _parse_lesson_number(lesson)
+    is_robotics = _is_robotics_class(class_code, khoi)
+    empty_res: dict[str, Any] = {
+        "is_spck_lesson": lesson_num in SPCK_REQUIRED_LESSONS,
+        "is_robotics": is_robotics,
+        "attended_count": 0,
+        "submitted_count": 0,
+        "missing_submission_count": 0,
+        "missing_student_info_count": 0,
+        "missing_image_count": 0,
+        "missing_attachment_count": 0,
+        "missing_comment_count": 0,
+        "shallow_comment_count": 0,
+        "missing_youtube_count": 0,
+        "missing_slide_count": 0,
+        "issues": [],
+    }
+    if lesson_num not in SPCK_REQUIRED_LESSONS or not isinstance(slot_data, Mapping):
+        return empty_res
+
+    if bool(slot_data.get("studentWorksFetchError")):
+        return {
+            **empty_res,
+            "issues": [
+                make_structured_issue(
+                    ISSUE_CODE_LMS_MANUAL_CHECK,
+                    "[LMS] Chưa kiểm tra được dữ liệu SPCK trên LMS, cần kiểm tra thủ công",
+                )
+            ],
+        }
+
+    student_attendance = slot_data.get("studentAttendance")
+    attended_entries: list[dict[str, Any]] = []
+    if isinstance(student_attendance, list):
+        for raw_entry in student_attendance[:MAX_LMS_STUDENTS_PER_SLOT]:
+            if not isinstance(raw_entry, dict):
+                continue
+            status = str(raw_entry.get("status") or "").strip().upper()
+            if status in ATTENDED_STATUSES:
+                attended_entries.append(raw_entry)
+
+    attended_count = len(attended_entries)
+    if attended_count == 0:
+        if is_lesson_14(lesson_num) and "studentWorks" in slot_data:
+            return {
+                **empty_res,
+                "issues": [
+                    make_structured_issue(
+                        ISSUE_CODE_LMS_MANUAL_CHECK,
+                        "[LMS] Chưa có học viên điểm danh có mặt ở Buổi 14 để kiểm tra SPCK, cần kiểm tra thủ công",
+                    )
+                ],
+            }
+        return empty_res
+
+    raw_works = slot_data.get("studentWorks")
+    if raw_works is None and "studentWorks" not in slot_data:
+        return {
+            **empty_res,
+            "attended_count": attended_count,
+        }
+    if not isinstance(raw_works, Sequence) or isinstance(raw_works, (str, bytes)):
+        return {
+            **empty_res,
+            "attended_count": attended_count,
+            "issues": [
+                make_structured_issue(
+                    ISSUE_CODE_LMS_MANUAL_CHECK,
+                    "[LMS] Chưa kiểm tra được dữ liệu SPCK trên LMS, cần kiểm tra thủ công",
+                )
+            ],
+        }
+
+    active_works: list[dict[str, Any]] = []
+    for w in raw_works:
+        if not isinstance(w, Mapping):
+            continue
+        is_del = w.get("isDeleted")
+        if is_del is True or str(is_del or "").strip().lower() == "true":
+            continue
+        active_works.append(dict(w))
+
+    def _entry_student_key(entry: Mapping[str, Any]) -> str:
+        k = str(entry.get("studentKey") or entry.get("studentId") or "").strip()
+        if k:
+            return k
+        stu = entry.get("student")
+        if isinstance(stu, Mapping):
+            return str(stu.get("id") or stu.get("studentKey") or "").strip()
+        return ""
+
+    def _entry_student_name(entry: Mapping[str, Any]) -> str:
+        stu = entry.get("student")
+        if isinstance(stu, Mapping):
+            return str(stu.get("fullName") or "").strip()
+        return ""
+
+    attended_by_key: dict[str, str] = {}
+    attended_ordered_keys: list[str] = []
+    unkeyed_attended_count = 0
+    non_attended_keys: set[str] = set()
+    attendance_slice = (
+        student_attendance[:MAX_LMS_STUDENTS_PER_SLOT]
+        if isinstance(student_attendance, list)
+        else []
+    )
+    for entry in attendance_slice:
+        if not isinstance(entry, Mapping):
+            continue
+        s_key = _entry_student_key(entry)
+        status = str(entry.get("status") or "").strip().upper()
+        if status in ATTENDED_STATUSES:
+            if s_key:
+                if s_key not in attended_by_key:
+                    attended_by_key[s_key] = _entry_student_name(entry)
+                    attended_ordered_keys.append(s_key)
+            else:
+                unkeyed_attended_count += 1
+        elif s_key:
+            non_attended_keys.add(s_key)
+
+    works_by_key: dict[str, list[dict[str, Any]]] = {}
+    unknown_owner_works: list[dict[str, Any]] = []
+    for w in active_works:
+        w_key = str(w.get("studentKey") or w.get("studentId") or "").strip()
+        if w_key:
+            if w_key in attended_by_key:
+                works_by_key.setdefault(w_key, []).append(w)
+            elif w_key in non_attended_keys:
+                continue
+            else:
+                unknown_owner_works.append(w)
+        else:
+            unknown_owner_works.append(w)
+
+    if unknown_owner_works or (unkeyed_attended_count > 0 and active_works):
+        return {
+            **empty_res,
+            "attended_count": attended_count,
+            "issues": [
+                make_structured_issue(
+                    ISSUE_CODE_LMS_MANUAL_CHECK,
+                    "[LMS] Dữ liệu SPCK trên LMS có bài nộp không xác định được học viên đi học, cần kiểm tra thủ công",
+                )
+            ],
+        }
+
+    inspected_works: list[tuple[dict[str, Any], str]] = []
+    for s_key in attended_ordered_keys:
+        if s_key in works_by_key:
+            inspected_works.append(
+                (
+                    _merge_student_works(works_by_key[s_key]),
+                    attended_by_key.get(s_key, ""),
+                )
+            )
+
+    submitted_count = len(inspected_works)
+    missing_submission_count = max(0, attended_count - submitted_count)
+    issues: list[Any] = []
+
+    if submitted_count == 0:
+        issues.append(
+            make_structured_issue(
+                ISSUE_CODE_LMS_SPCK_MISSING,
+                f"[LMS] Chưa nộp SPCK ({attended_count}/{attended_count} HS)",
+                severity=SEVERITY_FAIL,
+            )
+        )
+        return {
+            **empty_res,
+            "attended_count": attended_count,
+            "submitted_count": 0,
+            "missing_submission_count": attended_count,
+            "issues": issues,
+        }
+
+    if missing_submission_count > 0:
+        issues.append(
+            make_structured_issue(
+                ISSUE_CODE_LMS_SPCK_NOTE,
+                f"[LMS] Thiếu nộp SPCK ({missing_submission_count}/{attended_count} HS)",
+                severity=SEVERITY_NOTE,
+            )
+        )
+
+    missing_student_info_count = 0
+    missing_image_count = 0
+    missing_attachment_count = 0
+    missing_comment_count = 0
+    shallow_comment_count = 0
+    missing_youtube_count = 0
+    missing_slide_count = 0
+
+    for work_item, stu_name in inspected_works:
+        if not _has_spck_student_info_in_title(work_item, student_full_name=stu_name):
+            missing_student_info_count += 1
+        if not _has_spck_thumbnail_and_images(work_item):
+            missing_image_count += 1
+        if not _has_spck_attachment_file(work_item):
+            missing_attachment_count += 1
+        raw_c = work_item.get("comment")
+        clean_c = _strip_comment_header_and_student_name(
+            raw_c if isinstance(raw_c, str) else "",
+            student_full_name=stu_name,
+        )
+        if not clean_c.strip():
+            missing_comment_count += 1
+        elif not _is_substantive_spck_comment(
+            raw_c if isinstance(raw_c, str) else "",
+            student_full_name=stu_name,
+        ):
+            shallow_comment_count += 1
+        if lesson_num in SPCK_SLIDE_YOUTUBE_LESSONS:
+            if not _has_spck_youtube_link(work_item):
+                missing_youtube_count += 1
+            if not _has_spck_slide_link_or_file(work_item):
+                missing_slide_count += 1
+
+    if missing_student_info_count > 0:
+        issues.append(
+            make_structured_issue(
+                ISSUE_CODE_LMS_SPCK_NOTE,
+                f"[LMS] SPCK thiếu thông tin học viên ({missing_student_info_count}/{submitted_count} HS)",
+                severity=SEVERITY_NOTE,
+            )
+        )
+    if missing_image_count > 0:
+        issues.append(
+            make_structured_issue(
+                ISSUE_CODE_LMS_SPCK_NOTE,
+                f"[LMS] SPCK thiếu ảnh thumbnail/ảnh chụp ({missing_image_count}/{submitted_count} HS)",
+                severity=SEVERITY_NOTE,
+            )
+        )
+    if missing_attachment_count > 0:
+        issues.append(
+            make_structured_issue(
+                ISSUE_CODE_LMS_SPCK_NOTE,
+                f"[LMS] SPCK thiếu file đính kèm ({missing_attachment_count}/{submitted_count} HS)",
+                severity=SEVERITY_NOTE,
+            )
+        )
+    if missing_comment_count > 0:
+        issues.append(
+            make_structured_issue(
+                ISSUE_CODE_LMS_SPCK_NOTE,
+                f"[LMS] SPCK chưa có nhận xét ({missing_comment_count}/{submitted_count} HS)",
+                severity=SEVERITY_NOTE,
+            )
+        )
+    if shallow_comment_count > 0:
+        issues.append(
+            make_structured_issue(
+                ISSUE_CODE_LMS_SPCK_NOTE,
+                f"[LMS] Nhận xét SPCK sơ sài ({shallow_comment_count}/{submitted_count} HS)",
+                severity=SEVERITY_NOTE,
+            )
+        )
+    if lesson_num in SPCK_SLIDE_YOUTUBE_LESSONS:
+        if missing_youtube_count > 0:
+            issues.append(
+                make_structured_issue(
+                    ISSUE_CODE_LMS_SPCK_NOTE,
+                    f"[LMS] SPCK Buổi 14 thiếu link YouTube ({missing_youtube_count}/{submitted_count} HS)",
+                    severity=SEVERITY_NOTE,
+                )
+            )
+        if missing_slide_count > 0:
+            issues.append(
+                make_structured_issue(
+                    ISSUE_CODE_LMS_SPCK_NOTE,
+                    f"[LMS] SPCK Buổi 14 thiếu link/file Slide thuyết trình ({missing_slide_count}/{submitted_count} HS)",
+                    severity=SEVERITY_NOTE,
+                )
+            )
+
+    return {
+        "is_spck_lesson": True,
+        "is_robotics": is_robotics,
+        "attended_count": attended_count,
+        "submitted_count": submitted_count,
+        "missing_submission_count": missing_submission_count,
+        "missing_student_info_count": missing_student_info_count,
+        "missing_image_count": missing_image_count,
+        "missing_attachment_count": missing_attachment_count,
+        "missing_comment_count": missing_comment_count,
+        "shallow_comment_count": shallow_comment_count,
+        "missing_youtube_count": missing_youtube_count,
+        "missing_slide_count": missing_slide_count,
+        "issues": issues,
+    }
+
+
 def evaluate_lms_slot_quality(
     slot_data: dict[str, Any] | None,
     *,
@@ -637,8 +1301,19 @@ def evaluate_lms_slot_quality(
     khoi: str = "",
     lesson: str | int | None = "",
 ) -> dict[str, Any]:
-    """Evaluate both lesson summary and student comments for one LMS slot."""
-    if is_lesson_14(lesson):
+    """Evaluate lesson summary, student comments, and SPCK (Lessons 12-14) for one LMS slot."""
+    lesson_num = _parse_lesson_number(lesson)
+    lesson_14_flag = is_lesson_14(lesson)
+    if lesson_14_flag and isinstance(slot_data, dict) and not any(
+        slot_data.get(flag)
+        for flag in (
+            "overflow_class_limit",
+            "duplicate_class",
+            "missing_class",
+            "fetch_error",
+            "studentWorksFetchError",
+        )
+    ) and "studentWorks" not in slot_data:
         return {
             "is_exempt": True,
             "is_checkpoint": False,
@@ -650,9 +1325,9 @@ def evaluate_lms_slot_quality(
         }
     if not isinstance(slot_data, dict):
         return {
-            "is_exempt": False,
-            "is_checkpoint": is_checkpoint_session(class_code, khoi, lesson),
-            "has_valid_summary": False,
+            "is_exempt": lesson_14_flag,
+            "is_checkpoint": False if lesson_14_flag else is_checkpoint_session(class_code, khoi, lesson),
+            "has_valid_summary": lesson_14_flag,
             "summary_clean": "",
             "attended_count": 0,
             "failed_comment_count": 0,
@@ -666,9 +1341,9 @@ def evaluate_lms_slot_quality(
 
     if bool(slot_data.get("overflow_class_limit")):
         return {
-            "is_exempt": False,
-            "is_checkpoint": is_checkpoint_session(class_code, khoi, lesson),
-            "has_valid_summary": False,
+            "is_exempt": lesson_14_flag,
+            "is_checkpoint": False if lesson_14_flag else is_checkpoint_session(class_code, khoi, lesson),
+            "has_valid_summary": lesson_14_flag,
             "summary_clean": "",
             "attended_count": 0,
             "failed_comment_count": 0,
@@ -681,9 +1356,9 @@ def evaluate_lms_slot_quality(
         }
     if bool(slot_data.get("duplicate_class")):
         return {
-            "is_exempt": False,
-            "is_checkpoint": is_checkpoint_session(class_code, khoi, lesson),
-            "has_valid_summary": False,
+            "is_exempt": lesson_14_flag,
+            "is_checkpoint": False if lesson_14_flag else is_checkpoint_session(class_code, khoi, lesson),
+            "has_valid_summary": lesson_14_flag,
             "summary_clean": "",
             "attended_count": 0,
             "failed_comment_count": 0,
@@ -696,9 +1371,9 @@ def evaluate_lms_slot_quality(
         }
     if bool(slot_data.get("missing_class")):
         return {
-            "is_exempt": False,
-            "is_checkpoint": is_checkpoint_session(class_code, khoi, lesson),
-            "has_valid_summary": False,
+            "is_exempt": lesson_14_flag,
+            "is_checkpoint": False if lesson_14_flag else is_checkpoint_session(class_code, khoi, lesson),
+            "has_valid_summary": lesson_14_flag,
             "summary_clean": "",
             "attended_count": 0,
             "failed_comment_count": 0,
@@ -711,9 +1386,9 @@ def evaluate_lms_slot_quality(
         }
     if bool(slot_data.get("fetch_error")):
         return {
-            "is_exempt": False,
-            "is_checkpoint": is_checkpoint_session(class_code, khoi, lesson),
-            "has_valid_summary": False,
+            "is_exempt": lesson_14_flag,
+            "is_checkpoint": False if lesson_14_flag else is_checkpoint_session(class_code, khoi, lesson),
+            "has_valid_summary": lesson_14_flag,
             "summary_clean": "",
             "attended_count": 0,
             "failed_comment_count": 0,
@@ -723,6 +1398,33 @@ def evaluate_lms_slot_quality(
                     "[LMS] Không tải được đầy đủ dữ liệu buổi học từ LMS, cần kiểm tra thủ công",
                 )
             ],
+        }
+    if lesson_14_flag:
+        spck_eval_14 = evaluate_lms_spck_quality(
+            slot_data,
+            class_code=class_code,
+            khoi=khoi,
+            lesson=14,
+        )
+        l14_issues = list(spck_eval_14.get("issues") or [])
+        if bool(slot_data.get("truncated")) and not any(
+            "vượt giới hạn" in issue_text(item) for item in l14_issues
+        ):
+            l14_issues.append(
+                make_structured_issue(
+                    ISSUE_CODE_LMS_MANUAL_CHECK,
+                    "[LMS] Dữ liệu buổi học trên LMS vượt giới hạn kiểm tra, cần kiểm tra thủ công",
+                )
+            )
+        return {
+            "is_exempt": True,
+            "is_checkpoint": False,
+            "has_valid_summary": True,
+            "summary_clean": "",
+            "attended_count": int(spck_eval_14.get("attended_count") or 0),
+            "failed_comment_count": 0,
+            "spck_submitted_count": int(spck_eval_14.get("submitted_count") or 0),
+            "issues": l14_issues,
         }
     checkpoint = is_checkpoint_session(
         class_code,
@@ -740,6 +1442,16 @@ def evaluate_lms_slot_quality(
     if summary_eval["issue"]:
         issues.append(summary_eval["issue"])
     issues.extend(comments_eval["issues"])
+    if lesson_num in SPCK_REQUIRED_LESSONS and (
+        "studentWorks" in slot_data or "studentWorksFetchError" in slot_data
+    ):
+        spck_eval = evaluate_lms_spck_quality(
+            slot_data,
+            class_code=class_code,
+            khoi=khoi,
+            lesson=lesson_num,
+        )
+        issues.extend(spck_eval["issues"])
     if bool(slot_data.get("truncated")) and not any(
         "vượt giới hạn" in issue_text(item) for item in issues
     ):
@@ -1333,6 +2045,7 @@ async def fetch_lms_class_slots_via_page(
                     }
                 ) {
                     data {
+                        id
                         name
                         slots {
                             _id
@@ -1343,6 +2056,7 @@ async def fetch_lms_class_slots_via_page(
                             summary
                             studentAttendance {
                                 student {
+                                    id
                                     fullName
                                 }
                                 status
@@ -1353,11 +2067,158 @@ async def fetch_lms_class_slots_via_page(
                 }
             }
         `;
+        const studentWorksQuery = `
+            query findAllStudentWorks($classIds: [ID], $pageIndex: Int, $itemsPerPage: Int) {
+                findAllStudentWorks(
+                    payload: {
+                        classId_in: $classIds,
+                        pageIndex: $pageIndex,
+                        itemsPerPage: $itemsPerPage
+                    }
+                ) {
+                    data {
+                        id
+                        title
+                        classId
+                        classSessionId
+                        classSessionNumber
+                        studentId
+                        thumbnail
+                        imageUrl
+                        attachmentUrls
+                        videoUrls
+                        relatedUrls {
+                            name
+                            url
+                        }
+                        comment
+                        isDeleted
+                    }
+                }
+            }
+        `;
+        const foldViChars = (str) => String(str || '')
+            .normalize('NFC')
+            .normalize('NFD')
+            .replace(/[\\u0300-\\u036f]/g, '')
+            .replace(/[đĐ]/g, 'd')
+            .toLowerCase();
+        const foldVi = (str) => foldViChars(str)
+            .replace(/\\s+/g, ' ')
+            .trim();
+        const replaceCaseInsensitive = (sourceText, needle, replacement) => {
+            const src = String(sourceText || '').normalize('NFC');
+            const ndlTokens = foldVi(needle).split(' ').filter(Boolean);
+            if (!src || ndlTokens.length === 0) return src;
+            const foldedSrc = foldViChars(src);
+            if (foldedSrc.length !== src.length) return src;
+            const firstTok = ndlTokens[0];
+            if (ndlTokens.length === 1 && firstTok.length < 3) return src;
+            let result = '';
+            let cursor = 0;
+            while (cursor < src.length) {
+                const hit = foldedSrc.indexOf(firstTok, cursor);
+                if (hit === -1) {
+                    result += src.slice(cursor);
+                    break;
+                }
+                let pos = hit + firstTok.length;
+                let matchedAll = true;
+                for (let tIdx = 1; tIdx < ndlTokens.length; tIdx++) {
+                    let wsEnd = pos;
+                    while (wsEnd < foldedSrc.length && /\\s/.test(foldedSrc[wsEnd])) {
+                        wsEnd += 1;
+                    }
+                    const nextTok = ndlTokens[tIdx];
+                    if (wsEnd === pos || !foldedSrc.startsWith(nextTok, wsEnd)) {
+                        matchedAll = false;
+                        break;
+                    }
+                    pos = wsEnd + nextTok.length;
+                }
+                if (matchedAll) {
+                    result += src.slice(cursor, hit) + replacement;
+                    cursor = pos;
+                } else {
+                    result += src.slice(cursor, hit + 1);
+                    cursor = hit + 1;
+                }
+            }
+            return result;
+        };
+        const scrubStudentNames = (rawText, namesList) => {
+            let text = String(rawText || '');
+            if (!text) return '';
+            for (const fullName of namesList) {
+                if (!fullName || fullName.length < 3) continue;
+                text = replaceCaseInsensitive(text, fullName, '[HS]');
+                const tokens = fullName.split(/\\s+/).filter(Boolean);
+                if (tokens.length >= 2) {
+                    const tailTwo = tokens.slice(-2).join(' ');
+                    if (tailTwo.length >= 4) {
+                        text = replaceCaseInsensitive(text, tailTwo, '[HS]');
+                    }
+                }
+            }
+            return text;
+        };
+        const checkTitleHasStudentName = (rawTitle, ownerName, namesList) => {
+            const foldedTitle = foldVi(rawTitle);
+            if (!foldedTitle) return false;
+            if (foldedTitle.includes('[hs]')) return true;
+            const candidates = ownerName ? [ownerName, ...namesList] : namesList;
+            for (const fullName of candidates) {
+                const foldedName = foldVi(fullName);
+                if (foldedName.length >= 3 && foldedTitle.includes(foldedName)) {
+                    return true;
+                }
+                const tokens = foldedName.split(' ').filter(Boolean);
+                if (tokens.length >= 2) {
+                    const tailTwo = tokens.slice(-2).join(' ');
+                    if (tailTwo.length >= 4 && foldedTitle.includes(tailTwo)) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        };
         const bearerHeader = token.startsWith('Bearer ') ? token : `Bearer ${token}`;
         const rawTokenHeader = token.replace(/^Bearer\\s+/i, '');
-        const formatItemSlots = (item) => {
+        const matchedClassMeta = {};
+        const formatItemSlots = (item, codeKey) => {
             if (!item || !Array.isArray(item.slots) || item.slots.length === 0) {
                 return Array.from({ length: maxSlots }, () => ({ fetch_error: true }));
+            }
+            const studentIdToKey = new Map();
+            const studentIdToName = new Map();
+            const studentNamesSet = new Set();
+            let studentCounter = 0;
+            for (const s of item.slots.slice(0, maxSlots)) {
+                const rawAtt = Array.isArray(s && s.studentAttendance) ? s.studentAttendance : [];
+                for (const att of rawAtt.slice(0, maxStudents)) {
+                    const stuObj = (att && att.student && typeof att.student === 'object') ? att.student : null;
+                    const stuId = stuObj && stuObj.id != null ? String(stuObj.id).trim() : '';
+                    const fullName = stuObj && typeof stuObj.fullName === 'string' ? stuObj.fullName.trim() : '';
+                    if (fullName && fullName.length >= 3) {
+                        studentNamesSet.add(fullName);
+                    }
+                    if (stuId && !studentIdToKey.has(stuId)) {
+                        studentCounter += 1;
+                        studentIdToKey.set(stuId, `stu_${studentCounter}`);
+                    }
+                    if (stuId && fullName && !studentIdToName.has(stuId)) {
+                        studentIdToName.set(stuId, fullName);
+                    }
+                }
+            }
+            const classIdStr = (item && item.id != null) ? String(item.id).trim().slice(0, 64) : '';
+            if (codeKey) {
+                matchedClassMeta[codeKey] = {
+                    classId: classIdStr,
+                    studentIdToKey,
+                    studentIdToName,
+                    studentNames: Array.from(studentNamesSet)
+                };
             }
             const slotsTruncated = item.slots.length > maxSlots;
             return item.slots.slice(0, maxSlots).map((s) => {
@@ -1376,14 +2237,18 @@ async def fetch_lms_class_slots_via_page(
                     truncated: Boolean(slotsTruncated || attTruncated),
                     studentAttendance: Array.isArray(rawAtt)
                         ? rawAtt.slice(0, maxStudents).map((att) => {
-                            const fullName = String((att && att.student && att.student.fullName) || '').trim();
+                            const stuObj = (att && att.student && typeof att.student === 'object') ? att.student : null;
+                            const stuId = stuObj && stuObj.id != null ? String(stuObj.id).trim() : '';
+                            const stuKey = stuId ? studentIdToKey.get(stuId) : '';
+                            const fullName = String((stuObj && stuObj.fullName) || '').trim();
                             let cleanComment = (att && typeof att.comment === 'string') ? att.comment.slice(0, 15000) : '';
                             if (fullName && fullName.length >= 3 && cleanComment) {
                                 cleanComment = cleanComment.split(fullName).join('');
                             }
                             return {
                                 status: String((att && att.status) || ''),
-                                comment: cleanComment
+                                comment: cleanComment,
+                                ...(stuKey ? { studentKey: stuKey } : {})
                             };
                         })
                         : null
@@ -1469,7 +2334,7 @@ async def fetch_lms_class_slots_via_page(
                             duplicate_class: true
                         }));
                     } else if (matched.length === 1) {
-                        out[code] = formatItemSlots(matched[0]);
+                        out[code] = formatItemSlots(matched[0], code);
                     }
                 }
             }
@@ -1556,7 +2421,7 @@ async def fetch_lms_class_slots_via_page(
                         }));
                         return;
                     }
-                    out[code] = formatItemSlots(matched[0]);
+                    out[code] = formatItemSlots(matched[0], code);
                     return;
                 } catch (_) {
                     if (attempt === 0) {
@@ -1587,6 +2452,176 @@ async def fetch_lms_class_slots_via_page(
                 await Promise.all(workers);
             }
         }
+
+        // Tier 3: Fetch findAllStudentWorks for classes that have SPCK slots (index 11, 12, 13 -> Buổi 12, 13, 14)
+        const spckCodes = [];
+        const spckClassIds = [];
+        const classIdToCodes = new Map();
+        for (const code of classCodes) {
+            const meta = matchedClassMeta[code];
+            const slotsArr = Array.isArray(out[code]) ? out[code] : [];
+            const hasSpckSlot = slotsArr.some((s) => s && (s.index === 11 || s.index === 12 || s.index === 13));
+            if (!hasSpckSlot || !meta) continue;
+            if (!meta.classId) {
+                for (const s of slotsArr) {
+                    if (s && (s.index === 11 || s.index === 12 || s.index === 13)) {
+                        s.studentWorksFetchError = true;
+                    }
+                }
+                continue;
+            }
+            spckCodes.push(code);
+            if (!classIdToCodes.has(meta.classId)) {
+                classIdToCodes.set(meta.classId, []);
+                spckClassIds.push(meta.classId);
+            }
+            classIdToCodes.get(meta.classId).push(code);
+        }
+
+        if (spckClassIds.length > 0 && !authFailed) {
+            const allWorks = [];
+            let worksFetchOk = false;
+            for (let pageIdx = 0; pageIdx < 5; pageIdx++) {
+                const ctrl = new AbortController();
+                const timer = setTimeout(() => ctrl.abort(), Math.max(timeoutMs || 12000, 15000));
+                try {
+                    const resp = await fetch(endpoint, {
+                        method: 'POST',
+                        headers: {
+                            'content-type': 'application/json',
+                            'authorization': bearerHeader,
+                            'token': rawTokenHeader
+                        },
+                        body: JSON.stringify({
+                            operationName: 'findAllStudentWorks',
+                            variables: {
+                                classIds: spckClassIds,
+                                pageIndex: pageIdx,
+                                itemsPerPage: 200
+                            },
+                            query: studentWorksQuery
+                        }),
+                        signal: ctrl.signal
+                    });
+                    if (!resp.ok) {
+                        if (isAuthErrorPayload(resp.status, null)) {
+                            authFailed = true;
+                        }
+                        worksFetchOk = false;
+                        break;
+                    }
+                    const payload = await resp.json();
+                    if (payload && Array.isArray(payload.errors) && payload.errors.length > 0) {
+                        if (isAuthErrorPayload(resp.status, payload)) {
+                            authFailed = true;
+                        }
+                        worksFetchOk = false;
+                        break;
+                    }
+                    const pageWorks = (((payload || {}).data || {}).findAllStudentWorks || {}).data;
+                    if (!Array.isArray(pageWorks)) {
+                        worksFetchOk = false;
+                        break;
+                    }
+                    allWorks.push(...pageWorks);
+                    if (pageWorks.length < 200) {
+                        worksFetchOk = true;
+                        break;
+                    }
+                } catch (_) {
+                    worksFetchOk = false;
+                    break;
+                } finally {
+                    clearTimeout(timer);
+                }
+            }
+            if (!worksFetchOk) {
+                for (const code of spckCodes) {
+                    const slotsArr = Array.isArray(out[code]) ? out[code] : [];
+                    for (const s of slotsArr) {
+                        if (s && (s.index === 11 || s.index === 12 || s.index === 13)) {
+                            s.studentWorksFetchError = true;
+                        }
+                    }
+                }
+            } else {
+                const worksByClassId = new Map();
+                for (const w of allWorks) {
+                    if (!w || typeof w !== 'object') continue;
+                    const isDel = String(w.isDeleted || '').trim().toLowerCase();
+                    if (w.isDeleted === true || isDel === 'true') continue;
+                    const cid = w.classId != null ? String(w.classId).trim() : '';
+                    if (!cid) continue;
+                    if (!worksByClassId.has(cid)) {
+                        worksByClassId.set(cid, []);
+                    }
+                    worksByClassId.get(cid).push(w);
+                }
+                for (const code of spckCodes) {
+                    const meta = matchedClassMeta[code];
+                    const slotsArr = Array.isArray(out[code]) ? out[code] : [];
+                    const classWorks = (meta && worksByClassId.get(meta.classId)) || [];
+                    for (const s of slotsArr) {
+                        if (!s || (s.index !== 11 && s.index !== 12 && s.index !== 13)) continue;
+                        const slotId = String(s._id || '').trim();
+                        const slotNumber = Number(s.index) + 1;
+                        const matchedWorks = classWorks.filter((w) => {
+                            const wSessionId = w.classSessionId != null ? String(w.classSessionId).trim() : '';
+                            if (slotId && wSessionId) {
+                                return wSessionId === slotId;
+                            }
+                            if (!wSessionId && w.classSessionNumber != null) {
+                                return Number(w.classSessionNumber) === slotNumber;
+                            }
+                            return false;
+                        });
+                        if (matchedWorks.length > maxStudents * 2) {
+                            s.studentWorksFetchError = true;
+                            continue;
+                        }
+                        s.studentWorks = matchedWorks.map((w) => {
+                            const rawStuId = w.studentId != null ? String(w.studentId).trim() : '';
+                            if (!rawStuId || !meta || !meta.studentIdToKey.has(rawStuId)) {
+                                return { unknownOwner: true };
+                            }
+                            const stuKey = meta.studentIdToKey.get(rawStuId) || '';
+                            const ownerName = meta.studentIdToName.get(rawStuId) || '';
+                            const namesList = meta.studentNames || [];
+                            const rawTitle = typeof w.title === 'string' ? w.title.trim().slice(0, 500) : '';
+                            const hasStudentInfo = checkTitleHasStudentName(rawTitle, ownerName, namesList);
+                            const cleanTitle = scrubStudentNames(rawTitle, namesList).slice(0, 500);
+                            const rawWorkComment = typeof w.comment === 'string' ? w.comment.slice(0, 15000) : '';
+                            const cleanWorkComment = scrubStudentNames(rawWorkComment, namesList).slice(0, 15000);
+                            return {
+                                ...(stuKey ? { studentKey: stuKey } : {}),
+                                title: cleanTitle,
+                                hasStudentInfoInTitle: Boolean(hasStudentInfo),
+                                thumbnail: typeof w.thumbnail === 'string' ? w.thumbnail.trim().slice(0, 1000) : '',
+                                imageUrl: Array.isArray(w.imageUrl)
+                                    ? w.imageUrl.filter((u) => typeof u === 'string' && u.trim()).slice(0, 30).map((u) => u.trim().slice(0, 1000))
+                                    : [],
+                                attachmentUrls: Array.isArray(w.attachmentUrls)
+                                    ? w.attachmentUrls.filter((u) => typeof u === 'string' && u.trim()).slice(0, 30).map((u) => u.trim().slice(0, 1000))
+                                    : [],
+                                videoUrls: Array.isArray(w.videoUrls)
+                                    ? w.videoUrls.filter((u) => typeof u === 'string' && u.trim()).slice(0, 20).map((u) => u.trim().slice(0, 1000))
+                                    : [],
+                                relatedUrls: Array.isArray(w.relatedUrls)
+                                    ? w.relatedUrls
+                                        .filter((r) => r && typeof r === 'object' && (r.url || r.name))
+                                        .slice(0, 20)
+                                        .map((r) => ({
+                                            name: typeof r.name === 'string' ? scrubStudentNames(r.name.trim(), namesList).slice(0, 300) : '',
+                                            url: typeof r.url === 'string' ? r.url.trim().slice(0, 1000) : ''
+                                        }))
+                                    : [],
+                                comment: cleanWorkComment
+                            };
+                        });
+                    }
+                }
+            }
+        }
         if (authFailed) {
             out.__auth_error__ = true;
             out.__failure_reason__ = 'graphql_auth_rejected';
@@ -1594,6 +2629,11 @@ async def fetch_lms_class_slots_via_page(
         return out;
     }
     """
+    js_script = "\n".join(
+        line.strip()
+        for line in js_script.splitlines()
+        if line.strip() and not line.strip().startswith("//")
+    )
     clear_stale_auth_js = """
     async ({ allowedTokenKeys }) => {
         try {
@@ -2176,7 +3216,15 @@ def inspect_and_attach_quality_issues(
         ).strip()
         lesson_num = _parse_lesson_number(lesson_str)
         if is_lesson_14(result, st_dict):
-            continue
+            has_l14_lms_data = (
+                (has_lms_map and bool(class_code) and class_code in slots_map)
+                or bool(result.get("lms_quality_issues"))
+                or bool(result.get("quality_issues"))
+                or bool(st_dict and st_dict.get("lms_quality_issues"))
+                or bool(st_dict and st_dict.get("quality_issues"))
+            )
+            if not has_l14_lms_data:
+                continue
 
         lms_summary_clean = str(result.get("lms_lesson_summary") or "").strip()
         lms_issues: list[Any] = []

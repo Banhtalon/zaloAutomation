@@ -2997,6 +2997,49 @@ async function checkPhase57FrontendHardening() {
       harness.elements.get('modal-image').classList.contains('max-h-[82dvh]'),
     'resetImageModalZoom must restore 100% fit-to-frame zoom and max-w-full/max-h classes',
   );
+
+  // DEC-042: LMS_SPCK_MISSING (0/N) marks row failed and evaluation status '❌ Chưa nộp SPCK trên LMS';
+  // LMS_SPCK_NOTE keeps row non-failed with severity NOTE
+  const spckFrontendCheck = vm.runInContext(
+    `(() => {
+      const failRow = {
+        group: 'VT-JSB15',
+        person: 'GV SPCK',
+        status: '✅ Miễn báo cáo (Buổi 14)',
+        evidence_state: 'LESSON_14_EXEMPTION',
+        lms_status: '✅ Đã nộp LMS',
+        lms_quality_issues: [{ code: 'LMS_SPCK_MISSING', severity: 'FAIL', text: '[LMS] Chưa nộp SPCK (6/6 HS)' }],
+        scan_target: { week: 11, year: 2026, class_code: 'VT-JSB15', lesson: '14', class_date: '15/03/2026', class_date_iso: '2026-03-15' }
+      };
+      const noteRow = {
+        group: 'VT-JSB15',
+        person: 'GV SPCK',
+        status: '✅ Miễn báo cáo (Buổi 14)',
+        evidence_state: 'LESSON_14_EXEMPTION',
+        lms_status: '✅ Đã nộp LMS',
+        lms_quality_issues: [{ code: 'LMS_SPCK_NOTE', severity: 'NOTE', text: '[LMS] SPCK Buổi 14 thiếu link YouTube (6/6 HS)' }],
+        scan_target: { week: 11, year: 2026, class_code: 'VT-JSB15', lesson: '14', class_date: '15/03/2026', class_date_iso: '2026-03-15' }
+      };
+      return {
+        failIsFailed: resolveRowIsFailed(failRow),
+        failSev: resolveRowIssueSeverity(failRow),
+        failEval: resolveDashboardRowEvaluationStatus(failRow),
+        noteIsFailed: resolveRowIsFailed(noteRow),
+        noteSev: resolveRowIssueSeverity(noteRow),
+        noteEval: resolveDashboardRowEvaluationStatus(noteRow),
+      };
+    })()`,
+    harness.context,
+  );
+  assertFrontend(
+    spckFrontendCheck.failIsFailed === true &&
+      spckFrontendCheck.failSev === 'FAIL' &&
+      spckFrontendCheck.failEval === '❌ Chưa nộp SPCK trên LMS' &&
+      spckFrontendCheck.noteIsFailed === false &&
+      spckFrontendCheck.noteSev === 'NOTE' &&
+      spckFrontendCheck.noteEval === '✅ Đã hoàn thành nhận xét',
+    'DEC-042: LMS_SPCK_MISSING must resolve to is_failed=true, FAIL, and ❌ Chưa nộp SPCK trên LMS; LMS_SPCK_NOTE must resolve to is_failed=false and NOTE',
+  );
 }
 
 async function runFrontendBehaviorChecks() {

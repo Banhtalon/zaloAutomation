@@ -1033,13 +1033,42 @@
             return 'NOT_SCANNED';
         }
 
+        function hasRowSpckMissingFail(r) {
+            if (!r || typeof r !== 'object') return false;
+            const st = r.scan_target && typeof r.scan_target === 'object' ? r.scan_target : {};
+            const spckFailRe = /^\[LMS\]\s*Chưa\s+nộp\s+SPCK\b/i;
+            const checkVal = val => {
+                if (!val) return false;
+                if (Array.isArray(val)) return val.some(checkVal);
+                if (typeof val === 'object') {
+                    const code = String(val.code || '').trim().toUpperCase();
+                    const sev = String(val.severity || '').trim().toUpperCase();
+                    const txt = String(val.text || val.message || val.issue || '').trim();
+                    if (code === 'LMS_SPCK_MISSING' && sev !== 'NOTE') return true;
+                    return spckFailRe.test(txt) && sev !== 'NOTE';
+                }
+                const parsed = splitCheckerIssueNoteInJs(String(val));
+                if (parsed.autoIssues.some(seg => spckFailRe.test(seg))) return true;
+                return String(val).split(';').some(seg => spckFailRe.test(seg.trim()));
+            };
+            return (
+                checkVal(r.lms_quality_issues || st.lms_quality_issues)
+                || checkVal(r.quality_issues || st.quality_issues)
+                || checkVal(r.issue_description)
+                || checkVal(r.qc_issue_note !== undefined && r.qc_issue_note !== null ? r.qc_issue_note : st.qc_issue_note)
+            );
+        }
+
         function resolveRowIssueSeverity(r) {
             if (!r || typeof r !== 'object') return 'FAIL';
+            if (hasRowSpckMissingFail(r)) {
+                return 'FAIL';
+            }
             if (!resolveRowIsFailed(r)) {
                 return 'NOTE';
             }
             const st = r.scan_target && typeof r.scan_target === 'object' ? r.scan_target : {};
-            const noteCodes = new Set(['LMS_MANUAL_CHECK', 'ZALO_REPORT_NO_DATE', 'ZALO_REPORT_WRONG_DATE']);
+            const noteCodes = new Set(['LMS_MANUAL_CHECK', 'LMS_SPCK_NOTE', 'ZALO_REPORT_NO_DATE', 'ZALO_REPORT_WRONG_DATE']);
             const structuredEntries = [];
             const collectStructured = val => {
                 if (!val) return;
@@ -1083,6 +1112,7 @@
             if (category === 'MISSING' || category === 'REVIEW') return true;
             const lmsStatus = resolveDashboardRowLmsStatus(r);
             if (lmsStatus.startsWith('❌') || lmsStatus.startsWith('⚠️')) return true;
+            if (hasRowSpckMissingFail(r)) return true;
             return false;
         }
 
@@ -1299,6 +1329,9 @@
             const lmsStatus = resolveDashboardRowLmsStatus(r);
             const zaloDone = ['DONE', 'LATE', 'EXEMPT'].includes(category);
             const lmsDone = lmsStatus.startsWith('✅') || lmsStatus.includes('Dry-run LMS') || lmsStatus.includes('Chờ tích BCNB');
+            if (zaloDone && lmsDone && hasRowSpckMissingFail(r)) {
+                return '❌ Chưa nộp SPCK trên LMS';
+            }
             if (explicitEval) {
                 if (
                     zaloDone

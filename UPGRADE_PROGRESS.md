@@ -1,7 +1,7 @@
 # KẾ HOẠCH CHI TIẾT & TIẾN ĐỘ NÂNG CẤP DỰ ÁN (UPGRADE PLAN & PROGRESS)
 
-**Cập nhật lần cuối:** `2026-10-31 07:42 +07:00`
-**Trạng thái hiện tại:** Đã hoàn tất **Phase 0 → Phase 3.2 (`45/45` ✅)**, hoàn tất **Wave 4 (Phase 4.0 → Phase 4.4: `25/25` ✅ — Kiểm định chất lượng nội dung LMS/Zalo, Tự động ghi `Mô tả vấn đề` lên Teaching & Bảng Email Quản lý 9 cột)**, và hoàn tất **Wave 5 (Phase 5.0 → 5.8: `59/59` ✅ — Hardening toàn diện luồng kiểm tra báo cáo)**.
+**Cập nhật lần cuối:** `2026-11-10 12:48 +07:00`
+**Trạng thái hiện tại:** Đã hoàn tất **Phase 0 → Phase 3.2 (`45/45` ✅)**, hoàn tất **Wave 4 (Phase 4.0 → Phase 4.4: `25/25` ✅ — Kiểm định chất lượng nội dung LMS/Zalo, Tự động ghi `Mô tả vấn đề` lên Teaching & Bảng Email Quản lý 9 cột)**, hoàn tất **Wave 5 (Phase 5.0 → 5.8: `59/59` ✅ — Hardening toàn diện luồng kiểm tra báo cáo)**, và hoàn tất **Phase 6.1 (`6/6` ✅ — Kiểm định Nộp Sản Phẩm Cuối Khóa SPCK Buổi 12, 13, 14 theo `DEC-042`)**.
 
 ---
 
@@ -31,6 +31,7 @@
 | **Phase 5.6** | **Không rơi dòng im lặng (Discovery/Plan/Preflight)** | P1 | ✅ Hoàn thành | `8/8` |
 | **Phase 5.7** | **Giao diện vận hành bám dữ liệu server** | P1 | ✅ Hoàn thành | `8/8` |
 | **Phase 5.8** | **Dọn dẹp, tài liệu & nghiệm thu Wave 5** | P2 | ✅ Hoàn thành | `7/7` |
+| **Phase 6.1** | **Kiểm định Nộp Sản Phẩm Cuối Khóa (SPCK) ở Buổi 12, 13, 14 (`DEC-042`)** | P1 (Cao) | ✅ Hoàn thành | `6/6` |
 
 ---
 
@@ -538,6 +539,26 @@
     - G1 (`189/189 OK`), G2 (`node tests/check_template_js.js` pass, `scripts=7 handlers=34 behavior=13`), G3 (`.\CHECK_QUALITY.ps1 -Isolated` đạt exit `0`, `QUALITY GATE PASSED`, `663/663` tests OK, coverage `78.4%`), G4 (`git diff --check` exit `0` + manifest check `PASS`, `outside_delta=0`);
     - Sol 6.1 `high` review **toàn bộ diff Wave 5** (`git diff b395b94..HEAD` hoặc working tree) đạt `VERDICT: PASS` (session `01a18fa5-a4c3-7293-93d3-1cae60e87f5e`);
     - soạn **checklist nghiệm thu cho Owner**: dry-run chỉ đọc trên BCNB/Zalo/LMS thật, gồm 1 tuần có học bù, 1 lớp Buổi 14, 1 lớp chuyển cấp, F5 sau quét lại. Chỉ chạy production khi Owner duyệt riêng một target cụ thể.
+
+---
+
+## 🎯 WAVE 6: KIỂM ĐỊNH CHUYÊN SÂU HỌC VỤ LMS (`DEC-042`)
+
+### Hạng mục 6.1 — Kiểm Định Nộp Sản Phẩm Cuối Khóa (SPCK) ở Buổi 12, 13, 14 ✅ (`6/6`)
+- **Mục tiêu**: Kiểm soát tự động việc nộp Sản Phẩm Cuối Khóa (SPCK) của học viên đi học (`ATTENDED` / `LATE_ARRIVED`) ở **Buổi 12, 13 và 14** trên MindX LMS theo đúng 2 quyết định của Owner (`DEC-042`):
+  1. **Phương án A (`DEC-041` & `DEC-042`)**: Nếu chưa nộp SPCK (`0/N` học viên) $\rightarrow$ **Lỗi (`LMS_SPCK_MISSING`, `SEVERITY_FAIL`, `is_failed = True`)**, báo đỏ trên Dashboard (`❌ Chưa nộp SPCK trên LMS`), đưa vào Email Quản lý / CSV và ghi lên cột `Mô tả vấn đề (TE/TF/QC)` của Teaching. Nếu đã nộp SPCK (`>0/N` học viên) nhưng thiếu số lượng học viên hoặc thiếu thành phần phụ (thông tin học viên trong tiêu đề, ảnh thumbnail + ảnh chụp, file đính kèm, nhận xét sản phẩm đủ ý, link YouTube/Slide ở Buổi 14) $\rightarrow$ **Nhắc nhở QC (`LMS_SPCK_NOTE`, `SEVERITY_NOTE`, `is_failed = False`)** và ghi tự động đầy đủ lên cột `Mô tả vấn đề (TE/TF/QC)` trên Teaching.
+  2. **Quy tắc khối Robotics (`ROB`)**: Các lớp Robot không bắt lỗi thiếu file đính kèm (`attachmentUrls`), chỉ tạo nhắc nhở QC (`NOTE`: `[LMS] SPCK thiếu file đính kèm (x/y HS)`) ghi lên cột `Mô tả vấn đề (TE/TF/QC)`.
+- **Allowlist**:
+  - `services/report_status.py`, `services/lms_quality_service.py`, `services/zalo_bcnb_service.py`, `repositories/report_repository.py`, `static/js/jobs.js`
+  - `tests/test_lms_quality_service.py`, `tests/test_report_status.py`, `tests/check_template_js.js`
+  - `PROJECT_DECISIONS.md`, `PROJECT_STATE.md`, `UPGRADE_PROGRESS.md`, `VERSION.md`, `CHANGELOG.md`
+- **Checklist triển khai**:
+  - [x] **6.1.1.** Mở rộng `fetch_lms_class_slots_via_page` (`services/lms_quality_service.py`) truy vấn thêm `id` lớp, `id` học viên và batch GraphQL `findAllStudentWorks(filter: { classId_in: [...] })` cho các lớp có buổi `index ∈ {11, 12, 13}`; đối chiếu tên học viên với `title` để gán `hasStudentInfoInTitle`, sau đó thay thế tên thật bằng `[HS]` và ẩn danh hóa `studentId` thành `stu_1`, `stu_2`, ... ngay trong trình duyệt trước khi trả về Python.
+  - [x] **6.1.2.** Xây dựng bộ hàm chấm chất lượng SPCK (`evaluate_lms_spck_quality`, `_has_spck_student_info_in_title`, `_has_spck_thumbnail_and_images`, `_has_spck_attachment_file`, `_is_substantive_spck_comment`, `_has_spck_youtube_link`, `_has_spck_slide_link_or_file`, `_merge_student_works`): kiểm tra đủ 4 hạng mục ở Buổi 12, 13 và thêm 2 hạng mục bắt buộc ở Buổi 14 (link YouTube + link/file Slide thuyết trình).
+  - [x] **6.1.3.** Bổ sung mã chuẩn hóa `ISSUE_CODE_LMS_SPCK_MISSING` (`SEVERITY_FAIL`) và `ISSUE_CODE_LMS_SPCK_NOTE` (`SEVERITY_NOTE`), hàm `has_spck_missing_fail(row)` trong `services/report_status.py` và `hasRowSpckMissingFail(r)` trong `static/js/jobs.js`, cùng trạng thái đánh giá `"❌ Chưa nộp SPCK trên LMS"` trong `repositories/report_repository.py`.
+  - [x] **6.1.4.** Mở khóa kiểm định LMS SPCK và đồng bộ cột `Mô tả vấn đề (TE/TF/QC)` trên Teaching cho cả **Buổi 14** (`inspect_and_attach_quality_issues`, `_attach_bcnb_row_metadata`, `_maybe_update_row_checker_note`, `update_bcnb_reports`) trong khi vẫn giữ nguyên miễn trừ báo cáo Zalo (`CATEGORY_EXEMPT`) cho Buổi 14.
+  - [x] **6.1.5.** Bổ sung unit test toàn diện (`tests/test_lms_quality_service.py`, `tests/test_report_status.py`, `tests/check_template_js.js`) kiểm tra `0/N` (`FAIL`), nộp thiếu học viên (`NOTE`), thiếu từng thành phần phụ Buổi 12/13/14, nhận xét 1–2 từ/chỉ chấm dấu, lớp Robotics (`ROB`), ghi chú QC trên Buổi 14 và khử PII trong `js_script`.
+  - [x] **6.1.6.** Vượt qua đầy đủ cổng chất lượng (`unittest`: `44/44 OK`, `node tests/check_template_js.js` pass, `.\CHECK_QUALITY.ps1 -Isolated` exit `0` `QUALITY GATE PASSED`, coverage `78.0%`), đạt `VERDICT: PASS` từ Reviewer độc lập `gpt-6.1-sol (high)` (Round 3, session `01a1c424-8254-74a2-94a3-28b2ecaefafb`) và đồng bộ GitHub (`DEC-040`).
 
 ---
 

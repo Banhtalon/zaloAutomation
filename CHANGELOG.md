@@ -4,6 +4,35 @@ Tài liệu này ghi lại toàn bộ quá trình hình thành, phát triển ki
 
 ---
 
+## [2026-11-10] — Kiểm Định Nộp Sản Phẩm Cuối Khóa (SPCK) Ở Buổi 12, 13, 14 Trên MindX LMS (`DEC-036`, `DEC-040`, `DEC-042`)
+
+### ✨ Nâng cấp kiểm soát học vụ LMS & Tự động ghi chú QC lên Teaching
+- **Truy vấn `findAllStudentWorks` & khử PII học viên ngay trong trình duyệt (`services/lms_quality_service.py`)**:
+  - Mở rộng truy vấn GraphQL trong `fetch_lms_class_slots_via_page` lấy thêm `id` lớp và `id` của từng học viên trong `students`; với các lớp có buổi học `index ∈ {11, 12, 13}` (Buổi 12, 13, 14), tự động gọi batch GraphQL `findAllStudentWorks(filter: { classId_in: [...] })` (kèm fallback theo từng `classId` nếu filter `_in` không được hỗ trợ).
+  - Ngay trong ngữ cảnh trình duyệt trước khi dữ liệu trả về Python: đối chiếu tên học viên (`fullName` hoặc cụm 2 từ tên đệm + tên chính không dấu) với `work.title` để gán cờ `hasStudentInfoInTitle`, sau đó thay thế mọi xuất hiện của tên học viên trong `title`/`description`/`comment` bằng `[HS]` và ẩn danh hóa `studentId` thành `stu_1`, `stu_2`, ... (bảo đảm 100% không lộ PII học viên vào Python, SQLite hay log).
+- **Chấm chất lượng SPCK Buổi 12, 13, 14 theo Phương án A & Quy tắc Robotics (`ROB`) (`DEC-042` — `services/lms_quality_service.py`, `services/report_status.py`, `repositories/report_repository.py`, `static/js/jobs.js`)**:
+  - **Chưa nộp SPCK (`0/N` học viên đi học) $\rightarrow$ Lỗi (`ISSUE_CODE_LMS_SPCK_MISSING = "LMS_SPCK_MISSING"`, `SEVERITY_FAIL`, `is_failed = True`)**:
+    - Tạo issue `[LMS] Chưa nộp SPCK (N/N HS)` mức `FAIL`, kích hoạt `has_spck_missing_fail(row) = True` và `hasRowSpckMissingFail(r) = true`, hiển thị đỏ trên Dashboard, cập nhật `Tình trạng đánh giá: ❌ Chưa nộp SPCK trên LMS` (khi Zalo và nhận xét LMS đã hoàn thành), đưa vào danh sách lớp lỗi gửi Email Quản lý / CSV và ghi tự động lên cột `Mô tả vấn đề (TE/TF/QC)` của Teaching.
+  - **Đã nộp SPCK (`>0/N` học viên) nhưng thiếu số lượng hoặc thiếu thành phần phụ $\rightarrow$ Nhắc nhở QC (`ISSUE_CODE_LMS_SPCK_NOTE = "LMS_SPCK_NOTE"`, `SEVERITY_NOTE`, `is_failed = False`)**:
+    - Nộp thiếu học viên (`0 < submitted < attended`): `[LMS] Thiếu nộp SPCK (missing/attended HS)`.
+    - Thiếu thông tin học viên trong tiêu đề (`title`): `[LMS] SPCK thiếu thông tin học viên (x/submitted HS)`.
+    - Thiếu ảnh thumbnail hoặc ảnh chụp sản phẩm (`thumbnail` + `imageUrl`): `[LMS] SPCK thiếu ảnh thumbnail/ảnh chụp (x/submitted HS)`.
+    - Thiếu file đính kèm (`attachmentUrls`, áp dụng mức `NOTE` cho cả Coding lẫn khối Robotics `ROB` theo Quyết định 2): `[LMS] SPCK thiếu file đính kèm (x/submitted HS)`.
+    - Chưa có nhận xét sản phẩm (`comment` rỗng): `[LMS] SPCK chưa có nhận xét (x/submitted HS)`.
+    - Nhận xét sản phẩm sơ sài/chỉ chấm dấu (`_is_substantive_spck_comment`: yêu cầu $\ge 12$ từ, $\ge 6$ từ khác nhau, $\ge 50$ ký tự, $\ge 2$ mệnh đề/câu và $\ge 2$ từ khóa chuyên môn/đánh giá sản phẩm): `[LMS] Nhận xét SPCK sơ sài (x/submitted HS)`.
+    - **Riêng Buổi 14 bắt buộc thêm 2 thành phần** (Buổi 12 và 13 không bắt buộc):
+      - Link YouTube (`_has_spck_youtube_link` trên `videoUrls`/`relatedUrls`/`attachmentUrls`): `[LMS] SPCK Buổi 14 thiếu link YouTube (x/submitted HS)`.
+      - Link hoặc File Slide thuyết trình (`_has_spck_slide_link_or_file` trên `relatedUrls`/`attachmentUrls`): `[LMS] SPCK Buổi 14 thiếu link/file Slide thuyết trình (x/submitted HS)`.
+- **Mở khóa kiểm định LMS SPCK & ghi chú QC trên Teaching cho Buổi 14 (`services/lms_quality_service.py`, `services/zalo_bcnb_service.py`)**:
+  - Giữ nguyên miễn trừ báo cáo Zalo cho Buổi 14 (`CATEGORY_EXEMPT`), đồng thời cho phép `inspect_and_attach_quality_issues`, `_attach_bcnb_row_metadata`, `_maybe_update_row_checker_note` (kèm gọi `fetch_and_evaluate_lms_quality` on-demand cho dòng Buổi 14 tổng hợp khi chưa prefetch) và `update_bcnb_reports` đánh giá SPCK và ghi tự động các issue `[LMS]` lên cột `Mô tả vấn đề (TE/TF/QC)` của Teaching cho cả Buổi 14.
+- **Bằng chứng kiểm chứng**:
+  - Unit test mục tiêu (`tests/test_lms_quality_service.py`, `tests/test_report_status.py`, `tests/test_bcnb_actions.py`): `44/44 OK`.
+  - Kiểm tra hợp đồng JavaScript giao diện: `node tests/check_template_js.js` pass (`scripts=7 handlers=37 behavior=13`).
+  - Full isolated quality gate: `.\CHECK_QUALITY.ps1 -Isolated` exit `0` (`QUALITY GATE PASSED`, Ruff 0, Mypy 0 trên 78 source files, branch coverage `78.0%`).
+  - Independent Review: `gpt-6.1-sol (high)` Round 1 (`01a1c401-ead8-77e3-8502-c11bb16a7af2`) `NEEDS_FIX` -> Round 2 (`01a1c41b-006c-7bd1-9ffc-436145595176`) `NEEDS_FIX` -> Round 3 (`01a1c424-8254-74a2-94a3-28b2ecaefafb`) `VERDICT: PASS`.
+
+---
+
 ## [2026-11-06] — Sửa Lỗi Tự Động Gửi Email Báo Cáo Lớp Lỗi Cho Quản Lý Qua SMTP Gmail (`DEC-036`, `DEC-040`)
 
 ### 🛠️ Sửa lỗi & Chuẩn hóa cấu hình SMTP

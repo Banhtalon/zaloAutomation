@@ -2083,6 +2083,633 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(c_slots[0].get("fetch_error", False))
         self.assertFalse(par_res["lms_fetch_unavailable"])
 
+    async def test_spck_quality_evaluation_and_browser_fetch_pii_scrubbing(self) -> None:
+        import base64
+        from datetime import datetime
+        import json
+        import subprocess
+        import time
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+        from core.time_utils import BUSINESS_TIMEZONE
+        from services.lms_quality_service import (
+            ISSUE_CODE_LMS_SPCK_MISSING,
+            ISSUE_CODE_LMS_SPCK_NOTE,
+            evaluate_lms_spck_quality,
+        )
+        from services.report_status import (
+            LESSON_14_EXEMPTION,
+            LESSON_14_STATUS,
+            SEVERITY_FAIL,
+            is_failed,
+            issue_code,
+            issue_severity,
+            issue_text,
+        )
+        import services.zalo_bcnb_service as bcnb
+
+        substantive_comment = (
+            "1. Nhận xét chung:\n"
+            "Sản phẩm cuối khóa của [HS] có ý tưởng rõ ràng, bố cục hợp lý.\n"
+            "2. Giao diện & Chức năng:\n"
+            "Trang web thiết kế đẹp mắt, các chức năng tìm kiếm và giỏ hàng hoạt động ổn định, "
+            "cần bổ sung thêm hiệu ứng chuyển trang để hoàn thiện hơn."
+        )
+        valid_work_b12 = {
+            "studentKey": "stu_1",
+            "title": "[HS] - Quản lý thú cưng",
+            "hasStudentInfoInTitle": True,
+            "thumbnail": "https://static.mindx.edu.vn/uploads/thumb1.png",
+            "imageUrl": ["https://static.mindx.edu.vn/uploads/screen1.png"],
+            "attachmentUrls": ["https://static.mindx.edu.vn/uploads/source.zip"],
+            "videoUrls": [],
+            "relatedUrls": [],
+            "comment": substantive_comment,
+        }
+        attended_two = [
+            {
+                "status": "ATTENDED",
+                "studentKey": "stu_1",
+                "comment": (
+                    "Điểm mạnh: Con nắm vững kiến thức bài học và hoàn thành tốt phần giao diện.\n"
+                    "Điểm cần cải thiện: Cần chú ý đặt tên biến rõ ràng hơn.\n"
+                    "Lời khuyên: Về nhà con ôn tập thêm các thuộc tính Flexbox nhé."
+                ),
+            },
+            {
+                "status": "LATE_ARRIVED",
+                "studentKey": "stu_2",
+                "comment": (
+                    "Điểm mạnh: Con chủ động tích cực xây dựng chức năng cho sản phẩm.\n"
+                    "Điểm cần cải thiện: Đôi khi còn quên đóng thẻ HTML.\n"
+                    "Lời khuyên: Con nên kiểm tra lại code trước khi chạy thử nhé."
+                ),
+            },
+        ]
+        valid_work_b12_stu2 = {
+            **valid_work_b12,
+            "studentKey": "stu_2",
+            "title": "[HS] - Web bán đồ ăn",
+        }
+
+        # 1. Buổi 12 & 13: Valid SPCK without YouTube/Slide -> 0 issues
+        for lesson_no in (12, 13):
+            res_ok = evaluate_lms_slot_quality(
+                {
+                    "summary": f"Buổi {lesson_no}: Hoàn thiện sản phẩm cuối khóa",
+                    "studentAttendance": attended_two,
+                    "studentWorks": [valid_work_b12, valid_work_b12_stu2],
+                },
+                class_code="VT-JSB15",
+                khoi="Coding",
+                lesson=lesson_no,
+            )
+            self.assertEqual(res_ok["issues"], [])
+
+        # 2. Buổi 14: Valid B12/13 SPCK but missing YouTube & Slide -> 2 NOTE issues (not FAIL)
+        res_b14_missing_media = evaluate_lms_slot_quality(
+            {
+                "summary": "",
+                "studentAttendance": attended_two,
+                "studentWorks": [valid_work_b12, valid_work_b12_stu2],
+            },
+            class_code="VT-JSB15",
+            khoi="Coding",
+            lesson=14,
+        )
+        self.assertTrue(res_b14_missing_media["is_exempt"])
+        self.assertEqual(
+            [issue_text(x) for x in res_b14_missing_media["issues"]],
+            [
+                "[LMS] SPCK Buổi 14 thiếu link YouTube (2/2 HS)",
+                "[LMS] SPCK Buổi 14 thiếu link/file Slide thuyết trình (2/2 HS)",
+            ],
+        )
+        for item in res_b14_missing_media["issues"]:
+            self.assertEqual(issue_code(item), ISSUE_CODE_LMS_SPCK_NOTE)
+            self.assertEqual(issue_severity(item), SEVERITY_NOTE)
+
+        # 3. Buổi 14: With YouTube link and Canva/Slide link or .pptx file -> 0 issues
+        valid_b14_stu1 = {
+            **valid_work_b12,
+            "videoUrls": ["https://www.youtube.com/watch?v=dQw4w9WgXcQ"],
+            "relatedUrls": [
+                {
+                    "name": "Slide thuyết trình Canva",
+                    "url": "https://www.canva.com/design/DAG123456/view",
+                }
+            ],
+        }
+        valid_b14_stu2 = {
+            **valid_work_b12_stu2,
+            "relatedUrls": [
+                {"name": "Video demo", "url": "https://youtu.be/abc123XYZ89"}
+            ],
+            "attachmentUrls": [
+                "https://static.mindx.edu.vn/uploads/source.zip",
+                "https://static.mindx.edu.vn/uploads/slide_thuyet_trinh.pptx",
+            ],
+        }
+        res_b14_ok = evaluate_lms_slot_quality(
+            {
+                "summary": "",
+                "studentAttendance": attended_two,
+                "studentWorks": [valid_b14_stu1, valid_b14_stu2],
+            },
+            class_code="VT-JSB15",
+            khoi="Coding",
+            lesson=14,
+        )
+        self.assertEqual(res_b14_ok["issues"], [])
+
+        # 4. 0/N submitted SPCK on Buổi 12, 13, 14 -> LMS_SPCK_MISSING (SEVERITY_FAIL, is_failed=True)
+        for lesson_no in (12, 13, 14):
+            res_zero = evaluate_lms_slot_quality(
+                {
+                    "summary": f"Buổi {lesson_no}: Làm dự án cuối khóa",
+                    "studentAttendance": attended_two,
+                    "studentWorks": [],
+                },
+                class_code="VT-JSB15",
+                khoi="Coding",
+                lesson=lesson_no,
+            )
+            spck_fails = [
+                x
+                for x in res_zero["issues"]
+                if issue_code(x) == ISSUE_CODE_LMS_SPCK_MISSING
+            ]
+            self.assertEqual(len(spck_fails), 1)
+            self.assertEqual(
+                issue_text(spck_fails[0]), "[LMS] Chưa nộp SPCK (2/2 HS)"
+            )
+            self.assertEqual(issue_severity(spck_fails[0]), SEVERITY_FAIL)
+            row_check = {
+                "lesson": str(lesson_no),
+                "status": LESSON_14_STATUS if lesson_no == 14 else "✅ Đã nộp",
+                "evidence_state": (
+                    LESSON_14_EXEMPTION
+                    if lesson_no == 14
+                    else "SUBMITTED_VERIFIED"
+                ),
+                "lms_status": "✅ Đã nộp LMS",
+                "lms_quality_issues": res_zero["issues"],
+            }
+            self.assertTrue(is_failed(row_check))
+
+        # 5. Partial submission + missing sub-components + Robotics attachment rule -> NOTE (is_failed=False)
+        flawed_work = {
+            "studentKey": "stu_1",
+            "title": "SPCK",
+            "hasStudentInfoInTitle": False,
+            "thumbnail": "",
+            "imageUrl": [],
+            "attachmentUrls": [],
+            "comment": "Làm tốt",
+        }
+        res_rob_partial = evaluate_lms_spck_quality(
+            {
+                "studentAttendance": attended_two,
+                "studentWorks": [flawed_work],
+            },
+            class_code="VT-ROB-ARMB20",
+            khoi="Robotics",
+            lesson=12,
+        )
+        self.assertTrue(res_rob_partial["is_robotics"])
+        self.assertEqual(
+            [issue_text(x) for x in res_rob_partial["issues"]],
+            [
+                "[LMS] Thiếu nộp SPCK (1/2 HS)",
+                "[LMS] SPCK thiếu thông tin học viên (1/1 HS)",
+                "[LMS] SPCK thiếu ảnh thumbnail/ảnh chụp (1/1 HS)",
+                "[LMS] SPCK thiếu file đính kèm (1/1 HS)",
+                "[LMS] Nhận xét SPCK sơ sài (1/1 HS)",
+            ],
+        )
+        self.assertTrue(
+            all(
+                issue_code(x) == ISSUE_CODE_LMS_SPCK_NOTE
+                and issue_severity(x) == SEVERITY_NOTE
+                for x in res_rob_partial["issues"]
+            )
+        )
+        self.assertFalse(
+            is_failed(
+                {
+                    "lesson": "12",
+                    "status": "✅ Đã nộp",
+                    "evidence_state": "SUBMITTED_VERIFIED",
+                    "lms_status": "✅ Đã nộp LMS",
+                    "lms_quality_issues": res_rob_partial["issues"],
+                }
+            )
+        )
+
+        # 5b. Absent student's work must NOT mask missing SPCK of an attended student;
+        #     and work with unknown/unmatched studentKey must trigger LMS_MANUAL_CHECK.
+        res_absent_work_ignored = evaluate_lms_spck_quality(
+            {
+                "studentAttendance": [
+                    {
+                        "status": "ATTENDED",
+                        "studentKey": "stu_1",
+                        "comment": attended_two[0]["comment"],
+                    },
+                    {
+                        "status": "ABSENT",
+                        "studentKey": "stu_2",
+                        "comment": "",
+                    },
+                ],
+                "studentWorks": [valid_work_b12_stu2],
+            },
+            class_code="VT-JSB15",
+            khoi="Coding",
+            lesson=12,
+        )
+        self.assertEqual(res_absent_work_ignored["submitted_count"], 0)
+        self.assertEqual(
+            [issue_code(x) for x in res_absent_work_ignored["issues"]],
+            [ISSUE_CODE_LMS_SPCK_MISSING],
+        )
+
+        res_unknown_owner = evaluate_lms_spck_quality(
+            {
+                "studentAttendance": [attended_two[0]],
+                "studentWorks": [{**valid_work_b12, "studentKey": ""}],
+            },
+            class_code="VT-JSB15",
+            khoi="Coding",
+            lesson=12,
+        )
+        self.assertEqual(
+            [issue_code(x) for x in res_unknown_owner["issues"]],
+            [ISSUE_CODE_LMS_MANUAL_CHECK],
+        )
+
+        # 6. Browser JS findAllStudentWorks batch fetch, 2-word given name detection (including accentless),
+        #    PII scrubbing (including relatedUrls.name), pagination cap safety, and Lesson 14 BCNB checker note update
+        exp_future = int(time.time()) + 7200
+        payload_b64 = (
+            base64.urlsafe_b64encode(
+                json.dumps({"exp": exp_future}).encode("utf-8")
+            )
+            .decode("ascii")
+            .rstrip("=")
+        )
+        valid_jwt = f"eyJhbGciOiJIUzI1NiJ9.{payload_b64}.signature_valid_token_12345"
+
+        runner_spck_js = r"""
+        const fs = require('fs');
+        const { script, args, paginateOverflow, unknownOwnerMode } = JSON.parse(fs.readFileSync(0, 'utf8'));
+        global.window = { location: { hostname: 'lms.mindx.edu.vn' } };
+        global.fetch = async (_url, req) => {
+            const body = JSON.parse(req.body);
+            if (body.operationName === 'classesMissAttendOrComment') {
+                return {
+                    ok: true,
+                    status: 200,
+                    json: async () => ({
+                        data: {
+                            classesMissAttendOrComment: {
+                                data: [{
+                                    id: 'cls_jsb15_synthetic',
+                                    name: 'VT-JSB15',
+                                    slots: [{
+                                        _id: 'slot_14_id',
+                                        index: 13,
+                                        date: '2026-03-15T10:00:00.000Z',
+                                        summary: '',
+                                        studentAttendance: [{
+                                            student: { id: 'stu_raw_id_99', fullName: 'Nguyễn Văn Minh Quân' },
+                                            status: 'ATTENDED',
+                                            comment: ''
+                                        }]
+                                    }]
+                                }]
+                            }
+                        }
+                    })
+                };
+            }
+            if (body.operationName === 'findAllStudentWorks') {
+                if (paginateOverflow) {
+                    return {
+                        ok: true,
+                        status: 200,
+                        json: async () => ({
+                            data: {
+                                findAllStudentWorks: {
+                                    data: Array.from({ length: 200 }, (_, idx) => ({
+                                        id: 'work_overflow_' + idx,
+                                        title: 'Other work',
+                                        classId: 'other_cls',
+                                        classSessionId: 'other_slot',
+                                        isDeleted: 'false'
+                                    }))
+                                }
+                            }
+                        })
+                    };
+                }
+                if (unknownOwnerMode) {
+                    return {
+                        ok: true,
+                        status: 200,
+                        json: async () => ({
+                            data: {
+                                findAllStudentWorks: {
+                                    data: [{
+                                        id: 'work_unknown',
+                                        title: 'Le Anh Dung - Secret Project',
+                                        classId: 'cls_jsb15_synthetic',
+                                        classSessionId: 'slot_14_id',
+                                        classSessionNumber: 14,
+                                        studentId: 'unknown_stu_777',
+                                        relatedUrls: [{ name: 'Le Anh Dung Deck', url: 'https://example.org/deck' }],
+                                        comment: 'Le Anh Dung lam bai',
+                                        isDeleted: 'false'
+                                    }]
+                                }
+                            }
+                        })
+                    };
+                }
+                return {
+                    ok: true,
+                    status: 200,
+                    json: async () => ({
+                        data: {
+                            findAllStudentWorks: {
+                                data: [{
+                                    id: 'work_1',
+                                    title: 'Minh  Quan - Giới thiệu Tết cổ truyền',
+                                    classId: 'cls_jsb15_synthetic',
+                                    classSessionId: 'slot_14_id',
+                                    classSessionNumber: 14,
+                                    studentId: 'stu_raw_id_99',
+                                    thumbnail: 'https://static.mindx.edu.vn/thumb.png',
+                                    imageUrl: ['https://static.mindx.edu.vn/img1.png'],
+                                    attachmentUrls: ['https://static.mindx.edu.vn/project.zip'],
+                                    videoUrls: [],
+                                    relatedUrls: [{
+                                        name: 'GitHub của Nguyễn  Văn   Minh  Quân - Minh  Quan',
+                                        url: 'https://github.com/example/spck'
+                                    }],
+                                    comment: '1. Ý tưởng: Sản phẩm của Nguyễn  Văn  Minh  Quân có bố cục trang web rõ ràng.\n2. Chức năng: Minh  Quan đã hoàn thiện tốt hiệu ứng hình ảnh và tương tác.',
+                                    isDeleted: 'false'
+                                }]
+                            }
+                        }
+                    })
+                };
+            }
+            return { ok: false, status: 500, json: async () => ({}) };
+        };
+        (async () => {
+            const res = await eval('(' + script + ')')(args);
+            process.stdout.write(JSON.stringify(res));
+        })();
+        """
+
+        class _SpckNodePage:
+            url = "https://lms.mindx.edu.vn/admin/class-sessions"
+
+            def __init__(
+                self,
+                *,
+                paginate_overflow: bool = False,
+                unknown_owner_mode: bool = False,
+            ) -> None:
+                self.paginate_overflow = paginate_overflow
+                self.unknown_owner_mode = unknown_owner_mode
+
+            async def evaluate(self, script: str, args: dict) -> dict:
+                args_with_tok = {**args, "preResolvedToken": valid_jwt}
+                proc = subprocess.run(
+                    ["node", "-e", runner_spck_js],
+                    input=json.dumps(
+                        {
+                            "script": script,
+                            "args": args_with_tok,
+                            "paginateOverflow": self.paginate_overflow,
+                            "unknownOwnerMode": self.unknown_owner_mode,
+                        }
+                    ),
+                    text=True,
+                    encoding="utf-8",
+                    capture_output=True,
+                    check=True,
+                )
+                return json.loads(proc.stdout)
+
+        with patch.dict(os.environ, {"ZALO_QUALITY_ISOLATED": "0"}):
+            fetched_jsb15 = await fetch_lms_class_slots_via_page(
+                _SpckNodePage(), class_names=["VT-JSB15"]
+            )
+            fetched_overflow = await fetch_lms_class_slots_via_page(
+                _SpckNodePage(paginate_overflow=True), class_names=["VT-JSB15"]
+            )
+            fetched_unknown_owner = await fetch_lms_class_slots_via_page(
+                _SpckNodePage(unknown_owner_mode=True), class_names=["VT-JSB15"]
+            )
+        serialized_fetched = json.dumps(fetched_jsb15, ensure_ascii=False)
+        self.assertNotIn("Nguyễn Văn Minh Quân", serialized_fetched)
+        self.assertNotIn("Nguyen Van Minh Quan", serialized_fetched)
+        self.assertNotIn("Minh Quân", serialized_fetched)
+        self.assertNotIn("Minh Quan", serialized_fetched)
+        self.assertNotIn("Minh  Quan", serialized_fetched)
+        self.assertNotIn("stu_raw_id_99", serialized_fetched)
+        slot_14 = fetched_jsb15["VT-JSB15"][0]
+        self.assertEqual(len(slot_14["studentWorks"]), 1)
+        self.assertTrue(slot_14["studentWorks"][0]["hasStudentInfoInTitle"])
+        self.assertIn("[HS]", slot_14["studentWorks"][0]["title"])
+        self.assertIn("[HS]", slot_14["studentWorks"][0]["relatedUrls"][0]["name"])
+        serialized_unknown_owner = json.dumps(
+            fetched_unknown_owner, ensure_ascii=False
+        )
+        self.assertNotIn("Le Anh Dung", serialized_unknown_owner)
+        self.assertNotIn("unknown_stu_777", serialized_unknown_owner)
+        self.assertEqual(
+            fetched_unknown_owner["VT-JSB15"][0]["studentWorks"],
+            [{"unknownOwner": True}],
+        )
+        eval_unknown_owner = evaluate_lms_slot_quality(
+            fetched_unknown_owner["VT-JSB15"][0],
+            class_code="VT-JSB15",
+            khoi="Coding",
+            lesson=14,
+        )
+        self.assertEqual(
+            [issue_code(x) for x in eval_unknown_owner["issues"]],
+            [ISSUE_CODE_LMS_MANUAL_CHECK],
+        )
+        self.assertTrue(
+            fetched_overflow["VT-JSB15"][0].get("studentWorksFetchError", False)
+        )
+        eval_overflow = evaluate_lms_slot_quality(
+            fetched_overflow["VT-JSB15"][0],
+            class_code="VT-JSB15",
+            khoi="Coding",
+            lesson=14,
+        )
+        self.assertEqual(
+            [issue_code(x) for x in eval_overflow["issues"]],
+            [ISSUE_CODE_LMS_MANUAL_CHECK],
+        )
+
+        # Verify update_bcnb_reports writes Lesson 14 SPCK notes to Teaching's Mô tả vấn đề column
+        # both when scan_results has a pre-populated row AND when scan_results=[] (notes_only=True synthesized row via lms_quality_gateway)
+        l14_checkbox = AsyncMock()
+        l14_checkbox.count.return_value = 1
+        l14_checkbox.is_checked.return_value = False
+        l14_cell = MagicMock()
+        l14_cell.locator.return_value.first = l14_checkbox
+        l14_bcnb_row = {
+            "row": MagicMock(),
+            "cells": [l14_cell] * 12,
+            "week": 11,
+            "year": 2026,
+            "ma_lop": "VT-JSB15",
+            "buoi_so": "14",
+            "ngay_hoc": "15/03/2026",
+            "ngay_hoc_iso": "2026-03-15",
+            "zalo_deadline": "20:00 17/03/2026",
+            "bcnb_session_id": "9914",
+            "khoi": "Coding",
+            "nx_zalo_checked": False,
+            "nx_lms_checked": True,
+            "qc_issue_note": "",
+            "checker_note_unreadable": False,
+        }
+        l14_scan_results = [
+            {
+                "group": "",
+                "person": "GV JSB15",
+                "status": LESSON_14_STATUS,
+                "evidence_state": LESSON_14_EXEMPTION,
+                "scan_target": {
+                    "class_code": "VT-JSB15",
+                    "lesson": "14",
+                    "class_date": "15/03/2026",
+                    "class_date_iso": "2026-03-15",
+                    "week": 11,
+                    "year": 2026,
+                },
+                "evidence": {
+                    "date_context": {
+                        "target_week": 11,
+                        "target_year": 2026,
+                        "target_lesson": "14",
+                        "target_class_date": "2026-03-15",
+                    }
+                },
+            }
+        ]
+        expected_l14_note = (
+            "[LMS] SPCK Buổi 14 thiếu link YouTube (1/1 HS); "
+            "[LMS] SPCK Buổi 14 thiếu link/file Slide thuyết trình (1/1 HS)"
+        )
+        l14_page = MagicMock()
+        l14_page.evaluate = AsyncMock(
+            return_value={
+                "ok": True,
+                "stage": "after_write",
+                "http_status": 200,
+                "error": "",
+            }
+        )
+        l14_audit_repo = AsyncMock()
+        l14_audit_repo.record_intent.return_value = (
+            {"id": 1401, "outcome": "INTENT_RECORDED"},
+            True,
+        )
+        l14_audit_repo.list_for_target = AsyncMock(return_value=[])
+        l14_job_repo = AsyncMock()
+        fake_lms_gw = SimpleNamespace(
+            fetch_class_slots=AsyncMock(return_value=fetched_jsb15)
+        )
+        with (
+            patch(
+                "services.zalo_bcnb_service._read_bcnb_schedule_rows",
+                AsyncMock(return_value=[l14_bcnb_row]),
+            ),
+            patch(
+                "services.zalo_bcnb_service.resolve_report_columns",
+                AsyncMock(return_value=(1, 2, 8)),
+            ),
+            patch(
+                "services.zalo_bcnb_service.execute_verified_checkbox_action",
+                AsyncMock(return_value="VERIFIED"),
+            ),
+            patch(
+                "services.bcnb_actions.dismiss_current_week_notice",
+                AsyncMock(),
+            ),
+            patch(
+                "services.bcnb_actions.verify_checker_note_persisted",
+                AsyncMock(return_value=(True, expected_l14_note)),
+            ),
+            patch("services.bcnb_actions.asyncio.sleep", AsyncMock()),
+            patch("services.zalo_bcnb_service.log_message"),
+        ):
+            summary_l14 = await bcnb.update_bcnb_reports(
+                l14_page,
+                job_id=1401,
+                execution_mode="production",
+                scan_results=l14_scan_results,
+                today=datetime(2026, 3, 16, tzinfo=BUSINESS_TIMEZONE),
+                scan_plan={
+                    "selected_weeks": [
+                        {"week": 11, "year": 2026},
+                        {"week": 10, "year": 2026},
+                    ],
+                    "latest_week": {"week": 11, "year": 2026},
+                    "targets": [],
+                    "exempt_targets": [l14_scan_results[0]["scan_target"]],
+                },
+                job_repo=l14_job_repo,
+                audit_repo=l14_audit_repo,
+                period_filter={(11, 2026)},
+                lms_slots_by_class=fetched_jsb15,
+            )
+            synthesized_l14_results: list[dict] = []
+            l14_bcnb_row_synth = {**l14_bcnb_row, "qc_issue_note": ""}
+            with patch(
+                "services.zalo_bcnb_service._read_bcnb_schedule_rows",
+                AsyncMock(return_value=[l14_bcnb_row_synth]),
+            ):
+                summary_l14_synth = await bcnb.update_bcnb_reports(
+                    l14_page,
+                    job_id=1402,
+                    execution_mode="production",
+                    scan_results=synthesized_l14_results,
+                    today=datetime(2026, 3, 16, tzinfo=BUSINESS_TIMEZONE),
+                    scan_plan={
+                        "selected_weeks": [
+                            {"week": 11, "year": 2026},
+                            {"week": 10, "year": 2026},
+                        ],
+                        "latest_week": {"week": 11, "year": 2026},
+                        "targets": [],
+                        "exempt_targets": [l14_scan_results[0]["scan_target"]],
+                    },
+                    job_repo=l14_job_repo,
+                    audit_repo=l14_audit_repo,
+                    period_filter={(11, 2026)},
+                    lms_quality_gateway=fake_lms_gw,
+                    notes_only=True,
+                )
+        self.assertEqual(summary_l14["checker_note_updated_count"], 1)
+        self.assertEqual(l14_scan_results[0]["qc_issue_note"], expected_l14_note)
+        self.assertEqual(fake_lms_gw.fetch_class_slots.await_count, 1)
+        self.assertEqual(summary_l14_synth["checker_note_updated_count"], 1)
+        self.assertEqual(len(synthesized_l14_results), 1)
+        self.assertEqual(
+            synthesized_l14_results[0]["qc_issue_note"], expected_l14_note
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

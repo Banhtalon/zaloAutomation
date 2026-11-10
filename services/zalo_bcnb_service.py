@@ -316,6 +316,48 @@ def _apply_lesson_14_result(
         class_code=class_code,
         applied_at=now_utc(),
     )
+    lesson_str = str(raw_lesson or "14").strip() or "14"
+    row_date_iso = str(row.get("ngay_hoc_iso") or "").strip()
+    row_date_raw = str(row.get("ngay_hoc") or "").strip()
+    if class_code and not str(exempted.get("class_code") or "").strip():
+        exempted["class_code"] = class_code
+    if lesson_str and not str(exempted.get("lesson") or "").strip():
+        exempted["lesson"] = lesson_str
+    if row_date_iso and not exempted.get("ngay_hoc_iso"):
+        exempted["ngay_hoc_iso"] = row_date_iso
+    if row_date_raw and not exempted.get("ngay_hoc"):
+        exempted["ngay_hoc"] = row_date_raw
+    if row_pair is not None:
+        exempted.setdefault("week", row_pair[0])
+        exempted.setdefault("year", row_pair[1])
+    st_obj = exempted.get("scan_target")
+    if not isinstance(st_obj, dict):
+        st_obj = {}
+        exempted["scan_target"] = st_obj
+    if class_code and not str(st_obj.get("class_code") or "").strip():
+        st_obj["class_code"] = class_code
+    if lesson_str and not str(st_obj.get("lesson") or "").strip():
+        st_obj["lesson"] = lesson_str
+    if (row_date_raw or row_date_iso) and not str(st_obj.get("class_date") or "").strip():
+        st_obj["class_date"] = row_date_raw or row_date_iso
+    if row_date_iso and not str(st_obj.get("class_date_iso") or "").strip():
+        st_obj["class_date_iso"] = row_date_iso
+    if row_pair is not None:
+        st_obj.setdefault("week", row_pair[0])
+        st_obj.setdefault("year", row_pair[1])
+    ev_obj = exempted.setdefault("evidence", {})
+    if isinstance(ev_obj, dict):
+        ctx_obj = ev_obj.setdefault("date_context", {})
+        if isinstance(ctx_obj, dict):
+            if class_code and not ctx_obj.get("target_class_code"):
+                ctx_obj["target_class_code"] = class_code
+            if lesson_str and not ctx_obj.get("target_lesson"):
+                ctx_obj["target_lesson"] = lesson_str
+            if row_date_iso and not ctx_obj.get("target_class_date"):
+                ctx_obj["target_class_date"] = row_date_iso
+            if row_pair is not None:
+                ctx_obj.setdefault("target_week", row_pair[0])
+                ctx_obj.setdefault("target_year", row_pair[1])
     if source is None:
         scan_results.append(exempted)
     else:
@@ -445,6 +487,16 @@ def _attach_bcnb_row_metadata(
     """Attach observed BCNB row metadata (LMS status, notes, session_id) to a scan result."""
     st = result.get("scan_target")
     st_dict = st if isinstance(st, dict) else None
+    row_code = str(bcnb_row.get("ma_lop") or "").strip().upper()
+    if row_code and not str(result.get("class_code") or "").strip():
+        result["class_code"] = row_code
+        if st_dict is not None and not str(st_dict.get("class_code") or "").strip():
+            st_dict["class_code"] = row_code
+    row_lesson = str(bcnb_row.get("buoi_so") or "").strip()
+    if row_lesson and not str(result.get("lesson") or "").strip():
+        result["lesson"] = row_lesson
+        if st_dict is not None and not str(st_dict.get("lesson") or "").strip():
+            st_dict["lesson"] = row_lesson
     for str_key in (
         "bcnb_session_id",
         "khoi",
@@ -462,6 +514,11 @@ def _attach_bcnb_row_metadata(
             result[note_key] = note_val
             if st_dict is not None:
                 st_dict[note_key] = note_val
+    row_iso = str(bcnb_row.get("ngay_hoc_iso") or "").strip()
+    if row_iso and not result.get("ngay_hoc_iso"):
+        result["ngay_hoc_iso"] = row_iso
+        if st_dict is not None and not st_dict.get("class_date_iso"):
+            st_dict["class_date_iso"] = row_iso
     for bool_key in ("nx_zalo_checked", "nx_lms_checked"):
         bool_val = bcnb_row.get(bool_key)
         if isinstance(bool_val, bool):
@@ -774,16 +831,38 @@ async def update_bcnb_reports(
         selected_week: int,
         selected_year: int,
     ) -> None:
-        nonlocal checker_note_updated_count
+        nonlocal checker_note_updated_count, resolved_lms_slots
         if (
             target_result is None
             or audit_repo is None
             or not hasattr(audit_repo, "record_intent")
         ):
             return
+        row_code = str(bcnb_row.get("ma_lop") or "").strip().upper()
         row_lesson = str(bcnb_row.get("buoi_so") or "").strip()
-        if is_lesson_14(row_lesson):
-            return
+        row_date_iso = str(bcnb_row.get("ngay_hoc_iso") or "").strip()
+        if row_date_iso and not target_result.get("ngay_hoc_iso"):
+            target_result["ngay_hoc_iso"] = row_date_iso
+        if (
+            lms_slots_by_class is None
+            and row_code
+            and (
+                not isinstance(resolved_lms_slots, dict)
+                or row_code not in resolved_lms_slots
+            )
+            and not is_lms_fetch_unavailable(resolved_lms_slots)
+        ):
+            extra_lms_slots = await fetch_and_evaluate_lms_quality(
+                page,
+                [target_result],
+                lms_slots_by_class=None,
+                lms_quality_gateway=lms_quality_gateway,
+            )
+            if isinstance(extra_lms_slots, dict):
+                if isinstance(resolved_lms_slots, dict):
+                    resolved_lms_slots.update(extra_lms_slots)
+                else:
+                    resolved_lms_slots = dict(extra_lms_slots)
         inspect_and_attach_quality_issues(
             [target_result],
             lms_slots_by_class=resolved_lms_slots,
@@ -797,8 +876,6 @@ async def update_bcnb_reports(
             if has_readable_note
             else str(target_result.get("qc_issue_note") or "")
         )
-        row_code = str(bcnb_row.get("ma_lop") or "").strip().upper()
-        row_date_iso = str(bcnb_row.get("ngay_hoc_iso") or "").strip()
         row_sid = str(
             bcnb_row.get("bcnb_session_id")
             or _result_session_id(target_result)
@@ -1145,13 +1222,16 @@ async def update_bcnb_reports(
                 )
             matched_result = result_matches[0] if result_matches else None
             if notes_only:
-                if not row_is_lesson_14:
-                    await _maybe_update_row_checker_note(
-                        matched_result or unique_meta_result,
-                        bcnb_row,
-                        selected_week=selected_week,
-                        selected_year=selected_year,
-                    )
+                note_target = matched_result or unique_meta_result
+                if row_is_lesson_14 and note_target is None:
+                    note_target = _apply_lesson_14_result(scan_results, bcnb_row)
+                    _attach_bcnb_row_metadata(note_target, bcnb_row)
+                await _maybe_update_row_checker_note(
+                    note_target,
+                    bcnb_row,
+                    selected_week=selected_week,
+                    selected_year=selected_year,
+                )
                 continue
             is_submitted = False
 
@@ -1365,13 +1445,12 @@ async def update_bcnb_reports(
                     f"Đã tick và kiểm chứng BCNB cho lớp: {class_code} "
                     f"W{selected_week}/{selected_year}"
                 )
-            if not row_is_lesson_14:
-                await _maybe_update_row_checker_note(
-                    matched_result or unique_meta_result,
-                    bcnb_row,
-                    selected_week=selected_week,
-                    selected_year=selected_year,
-                )
+            await _maybe_update_row_checker_note(
+                matched_result or unique_meta_result,
+                bcnb_row,
+                selected_week=selected_week,
+                selected_year=selected_year,
+            )
 
     inspect_and_attach_quality_issues(
         scoped_results,

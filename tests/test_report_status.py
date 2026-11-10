@@ -1101,6 +1101,67 @@ class ReportStatusSingleSourceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(should_sync_outage)
         self.assertEqual(effective_outage, [d2_note])
 
+        # DEC-042: LMS_SPCK_MISSING (0/N) is FAIL (is_failed=True, evaluation_status='❌ Chưa nộp SPCK trên LMS');
+        # LMS_SPCK_NOTE (partial / sub-component reminder) is NOTE (is_failed=False)
+        from repositories.report_repository import _resolve_row_evaluation_status
+        from services.report_status import (
+            ISSUE_CODE_LMS_SPCK_MISSING,
+            ISSUE_CODE_LMS_SPCK_NOTE,
+            has_spck_missing_fail,
+        )
+
+        spck_fail_issue = make_structured_issue(
+            ISSUE_CODE_LMS_SPCK_MISSING,
+            "[LMS] Chưa nộp SPCK (6/6 HS)",
+            severity=SEVERITY_FAIL,
+        )
+        spck_note_issue = make_structured_issue(
+            ISSUE_CODE_LMS_SPCK_NOTE,
+            "[LMS] SPCK Buổi 14 thiếu link YouTube (6/6 HS)",
+            severity=SEVERITY_NOTE,
+        )
+        row_spck_fail = {
+            "lesson": "14",
+            "status": LESSON_14_STATUS,
+            "evidence_state": LESSON_14_EXEMPTION,
+            "lms_status": "✅ Đã nộp LMS",
+            "lms_quality_issues": [spck_fail_issue],
+        }
+        self.assertTrue(has_spck_missing_fail(row_spck_fail))
+        self.assertTrue(is_failed(row_spck_fail))
+        self.assertEqual(
+            _resolve_row_evaluation_status(
+                zalo_status=LESSON_14_STATUS,
+                lms_status="✅ Đã nộp LMS",
+                nx_zalo_checked=True,
+                nx_lms_checked=True,
+                row=row_spck_fail,
+                category=CATEGORY_EXEMPT,
+            ),
+            "❌ Chưa nộp SPCK trên LMS",
+        )
+
+        row_spck_note = {
+            "lesson": "14",
+            "status": LESSON_14_STATUS,
+            "evidence_state": LESSON_14_EXEMPTION,
+            "lms_status": "✅ Đã nộp LMS",
+            "lms_quality_issues": [spck_note_issue],
+        }
+        self.assertFalse(has_spck_missing_fail(row_spck_note))
+        self.assertFalse(is_failed(row_spck_note))
+        self.assertEqual(
+            _resolve_row_evaluation_status(
+                zalo_status=LESSON_14_STATUS,
+                lms_status="✅ Đã nộp LMS",
+                nx_zalo_checked=True,
+                nx_lms_checked=True,
+                row=row_spck_note,
+                category=CATEGORY_EXEMPT,
+            ),
+            "✅ Đã hoàn thành nhận xét",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

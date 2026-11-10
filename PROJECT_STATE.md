@@ -1,9 +1,18 @@
 # PROJECT STATE — Zalo Automation
 
-> Snapshot hiện tại, cập nhật 2026-11-06. Source và kiểm tra runtime mới có độ
+> Snapshot hiện tại, cập nhật 2026-11-10. Source và kiểm tra runtime mới có độ
 > tin cậy cao hơn tài liệu. Không dùng file này làm quyền chạy thao tác thật.
 
 ## Trạng thái ngắn
+
+- 2026-11-10 (Kiểm định nộp Sản Phẩm Cuối Khóa SPCK ở Buổi 12, 13, 14 trên MindX LMS theo Phương án A & Quy tắc Robotics `ROB` — source/local, `DEC-036`, `DEC-040`, `DEC-042`):
+  - **Truy vấn `findAllStudentWorks` & khử PII học viên ngay trong trình duyệt (`services/lms_quality_service.py`)**:
+    - Mở rộng `fetch_lms_class_slots_via_page` truy vấn thêm `id` lớp và `id` từng học viên trong `students`; với các lớp có buổi học `index ∈ {11, 12, 13}` (Buổi 12, 13, 14), gọi batch GraphQL `findAllStudentWorks(filter: { classId_in: [...] })` (kèm fallback theo từng `classId`), đối chiếu tên học viên với `work.title` để gán `hasStudentInfoInTitle`, thay thế tên thật trong `title`/`description`/`comment` bằng `[HS]` và ẩn danh hóa `studentId` thành `stu_1`, `stu_2`, ... ngay trong trình duyệt trước khi trả về Python.
+  - **Chấm chất lượng SPCK Buổi 12, 13, 14 theo Phương án A & Quy tắc Robotics (`ROB`) (`services/lms_quality_service.py`, `services/report_status.py`, `repositories/report_repository.py`, `static/js/jobs.js`)**:
+    - Chưa nộp SPCK (`0/N` học viên đi học) $\rightarrow$ **Lỗi (`ISSUE_CODE_LMS_SPCK_MISSING = "LMS_SPCK_MISSING"`, `SEVERITY_FAIL`, `is_failed = True`)**: `[LMS] Chưa nộp SPCK (N/N HS)`, tô đỏ trên Dashboard, `Tình trạng đánh giá: ❌ Chưa nộp SPCK trên LMS` (khi Zalo và nhận xét LMS đã hoàn thành), đưa vào Email Quản lý / CSV và ghi tự động lên cột `Mô tả vấn đề (TE/TF/QC)` của Teaching.
+    - Đã nộp SPCK (`>0/N` học viên) nhưng thiếu số lượng học viên hoặc thiếu thành phần phụ $\rightarrow$ **Nhắc nhở QC (`ISSUE_CODE_LMS_SPCK_NOTE = "LMS_SPCK_NOTE"`, `SEVERITY_NOTE`, `is_failed = False`)**: thiếu nộp SPCK (`x/N HS`), thiếu thông tin học viên trong tiêu đề, thiếu ảnh thumbnail/ảnh chụp, thiếu file đính kèm (áp dụng mức `NOTE` cho cả Coding lẫn Robotics `ROB` theo Quyết định 2), chưa có nhận xét hoặc nhận xét SPCK sơ sài ($\ge 12$ từ, $\ge 6$ từ khác nhau, $\ge 50$ ký tự, $\ge 2$ mệnh đề/câu, $\ge 2$ từ khóa chuyên môn/đánh giá sản phẩm), và riêng **Buổi 14** bắt buộc thêm link YouTube (`_has_spck_youtube_link`) + link/file Slide thuyết trình (`_has_spck_slide_link_or_file`).
+    - Mở khóa kiểm định LMS SPCK và đồng bộ cột `Mô tả vấn đề (TE/TF/QC)` trên Teaching cho cả **Buổi 14** (`inspect_and_attach_quality_issues`, `_attach_bcnb_row_metadata`, `_maybe_update_row_checker_note` kèm gọi `fetch_and_evaluate_lms_quality` on-demand khi chưa prefetch, `update_bcnb_reports`) trong khi vẫn giữ nguyên miễn trừ báo cáo Zalo (`CATEGORY_EXEMPT`) cho Buổi 14.
+  - **Bằng chứng**: Unit test mục tiêu (`44/44 OK` trên `tests/test_lms_quality_service.py`, `tests/test_report_status.py`, `tests/test_bcnb_actions.py`), `node tests/check_template_js.js` pass (`scripts=7 handlers=37 behavior=13`), `.\CHECK_QUALITY.ps1 -Isolated` exit `0` (`QUALITY GATE PASSED`, Ruff 0, Mypy 0 trên 78 source files, coverage `78.0%`), `git diff --check` exit `0`; Independent Review `gpt-6.1-sol (high)` Round 1 (`01a1c401-ead8-77e3-8502-c11bb16a7af2`) `NEEDS_FIX` -> Round 2 (`01a1c41b-006c-7bd1-9ffc-436145595176`) `NEEDS_FIX` -> Round 3 (`01a1c424-8254-74a2-94a3-28b2ecaefafb`) `VERDICT: PASS`.
 
 - 2026-11-06 (Sửa lỗi tự động gửi Email báo cáo lớp lỗi cho Quản lý qua SMTP Gmail — source/local, `DEC-036`, `DEC-040`):
   - **Khắc phục lỗi xác thực SMTP Gmail (`googleform_autosubmit/config.py`, `services/report_email_service.py`, `static/js/jobs.js`)**:
