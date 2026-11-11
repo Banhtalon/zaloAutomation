@@ -590,6 +590,12 @@ def _resolve_row_evaluation_status(
     return "❌ Chưa hoàn thành nhận xét"
 
 
+def _split_display_issues(text: str) -> list[str]:
+    """Split display messages at source-tag boundaries, keeping semicolons in reasons."""
+    segments = re.split(r"\s*[;|]\s*(?=\[(?:LMS|Zalo)\])", text, flags=re.IGNORECASE)
+    return [part.strip() for part in segments if part.strip()]
+
+
 def _resolve_row_issue_description(
     item: dict[str, Any],
     *,
@@ -614,10 +620,12 @@ def _resolve_row_issue_description(
         cleaned = " ".join(str(raw_segment or "").split()).strip(" ;")
         if not cleaned:
             return
-        if legacy_dup_re.match(cleaned) or (
-            is_auto
-            and re.match(r"^\[LMS\]", cleaned, flags=re.IGNORECASE)
-            and "copy-paste trùng lặp" in cleaned.lower()
+        if is_auto and (
+            legacy_dup_re.match(cleaned)
+            or (
+                re.match(r"^\[LMS\]", cleaned, flags=re.IGNORECASE)
+                and "copy-paste trùng lặp" in cleaned.lower()
+            )
         ):
             return
         if is_auto or re.match(r"^\[(?:LMS|Zalo)\]\s*", cleaned, flags=re.IGNORECASE):
@@ -627,12 +635,12 @@ def _resolve_row_issue_description(
             seen_norm.add(key)
             parts.append(cleaned)
 
-    def _add(val: Any, *, split_semicolon: bool = False) -> None:
+    def _add(val: Any, *, split_semicolon: bool = False, is_auto: bool = False) -> None:
         if not val:
             return
         if isinstance(val, (list, tuple)):
             for entry in val:
-                _add(entry, split_semicolon=False)
+                _add(entry, split_semicolon=False, is_auto=is_auto)
             return
         if isinstance(val, Mapping):
             structured_text = issue_text(val)
@@ -641,6 +649,11 @@ def _resolve_row_issue_description(
             return
         text = str(val).strip()
         if not text:
+            return
+        segments = _split_display_issues(text)
+        if len(segments) > 1:
+            for segment in segments:
+                _add(segment, is_auto=is_auto)
             return
         # Unwrap legacy [Auto QC: ...] blocks or [LMS]/[Zalo] auto segments so embedded issues deduplicate cleanly
         manual_note, auto_segments = split_checker_issue_note(text)
@@ -652,15 +665,15 @@ def _resolve_row_issue_description(
             return
         if split_semicolon:
             for segment in text.split(";"):
-                _add_one(segment, is_auto=False)
+                _add_one(segment, is_auto=is_auto)
         else:
-            _add_one(text, is_auto=False)
+            _add_one(text, is_auto=is_auto)
 
     fb_dict = fb or {}
     qc_note = _first_defined_str(item, st, fb_dict, key="qc_issue_note")
     _add(qc_note, split_semicolon=False)
     for key in ("quality_issues", "lms_quality_issues", "zalo_content_issues"):
-        _add(next((src[key] for src in (item, st) if key in src and src[key] is not None), fb_dict.get(key)))
+        _add(next((src[key] for src in (item, st) if key in src and src[key] is not None), fb_dict.get(key)), is_auto=True)
     lms_summary = _first_defined_str(item, st, fb_dict, key="lms_lesson_summary")
     for zalo_issue in evaluate_zalo_content_issues(
         item,

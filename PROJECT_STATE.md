@@ -5,6 +5,14 @@
 
 ## Trạng thái ngắn
 
+- 2026-11-11 (Gọn cột mô tả vấn đề trong email/báo cáo, source/local đã kiểm chứng):
+  - Nguyên nhân tái hiện bằng dữ liệu mẫu tương ứng ảnh Owner là ghi chú Teaching chứa cả nhóm vấn đề được ghép thêm với các vấn đề riêng trong `quality_issues`/`lms_quality_issues`. CSA03 hiển thị 4 đoạn cho 2 vấn đề, ARMI12 hiển thị 10 đoạn cho 5 vấn đề.
+  - `repositories/report_repository.py` tách nhóm theo ranh giới nhãn LMS/Zalo rồi loại nội dung trùng, giữ dấu chấm phẩy trong lý do và các số lượng khác nhau. Áp dụng cả chuỗi `issue_description` đã lưu qua luồng chuẩn bị email/CSV. Chỉ thay cách trình bày, không thay chứng minh nguồn ghi chú Teaching.
+  - `services/report_email_service.py` hiển thị từng vấn đề thành gạch đầu dòng, chữ thường màu trung tính, nhấn đỏ cảnh báo chưa nộp SPCK, bỏ nền hồng và chữ đậm toàn ô. Canh đầu ô để dễ đối chiếu trong bảng.
+  - `tests/test_report_issue_display.py` có 7 ca cho trùng nhóm, dữ liệu cũ, giữ lý do/số lượng/ghi chú, HTML an toàn và cách trình bày. Nhóm mục tiêu mở rộng 60/60 PASS, exit 0, JavaScript/Ruff PASS. Bản xem trước dữ liệu mẫu 1120px, 7 gạch đầu dòng cho 2 + 5 vấn đề, đã render và xem bằng Chromium, giữ nguyên số lượng/lý do.
+  - Review độc lập Sol 6.1 high phát hiện mất lời nhắc tay có nhãn LMS khi đi qua bộ lọc cảnh báo copy-paste cũ. Đã truyền rõ nguồn danh sách tự động trong helper `_add`, chỉ lọc cảnh báo cũ của nguồn tự động. Review follow-up `VERDICT: PASS`, 8/8 test và hai phép thử riêng PASS, SHA-256 khớp source/test hiện tại. CLI review ban đầu bị lỗi công cụ `registered Core process has no package identity`, đã thay bằng subagent độc lập cùng model/mức suy luận.
+  - Gate cuối `./CHECK_QUALITY.ps1 -Isolated` exit 0, `QUALITY GATE PASSED`, 705/705 tests trong 268.165 giây, coverage 78.7%, Ruff/Mypy PASS trên 78 source files, JavaScript scripts=7 handlers=37 behavior=13, secret scan 0. Đối chiếu manifest với baseline sạch `a756593`, phạm vi sáu file. Artifact tại `%TEMP%/zalo-report-readability-6764f28e053c461fa45a23c8eee2420f`, gồm `preview.html`, `preview.png`, `quality-final.log`, manifest. Chưa gửi email thật hoặc khởi động lại bot vận hành.
+
 - 2026-11-11 (Miễn SPCK cho khóa PTB/CSB ở buổi 12–14, DEC-044, source/local đã kiểm chứng):
   - Theo yêu cầu trực tiếp của Owner, nhận diện mã khóa PTB/CSB trong mã lớp, gồm hậu tố số lớp, mã cơ sở và biến thể online/1:1. Các khóa khác tiếp tục dùng quy tắc hiện hành.
   - `services/lms_quality_service.py` bỏ truy vấn bài nộp của lớp được miễn, trả SPCK `NOT_REQUIRED` cả khi dữ liệu LMS chưa tải được. Tiếp tục chấm nội dung và nhận xét theo buổi. `services/zalo_bcnb_service.py` đưa cảnh báo SPCK tự động cũ vào lịch sử khi lần kiểm tra mới xác nhận không yêu cầu SPCK.

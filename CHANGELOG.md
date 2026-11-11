@@ -4,6 +4,12 @@ Tài liệu này ghi lại toàn bộ quá trình hình thành, phát triển ki
 
 ---
 
+## [2026-11-11] — Loại cảnh báo lặp và làm gọn cột mô tả vấn đề
+
+- `repositories/report_repository.py` tách nhóm mô tả có nhãn LMS/Zalo trước khi khử trùng giữa ghi chú Teaching và danh sách vấn đề. Giữ nguyên lý do, số lượng và các nội dung khác nhau. Chuỗi mô tả cũ cũng được xử lý khi tạo email/CSV mới.
+- `services/report_email_service.py` trình bày từng vấn đề thành gạch đầu dòng, bỏ nền hồng/chữ đỏ đậm toàn ô, chỉ nhấn đỏ cảnh báo chưa nộp SPCK, canh trên các ô trong bảng.
+- Thêm 7 ca kiểm thử `tests/test_report_issue_display.py`. Nhóm mục tiêu mở rộng 60/60 PASS, JavaScript/Ruff PASS, bản xem trước HTML đã render và xem bằng Chromium. Review độc lập phát hiện và đã sửa trường hợp mất ghi chú tay do bộ lọc cảnh báo cũ, follow-up Sol 6.1 high PASS với 8/8 test độc lập. Gate cô lập cuối exit 0, 705/705 tests, coverage 78.7%, Ruff/Mypy/JavaScript PASS, secret scan 0. Dữ liệu thật và email đã gửi chưa được thay đổi.
+
 ## [2026-11-11] — Miễn SPCK cho khóa PTB và CSB ở buổi 12, 13, 14
 
 - Theo Owner, các lớp thuộc khóa PTB/CSB được miễn SPCK buổi 12–14. `services/lms_quality_service.py` bỏ truy vấn bài nộp và trả `NOT_REQUIRED`, kể cả khi chưa đọc được dữ liệu buổi. Nhận xét học viên tiếp tục theo quy tắc hiện hành.

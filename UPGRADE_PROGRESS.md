@@ -1,6 +1,6 @@
 # KẾ HOẠCH CHI TIẾT & TIẾN ĐỘ NÂNG CẤP DỰ ÁN (UPGRADE PLAN & PROGRESS)
 
-**Cập nhật lần cuối:** `2026-11-11 17:57 +07:00`
+**Cập nhật lần cuối:** `2026-11-11 19:48 +07:00`
 **Trạng thái hiện tại:** Đã hoàn tất **Phase 0 → Phase 3.2 (`45/45` ✅)**, hoàn tất **Wave 4 (Phase 4.0 → Phase 4.4: `25/25` ✅ — Kiểm định chất lượng nội dung LMS/Zalo, Tự động ghi `Mô tả vấn đề` lên Teaching & Bảng Email Quản lý 9 cột)**, hoàn tất **Wave 5 (Phase 5.0 → 5.8: `59/59` ✅ — Hardening toàn diện luồng kiểm tra báo cáo)**, và hoàn tất **Phase 6.1 (`7/7` ✅ — Kiểm định Nộp Sản Phẩm Cuối Khóa SPCK Buổi 12, 13, 14 & Hotfix GraphQL/PII `DEC-042`)**. Phase 6.2 đã hoàn tất source/local (`6/6`), có bản đối chiếu cảnh báo lịch sử chờ duyệt trước thao tác ghi thật.
 
 ---
@@ -34,6 +34,14 @@
 | **Phase 6.1** | **Kiểm định Nộp Sản Phẩm Cuối Khóa (SPCK) ở Buổi 12, 13, 14 (`DEC-042`)** | P1 (Cao) | ✅ Hoàn thành | `7/7` |
 | **Phase 6.2** | **Sửa kết quả SPCK, kiểm tra nhận xét theo điểm danh và đối chiếu cảnh báo cũ** | P0 | ✅ Source/local đạt kiểm chứng | `6/6` |
 | **Phase 6.3** | **Miễn SPCK khóa PTB/CSB buổi 12–14, DEC-044** | P1 | ✅ Source/local đạt kiểm chứng | `4/4` |
+| **Phase 6.4** | **Loại cảnh báo lặp và làm gọn mô tả vấn đề trong email/báo cáo** | P1 | ✅ Source/local đạt kiểm chứng | `4/4` |
+
+### Tiến độ 6.4
+
+1. Tái hiện hai nhóm cảnh báo bị lặp từ ghi chú Teaching và danh sách vấn đề. Baseline sạch `a756593`, phạm vi hai file source, một file test và ba tài liệu tiến độ.
+2. Tách nhóm và loại nội dung trùng ở bước ghép mô tả. Giữ các số lượng/lý do khác nhau. HTML hiển thị mỗi vấn đề một gạch đầu dòng, chữ thường màu trung tính, nhấn đỏ chưa nộp SPCK.
+3. Nhóm mục tiêu mở rộng 60/60 PASS, JavaScript/Ruff PASS. Đã render và xem bản mẫu hai lớp với 7 gạch đầu dòng tương ứng 2 và 5 vấn đề. Review độc lập phát hiện và đã sửa trường hợp mất ghi chú tay qua bộ lọc cảnh báo cũ, Sol 6.1 high follow-up PASS, 8/8 test độc lập.
+4. Gate cuối exit 0, 705/705 tests, coverage 78.7%, Ruff/Mypy/JavaScript PASS, secret scan 0. Đối chiếu SHA-256 source/test, phạm vi sáu file và baseline sạch `a756593`, đóng gói commit/push theo DEC-040. Chưa gửi email, khởi động lại bot vận hành hoặc sửa dữ liệu thật.
 
 ### Tiến độ 6.3
 

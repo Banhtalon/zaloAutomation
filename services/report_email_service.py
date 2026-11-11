@@ -24,11 +24,12 @@ from repositories.report_repository import (
     ReportRepository,
     _resolve_row_evaluation_status,
     _resolve_row_issue_description,
+    _split_display_issues,
     build_weekly_summary_csv,
     normalize_zalo_status_text,
     sanitize_csv_cell,
 )
-from services.report_status import resolve_lms_status
+from services.report_status import ISSUE_CODE_LMS_SPCK_MISSING, issue_code, resolve_lms_status
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -584,6 +585,7 @@ def build_failed_classes_email_package(
         td_parts: list[str] = []
         for col_i, cell in enumerate(cells):
             extra_style = ""
+            cell_html = html.escape(cell)
             if col_i == 0:
                 extra_style = "text-align:center;font-weight:600;color:#475569;"
             elif col_i == 1:
@@ -591,10 +593,17 @@ def build_failed_classes_email_package(
             elif col_i in (2, 3):
                 extra_style = "text-align:center;white-space:nowrap;"
             elif col_i == 8 and cell != "—":
-                extra_style = "color:#b91c1c;font-weight:600;background:#fef2f2;"
+                extra_style = "color:#334155;font-weight:400;line-height:1.6;"
+                issue_items: list[str] = []
+                for issue in _split_display_issues(cell):
+                    issue_style = "margin:0 0 6px;"
+                    if issue_code(issue) == ISSUE_CODE_LMS_SPCK_MISSING:
+                        issue_style += "color:#b91c1c;font-weight:600;"
+                    issue_items.append(f'<li style="{issue_style}">{html.escape(issue)}</li>')
+                cell_html = '<ul style="margin:0;padding-left:18px;">' + "".join(issue_items) + "</ul>"
             td_parts.append(
-                f'<td style="border:1px solid #cbd5e1;padding:7px 10px;font-size:13px;background:{row_bg};{extra_style}">'
-                f"{html.escape(cell)}</td>"
+                f'<td style="border:1px solid #cbd5e1;padding:7px 10px;font-size:13px;vertical-align:top;background:{row_bg};{extra_style}">'
+                f"{cell_html}</td>"
             )
         html_rows.append(f"<tr>{''.join(td_parts)}</tr>")
 
