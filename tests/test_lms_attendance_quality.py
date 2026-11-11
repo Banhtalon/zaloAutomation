@@ -38,6 +38,41 @@ def slot(rows, **extra):
 
 
 class LmsAttendanceQualityTests(unittest.TestCase):
+    def test_ptb_csb_exemptions_keep_comment_requirements_and_other_courses(self):
+        rows = [{"studentKey": "stu_1", "status": "ATTENDED", "comment": ""}]
+        for code in ("PTB", "CSB", "VT-C4K-PTB15", "VT-CSB01-HB", "onl_csb03", "1:1 PTB02"):
+            for lesson in (12, 13, 14):
+                with self.subTest(code=code, lesson=lesson):
+                    for data in (
+                        None,
+                        slot(rows),
+                        slot(rows, studentWorks=[], studentWorksFetchError=True),
+                    ):
+                        result = evaluate_lms_slot_quality(data, class_code=code, lesson=lesson)
+                        self.assertEqual(result["lms_spck"]["status"], "NOT_REQUIRED")
+                        self.assertFalse(
+                            any("SPCK" in issue_text(item) for item in result["issues"])
+                        )
+                    result = evaluate_lms_slot_quality(slot(rows), class_code=code, lesson=lesson)
+                    self.assertEqual(
+                        result["lms_comments"]["status"], "EXEMPT" if lesson == 14 else "MISSING"
+                    )
+        for code in (
+            "VT-PTA15",
+            "VT-PTI01",
+            "VT-CSA01",
+            "VT-CSI01",
+            "VT-GA38",
+            "VT-XPTB01",
+            "VT-CSBASIC01",
+        ):
+            for lesson in (12, 13, 14):
+                with self.subTest(code=code, lesson=lesson):
+                    result = evaluate_lms_spck_quality(
+                        slot(rows, studentWorks=[]), class_code=code, lesson=lesson
+                    )
+                    self.assertEqual(result["status"], "MISSING")
+
     def test_attendees_only_and_absent_with_notice_exemption(self):
         rows = [
             {"studentKey": "stu_1", "status": "LATE_ARRIVED", "comment": GOOD_COMMENT},

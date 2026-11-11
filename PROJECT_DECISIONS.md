@@ -1209,3 +1209,12 @@
   - Đính chính ghi chú cũ trên Teaching phải có bản xem trước, bằng chứng phần ghi tự động, duyệt của Owner và đọc lại để phát hiện thay đổi đồng thời trước khi ghi.
 - Consequences: Giảm cảnh báo sai và thể hiện rõ học viên được miễn. Kết quả kiểm tra mã nguồn và đối chiếu chỉ đọc được ghi riêng với nghiệm thu thao tác ghi trên hệ thống thật.
 - Supersedes: Bổ sung điều kiện xác minh và miễn theo điểm danh cho DEC-041, DEC-042.
+
+## DEC-044 — Miễn SPCK cho khóa PTB và CSB ở buổi 12, 13, 14
+
+- Date: 2026-11-11.
+- Status: Accepted by Owner, thực hiện và kiểm chứng theo PROJECT_STATE.md.
+- Context: Owner xác nhận các lớp khóa PTB và CSB không cần nộp SPCK ở cả ba buổi 12, 13, 14.
+- Decision: Nhận diện chính xác khóa PTB/CSB trong mã lớp. Bỏ truy vấn và kiểm định SPCK cho hai khóa này ở ba buổi, trả NOT_REQUIRED. Tiếp tục kiểm tra nhận xét LMS và báo cáo Zalo theo quy tắc từng buổi. PTA/PTI, CSA/CSI và các khóa khác tiếp tục dùng quy tắc hiện hành. Lần kiểm tra mới đưa cảnh báo SPCK tự động cũ của lớp được miễn vào lịch sử, bảo vệ ghi chú tay theo cơ chế chứng minh nguồn hiện có.
+- Consequences: Không phát sinh cảnh báo thiếu SPCK hoặc thiếu thành phần sản phẩm đối với PTB/CSB ở buổi 12–14. Dữ liệu lịch sử thật cần quy trình sửa riêng đã được duyệt.
+- Supersedes: Bổ sung ngoại lệ theo khóa cho DEC-042, DEC-043.

@@ -135,6 +135,17 @@ class _NodePage:
 
 
 class SpckSessionFetchTests(unittest.IsolatedAsyncioTestCase):
+    async def test_exempt_ptb_csb_courses_skip_work_queries_but_keep_attendance(self):
+        for code in ("VT-C4K-PTB15", "VT-CSB01-HB"):
+            page = _NodePage("direct", 7)
+            with patch.dict(os.environ, {"ZALO_QUALITY_ISOLATED": "0"}):
+                data = await fetch_lms_class_slots_via_page(page, class_names=[code])
+            self.assertEqual(page.requests, [])
+            self.assertEqual(len(data[code][0]["studentAttendance"]), 7)
+            for lesson in (12, 13, 14):
+                result = evaluate_lms_spck_quality(data[code][0], class_code=code, lesson=lesson)
+                self.assertEqual(result["status"], "NOT_REQUIRED")
+
     async def fetch(self, mode: str, count: int = 7) -> tuple[dict, _NodePage]:
         page = _NodePage(mode, count)
         codes = [f"VT-JSB{i}" for i in range(60)] if mode == "budget" else ["VT-GA38"]

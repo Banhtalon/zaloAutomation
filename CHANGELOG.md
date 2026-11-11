@@ -4,6 +4,12 @@ Tài liệu này ghi lại toàn bộ quá trình hình thành, phát triển ki
 
 ---
 
+## [2026-11-11] — Miễn SPCK cho khóa PTB và CSB ở buổi 12, 13, 14
+
+- Theo Owner, các lớp thuộc khóa PTB/CSB được miễn SPCK buổi 12–14. `services/lms_quality_service.py` bỏ truy vấn bài nộp và trả `NOT_REQUIRED`, kể cả khi chưa đọc được dữ liệu buổi. Nhận xét học viên tiếp tục theo quy tắc hiện hành.
+- `services/zalo_bcnb_service.py` lưu cảnh báo SPCK tự động cũ trong lịch sử khi kiểm tra mới xác nhận không yêu cầu SPCK. Cơ chế bảo vệ ghi chú tay tiếp tục được kiểm thử.
+- Ba file kiểm thử LMS/điểm danh/báo cáo bổ sung ca kiểm tra đúng khóa và hậu tố lớp, khóa gần tên, dữ liệu chưa rõ, ghi chú Teaching, CSV và email. Hai mẫu lớp cũ trong `tests/test_lms_quality_service.py`, `tests/test_report_status.py` chuyển PTB sang JSB để giữ kiểm tra SPCK ở khóa bắt buộc nộp. 53/53 test mục tiêu PASS, review Sol 6.1 high PASS về source. Gate cô lập cuối exit 0, 698/698 tests, coverage 78.6%, Ruff/Mypy/JavaScript PASS, secret scan 0. Quyết định tại DEC-044, trạng thái tại PROJECT_STATE.md. Chưa quét ghi production hoặc sửa dữ liệu lịch sử thật.
+
 ## [2026-11-11] — Phase 6.2, kiểm tra SPCK theo buổi và nhận xét theo điểm danh
 
 - Sửa `services/lms_quality_service.py`, `services/external_gateways.py`, `services/zalo_parallel_service.py` để giới hạn truy vấn vào buổi được quét, xác minh SPCK còn thiếu theo học viên và nhận bài chờ duyệt. Dữ liệu lỗi hoặc không đầy đủ chuyển sang chờ xác minh.

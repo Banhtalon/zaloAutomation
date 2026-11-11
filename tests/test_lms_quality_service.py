@@ -508,7 +508,7 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         exempt = evaluate_lms_slot_quality(
             {"summary": "", "studentAttendance": []},
-            class_code="VT-C4K-PTB16",
+            class_code="VT-JSB16",
             khoi="Coding",
             lesson=14,
         )

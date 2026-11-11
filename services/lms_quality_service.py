@@ -58,6 +58,11 @@ MIN_SPCK_COMMENT_CHARS = 50
 MIN_SPCK_COMMENT_WORDS = 12
 SPCK_REQUIRED_LESSONS = frozenset({12, 13, 14})
 SPCK_SLIDE_YOUTUBE_LESSONS = frozenset({14})
+
+
+def _is_spck_exempt_course(class_code: str) -> bool:
+    """PTB and CSB courses do not require SPCK in sessions 12–14."""
+    return bool(re.search(r"(?:^|-)(?:PTB|CSB)(?:[0-9]+)?(?:-|$)", normalize_class_code(class_code)))
 LMS_GRAPHQL_ENDPOINT = "https://lms-api.mindx.edu.vn/"
 LMS_ALLOWED_HOSTNAME = "lms.mindx.edu.vn"
 LMS_ALLOWED_LOGIN_HOSTNAMES = frozenset(
@@ -1011,10 +1016,11 @@ def evaluate_lms_spck_quality(
     """Evaluate final project (SPCK) submissions on LMS for Lessons 12, 13, and 14 (DEC-042)."""
     lesson_num = _parse_lesson_number(lesson)
     is_robotics = _is_robotics_class(class_code, khoi)
+    spck_required = lesson_num in SPCK_REQUIRED_LESSONS and not _is_spck_exempt_course(class_code)
     empty_res: dict[str, Any] = {
-        "is_spck_lesson": lesson_num in SPCK_REQUIRED_LESSONS,
+        "is_spck_lesson": spck_required,
         "is_robotics": is_robotics,
-        "status": "NOT_REQUIRED" if lesson_num not in SPCK_REQUIRED_LESSONS else "UNVERIFIED",
+        "status": "UNVERIFIED" if spck_required else "NOT_REQUIRED",
         "attended_count": 0,
         "exempt_count": 0,
         "submitted_count": 0,
@@ -1028,7 +1034,7 @@ def evaluate_lms_spck_quality(
         "missing_slide_count": 0,
         "issues": [],
     }
-    if lesson_num not in SPCK_REQUIRED_LESSONS or not isinstance(slot_data, Mapping):
+    if not spck_required or not isinstance(slot_data, Mapping):
         return empty_res
 
     student_attendance = slot_data.get("studentAttendance")
@@ -1344,7 +1350,7 @@ def evaluate_lms_slot_quality(
                 {"status": "EXEMPT" if lesson_14_flag else "UNVERIFIED"},
                 {
                     "status": "UNVERIFIED"
-                    if _parse_lesson_number(lesson) in SPCK_REQUIRED_LESSONS
+                    if _parse_lesson_number(lesson) in SPCK_REQUIRED_LESSONS and not _is_spck_exempt_course(class_code)
                     else "NOT_REQUIRED"
                 },
             ),
@@ -1776,7 +1782,7 @@ async def fetch_lms_class_slots_via_page(
                                 resolved_centres.append(s_cid)
 
     js_script = """
-    async ({ endpoint, classCodes, centres, maxSlots, maxStudents, timeoutMs, preResolvedToken, allowedHostname, allowedTokenKeys, targetLessons }) => {
+    async ({ endpoint, classCodes, centres, maxSlots, maxStudents, timeoutMs, preResolvedToken, allowedHostname, allowedTokenKeys, targetLessons, spckExemptClasses }) => {
         const isTokenUsable = (rawToken, expTime) => {
             if (typeof rawToken !== 'string') return false;
             let clean = rawToken.trim().replace(/^"|"$/g, '');
@@ -2801,6 +2807,7 @@ async def fetch_lms_class_slots_via_page(
         };
         const exactId = (value) => typeof value === 'string' && value.trim() && value === value.trim() && value.length <= 64 ? value : '';
         for (const code of classCodes) {
+            if ((spckExemptClasses || []).includes(code)) continue;
             const meta = matchedClassMeta[code];
             const slotsArr = Array.isArray(out[code]) ? out[code] : [];
             for (const s of slotsArr) {
@@ -3145,6 +3152,7 @@ async def fetch_lms_class_slots_via_page(
             "maxStudents": MAX_LMS_STUDENTS_PER_SLOT,
             "timeoutMs": int(timeout_ms),
             "targetLessons": target_lessons_by_class,
+            "spckExemptClasses": [code for code in normalized_codes if _is_spck_exempt_course(code)],
             "preResolvedToken": pre_resolved_token,
             "allowedHostname": LMS_ALLOWED_HOSTNAME,
             "allowedTokenKeys": sorted(ALLOWED_LMS_TOKEN_KEYS),

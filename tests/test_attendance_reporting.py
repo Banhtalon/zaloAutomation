@@ -13,6 +13,8 @@ from repositories.report_repository import (
 from services.bcnb_safety import merge_checker_issue_note, normalize_auto_issue_text
 from services.report_email_service import _prepare_email_row_fields
 from services.report_status import has_spck_missing_fail, is_failed, resolve_lms_status
+from services.lms_quality_service import inspect_and_attach_quality_issues
+from services.zalo_bcnb_service import _collect_row_verifiable_auto_issues
 
 
 def completed_row():
@@ -34,6 +36,57 @@ def completed_row():
 
 
 class AttendanceReportingTests(unittest.TestCase):
+    def test_exempt_courses_replace_historical_spck_fault_through_teaching_and_exports(self):
+        old = "[LMS] Chưa nộp SPCK (1/1 HS)"
+        for code in ("VT-C4K-PTB15", "VT-CSB01"):
+            for lesson in (12, 13, 14):
+                for unknown in (False, True):
+                    row = completed_row()
+                    row.update(
+                        class_code=code,
+                        lesson=str(lesson),
+                        date="11/11/2026",
+                        lms_quality_issues=[old],
+                        quality_issues=[old],
+                    )
+                    row["scan_target"].update(
+                        class_code=code, lesson=str(lesson), class_date="11/11/2026"
+                    )
+                    slots = {
+                        code: [
+                            {
+                                "index": lesson - 1,
+                                "date": "2026-11-11",
+                                "summary": "Thực hành lập trình và ôn tập kiến thức",
+                                "studentAttendance": [
+                                    {
+                                        "studentKey": "stu_1",
+                                        "status": "UNKNOWN" if unknown else "ATTENDED",
+                                        "comment": "Con nắm vững kiến thức vòng lặp, tuy nhiên còn nhầm điều kiện dừng, về nhà con nên luyện tập thêm bài tập và kiểm tra lại kết quả.",
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+                    inspect_and_attach_quality_issues([row], lms_slots_by_class=slots)
+                    self.assertEqual(row["lms_spck"]["status"], "NOT_REQUIRED")
+                    effective, sync = _collect_row_verifiable_auto_issues(
+                        row,
+                        existing_note="QC ghi tay | " + old,
+                        lms_slots_by_class=slots,
+                        proven_auto_issues=[old],
+                    )
+                    merged = merge_checker_issue_note(
+                        "QC ghi tay | " + old, effective, proven_auto_issues=[old]
+                    )
+                    self.assertTrue(sync)
+                    self.assertIn("QC ghi tay", merged)
+                    self.assertNotIn("SPCK", merged)
+                    self.assertFalse(has_spck_missing_fail(row))
+                    self.assertFalse(is_failed(row))
+                    self.assertNotIn("Chưa nộp SPCK", build_weekly_summary_csv([row]))
+                    self.assertNotIn("SPCK", _prepare_email_row_fields(1, row)["evaluation_status"])
+
     def test_verified_attendees_override_old_unchecked_checkbox_on_all_exports(self):
         row = completed_row()
         status = "✅ Đã nhận xét 7/7 HS đi học · 1 HS nghỉ miễn"

@@ -5,6 +5,12 @@
 
 ## Trạng thái ngắn
 
+- 2026-11-11 (Miễn SPCK cho khóa PTB/CSB ở buổi 12–14, DEC-044, source/local đã kiểm chứng):
+  - Theo yêu cầu trực tiếp của Owner, nhận diện mã khóa PTB/CSB trong mã lớp, gồm hậu tố số lớp, mã cơ sở và biến thể online/1:1. Các khóa khác tiếp tục dùng quy tắc hiện hành.
+  - `services/lms_quality_service.py` bỏ truy vấn bài nộp của lớp được miễn, trả SPCK `NOT_REQUIRED` cả khi dữ liệu LMS chưa tải được. Tiếp tục chấm nội dung và nhận xét theo buổi. `services/zalo_bcnb_service.py` đưa cảnh báo SPCK tự động cũ vào lịch sử khi lần kiểm tra mới xác nhận không yêu cầu SPCK.
+  - Bổ sung kiểm thử trong `tests/test_lms_attendance_quality.py`, `tests/test_spck_session_fetch.py`, `tests/test_attendance_reporting.py`, bao gồm miễn đúng khóa, không miễn PTA/PTI/CSA/CSI, không ghép nhầm chuỗi con, dữ liệu chưa rõ, giữ ghi chú tay và xuất báo cáo. Hai kiểm thử cũ ở `tests/test_lms_quality_service.py`, `tests/test_report_status.py` chuyển mẫu lớp PTB sang JSB để tiếp tục chứng minh SPCK vẫn bắt buộc ở khóa khác.
+  - Kiểm thử mục tiêu mở rộng 53/53 PASS, exit 0. JavaScript PASS (scripts=7, handlers=37, behavior=13), Ruff/Mypy PASS. Review Sol 6.1 high `VERDICT: PASS` về source, 19 test đồng bộ của reviewer đạt. Bộ chặn riêng của reviewer khiến lượt browser test của reviewer không xác minh được, parent đã chạy 10/10 browser test tổng hợp thành công trong nhóm mục tiêu. Gate cuối `./CHECK_QUALITY.ps1 -Isolated` exit 0, `QUALITY GATE PASSED`, 698/698 tests trong 521.599 giây, coverage 78.6%, Mypy 78 source files, secret scan 0. Lượt đầu thất bại đúng hai test dùng kỳ vọng PTB cũ, đã sửa mẫu lớp và chạy lại toàn bộ đạt. Log và manifest tại `%TEMP%/zalo-ptb-csb-70a4d51160384ab18228748c13130ac1`. Baseline sạch `df6e508`, phạm vi 11 file. Dữ liệu lịch sử production chưa được sửa.
+
 - 2026-11-11 (Phase 6.2 — SPCK theo buổi, miễn theo điểm danh và nhận xét có lý do, source/local đã kiểm chứng, DEC-043):
   - Ba worker `gpt-6.1-sol`, mức suy luận `high`, đã thực hiện phần lấy SPCK, chấm nhận xét/điểm danh và hiển thị/xuất báo cáo. Baseline sạch `1209dee`.
   - SPCK truy vấn đúng `classSessionId_equals`, xác minh từng học viên còn thiếu bằng `studentId_equals`, nhận bài chờ duyệt. Giới hạn 20 kết quả được xử lý bằng truy vấn từng học viên. Lỗi, mơ hồ, vượt giới hạn hoặc thiếu bằng chứng trả trạng thái chờ xác minh.

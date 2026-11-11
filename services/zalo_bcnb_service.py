@@ -624,7 +624,7 @@ def _collect_row_verifiable_auto_issues(
     target = result.get("scan_target")
     target = target if isinstance(target, dict) else {}
     spck = result.get("lms_spck", target.get("lms_spck"))
-    if isinstance(spck, Mapping) and spck.get("status") == "UNVERIFIED":
+    if isinstance(spck, Mapping) and spck.get("status") in {"UNVERIFIED", "NOT_REQUIRED"}:
         prior_spck = [
             item for item in existing_lms_auto
             if issue_code(item) in {ISSUE_CODE_LMS_SPCK_MISSING, ISSUE_CODE_LMS_SPCK_NOTE}

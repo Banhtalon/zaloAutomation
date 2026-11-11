@@ -312,7 +312,7 @@ class ReportStatusSingleSourceTests(unittest.IsolatedAsyncioTestCase):
         for variant in ("14", "Buổi 14", "014", 14):
             eval_res = evaluate_lms_slot_quality(
                 {"summary": "", "studentAttendance": []},
-                class_code="VT-C4K-PTB16",
+                class_code="VT-JSB16",
                 khoi="Coding",
                 lesson=variant,
             )

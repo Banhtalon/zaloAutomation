@@ -1,6 +1,6 @@
 # KẾ HOẠCH CHI TIẾT & TIẾN ĐỘ NÂNG CẤP DỰ ÁN (UPGRADE PLAN & PROGRESS)
 
-**Cập nhật lần cuối:** `2026-11-11 17:08 +07:00`
+**Cập nhật lần cuối:** `2026-11-11 17:57 +07:00`
 **Trạng thái hiện tại:** Đã hoàn tất **Phase 0 → Phase 3.2 (`45/45` ✅)**, hoàn tất **Wave 4 (Phase 4.0 → Phase 4.4: `25/25` ✅ — Kiểm định chất lượng nội dung LMS/Zalo, Tự động ghi `Mô tả vấn đề` lên Teaching & Bảng Email Quản lý 9 cột)**, hoàn tất **Wave 5 (Phase 5.0 → 5.8: `59/59` ✅ — Hardening toàn diện luồng kiểm tra báo cáo)**, và hoàn tất **Phase 6.1 (`7/7` ✅ — Kiểm định Nộp Sản Phẩm Cuối Khóa SPCK Buổi 12, 13, 14 & Hotfix GraphQL/PII `DEC-042`)**. Phase 6.2 đã hoàn tất source/local (`6/6`), có bản đối chiếu cảnh báo lịch sử chờ duyệt trước thao tác ghi thật.
 
 ---
@@ -33,6 +33,14 @@
 | **Phase 5.8** | **Dọn dẹp, tài liệu & nghiệm thu Wave 5** | P2 | ✅ Hoàn thành | `7/7` |
 | **Phase 6.1** | **Kiểm định Nộp Sản Phẩm Cuối Khóa (SPCK) ở Buổi 12, 13, 14 (`DEC-042`)** | P1 (Cao) | ✅ Hoàn thành | `7/7` |
 | **Phase 6.2** | **Sửa kết quả SPCK, kiểm tra nhận xét theo điểm danh và đối chiếu cảnh báo cũ** | P0 | ✅ Source/local đạt kiểm chứng | `6/6` |
+| **Phase 6.3** | **Miễn SPCK khóa PTB/CSB buổi 12–14, DEC-044** | P1 | ✅ Source/local đạt kiểm chứng | `4/4` |
+
+### Tiến độ 6.3
+
+1. Đã xác nhận phạm vi Owner yêu cầu, baseline sạch `df6e508`, allowlist gồm hai file source, năm file test và bốn tài liệu tiến độ.
+2. Đã bỏ truy vấn và chấm SPCK cho PTB/CSB ở ba buổi, kiểm tra nhận xét theo quy tắc hiện hành, lưu cảnh báo tự động cũ vào lịch sử trong lần kiểm tra mới.
+3. Đã kiểm thử mục tiêu mở rộng 53/53 PASS, bao gồm khóa tương tự vẫn yêu cầu SPCK và báo cáo/Teaching không khôi phục lỗi cũ. Hai test cũ chuyển mẫu lớp PTB sang JSB để phản ánh ngoại lệ mới.
+4. Review Sol 6.1 high PASS về source, gate cuối exit 0, 698/698 tests, coverage 78.6%, Ruff/Mypy/JavaScript PASS, secret scan 0. Đối chiếu manifest source/test và phạm vi 11 file, đóng gói commit/push theo DEC-040. Chưa sửa dữ liệu lịch sử production.
 
 ### Kế hoạch 6.2
 
