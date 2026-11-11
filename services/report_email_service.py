@@ -28,6 +28,7 @@ from repositories.report_repository import (
     normalize_zalo_status_text,
     sanitize_csv_cell,
 )
+from services.report_status import resolve_lms_status
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -296,14 +297,16 @@ def _prepare_email_row_fields(idx: int, row: dict[str, Any]) -> dict[str, str]:
         item=row,
         st=st,
     )
-    lms_status = _clean_single_line(row.get("lms_status"), "Chưa quét LMS")
+    lms_status = resolve_lms_status(row, _clean_single_line(row.get("lms_status"), "Chưa quét LMS"))
     raw_eval = str(row.get("evaluation_status") or "").strip()
-    if not raw_eval:
+    if not raw_eval or "lms_comments" in row or "lms_comments" in st:
         raw_eval = _resolve_row_evaluation_status(
             zalo_status=zalo_status,
             lms_status=lms_status,
             nx_zalo_checked=row.get("nx_zalo_checked"),
             nx_lms_checked=row.get("nx_lms_checked"),
+            row=row,
+            raw_evaluation_status=raw_eval,
         )
     evaluation_status = _clean_single_line(raw_eval, "—")
     raw_issue = str(row.get("issue_description") or "").strip()

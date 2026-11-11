@@ -573,7 +573,7 @@ class BcnbActionTests(unittest.IsolatedAsyncioTestCase):
                 },
                 st={},
             ),
-            "[LMS] Nhận xét thiếu ý; [LMS] Nhận xét Checkpoint chưa đủ cấu trúc năng lực; "
+            "[LMS] Nhận xét HS sơ sài, thiếu đủ 3 ý (4/4 HS); [LMS] Nhận xét Checkpoint chưa đủ cấu trúc năng lực (4/5 HS); "
             "[Zalo] Đã báo cáo nhưng ghi sai ngày/buổi ( Bài số 6 ); "
             "[Zalo] Đã báo cáo nhưng ghi sai ngày ( ghi ngày 22/10 nhưng lịch là ngày 21/10, buổi 13)",
         )
@@ -911,7 +911,8 @@ class BcnbActionTests(unittest.IsolatedAsyncioTestCase):
         }
         expected_note = (
             "GV báo bận | [LMS] Chưa ghi nội dung bài học; "
-            "[LMS] Nhận xét thiếu ý"
+            "[LMS] Nhận xét cần xem lại (1/1 nhận xét - nhận xét ngắn: 1/1, "
+            "chưa rõ điểm mạnh: 1/1, chưa rõ điểm cần cải thiện: 1/1, chưa rõ lời khuyên/giải pháp: 1/1)"
         )
         page, _, _, _ = self.make_dependencies()
         page.evaluate = AsyncMock(

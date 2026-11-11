@@ -691,31 +691,80 @@ def has_spck_missing_fail(row: Any) -> bool:
         return False
     raw_st = row.get("scan_target")
     st: Mapping[str, Any] = raw_st if isinstance(raw_st, Mapping) else {}
+    spck = row.get("lms_spck", st.get("lms_spck"))
+    if isinstance(spck, Mapping) and spck.get("status"):
+        return spck.get("status") == "MISSING"
     for source in (row, st):
         for list_key in ("lms_quality_issues", "quality_issues"):
             items = source.get(list_key)
             if isinstance(items, (list, tuple)):
                 for item in items:
+                    if issue_severity(item) == SEVERITY_NOTE:
+                        continue
                     if issue_code(item) == ISSUE_CODE_LMS_SPCK_MISSING:
                         return True
                     txt = issue_text(item)
                     if txt and _LMS_SPCK_MISSING_RE.match(txt):
                         return True
-    for text_val in (
-        row.get("issue_description"),
-        row.get("qc_issue_note"),
-        st.get("qc_issue_note"),
-    ):
-        raw_str = " ".join(str(text_val or "").split()).strip()
-        if not raw_str:
-            continue
-        if re.search(
-            r"(?:^|[;|\[])\s*(?:Auto\s+QC:\s*)?(?:\[(?:FAIL|NOTE)\s*:\s*[A-Z0-9_]+\]\s*)?\[LMS\]\s*Chưa\s+nộp\s+SPCK\b",
-            raw_str,
-            flags=re.IGNORECASE,
-        ):
-            return True
+    # Teaching/manual display text alone is not submission evidence.
     return False
+
+
+def resolve_lms_status(row: Mapping[str, Any], fallback: str = "") -> str:
+    """Display only counts actually verified by the current LMS inspection."""
+    raw_st = row.get("scan_target")
+    st = raw_st if isinstance(raw_st, Mapping) else {}
+    comments = row.get("lms_comments", st.get("lms_comments"))
+    attendance = row.get("lms_attendance", st.get("lms_attendance"))
+    if not isinstance(comments, Mapping):
+        return fallback
+    status = comments.get("status")
+    if status == "EXEMPT":
+        if isinstance(attendance, Mapping) and attendance.get("status") == "EXEMPT":
+            return "✅ Không áp dụng nhận xét LMS (toàn bộ học viên nghỉ)"
+        return "✅ Miễn nhận xét LMS (Buổi 14)" if is_lesson_14(row) else "⏳ Chờ xác minh điểm danh/nhận xét LMS"
+    if status == "UNVERIFIED":
+        return "⏳ Chờ xác minh điểm danh/nhận xét LMS"
+    if status not in {"COMPLETE", "MISSING", "REVIEW"}:
+        return fallback
+    if not isinstance(attendance, Mapping):
+        return "⏳ Chờ xác minh điểm danh/nhận xét LMS"
+    submitted = comments.get("submitted_count")
+    attended = attendance.get("attended_count")
+    absent = attendance.get("absent_count")
+    if not all(isinstance(n, int) and not isinstance(n, bool) and n >= 0 for n in (submitted, attended, absent)):
+        return "⏳ Chờ xác minh điểm danh/nhận xét LMS"
+    prefix = "❌" if status == "MISSING" else "✅"
+    result = f"{prefix} Đã nhận xét {submitted}/{attended} HS đi học"
+    if absent:
+        result += f" · {absent} HS nghỉ miễn"
+    if status == "REVIEW":
+        result += " · cần xem lại chất lượng"
+    if attendance.get("unverified_count"):
+        result += " · còn điểm danh chờ xác minh"
+    return result
+
+
+def resolve_spck_status(row: Mapping[str, Any]) -> str:
+    """Describe new SPCK inspection evidence without reconstructing old counts."""
+    raw_st = row.get("scan_target")
+    st = raw_st if isinstance(raw_st, Mapping) else {}
+    spck = row.get("lms_spck", st.get("lms_spck"))
+    if not isinstance(spck, Mapping) or spck.get("status") == "NOT_REQUIRED":
+        return ""
+    if spck.get("status") == "EXEMPT":
+        return "SPCK không áp dụng (toàn bộ học viên nghỉ)"
+    if spck.get("status") == "UNVERIFIED":
+        return "SPCK chờ xác minh"
+    if spck.get("status") not in {"COMPLETE", "MISSING", "PARTIAL"}:
+        return ""
+    submitted, attended, exempt = (spck.get(key) for key in ("submitted_count", "attended_count", "exempt_count"))
+    if not all(isinstance(n, int) and not isinstance(n, bool) and n >= 0 for n in (submitted, attended, exempt)):
+        return "SPCK chờ xác minh"
+    text = f"SPCK {submitted}/{attended} HS đi học"
+    if exempt:
+        text += f" · {exempt} HS nghỉ miễn"
+    return text
 
 
 def is_failed(row: Any) -> bool:
@@ -747,6 +796,7 @@ def is_failed(row: Any) -> bool:
         nx_lms = st.get("nx_lms_checked")
     if lms_status in {"", "Chưa quét LMS"} and nx_lms is False:
         lms_status = "❌ Chưa nộp LMS"
+    lms_status = resolve_lms_status(row, lms_status)
 
     lms_failed = lms_status.startswith(("❌", "⚠️"))
     spck_failed = has_spck_missing_fail(row)
@@ -1137,5 +1187,7 @@ __all__ = [
     "make_structured_issue",
     "normalize_class_code",
     "normalize_lesson_number",
+    "resolve_lms_status",
+    "resolve_spck_status",
     "validate_two_week_plan",
 ]

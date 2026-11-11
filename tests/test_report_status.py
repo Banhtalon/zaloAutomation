@@ -317,7 +317,8 @@ class ReportStatusSingleSourceTests(unittest.IsolatedAsyncioTestCase):
                 lesson=variant,
             )
             self.assertTrue(eval_res["is_exempt"])
-            self.assertEqual(eval_res["issues"], [])
+            self.assertEqual(eval_res["lms_spck"]["status"], "UNVERIFIED")
+            self.assertTrue(all(issue_severity(issue) == "NOTE" for issue in eval_res["issues"]))
             comments_res = evaluate_lms_student_comments(
                 [],
                 is_checkpoint=False,

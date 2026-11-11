@@ -840,18 +840,6 @@ def normalize_auto_issue_text(text: str) -> str:
     cleaned = " ".join(str(text or "").split()).strip(" ;|")
     if not cleaned:
         return ""
-    if re.match(
-        r"^\[LMS\]\s*(?:(?:Nhận|Nhan)\s+x[eé]t\s+(?:HS\s+)?s[oơ]\s+s[aà]i\s*,?\s*thi[eế]u\s*(?:đủ\s*)?3\s*[yý]|(?:Nhận|Nhan)\s+x[eé]t\s+thi[eế]u\s+[yý])(?:\s*\([^)]*\))?\.?$",
-        cleaned,
-        flags=re.IGNORECASE,
-    ):
-        return "[LMS] Nhận xét thiếu ý"
-    if re.match(
-        r"^\[LMS\]\s*(?:Nhận|Nhan)\s+x[eé]t\s+Checkpoint\s+ch[uư]a\s+[đd][uủ]\s+c[aấ]u\s+tr[uú]c\s+n[aă]ng\s+l[uự]c(?:\s*\([^)]*\))?\.?$",
-        cleaned,
-        flags=re.IGNORECASE,
-    ):
-        return "[LMS] Nhận xét Checkpoint chưa đủ cấu trúc năng lực"
     m_template = re.match(
         r"^(?:\[Zalo\]\s*)?Đã báo cáo nhưng ghi sai ngày/buổi(?:\s+trong\s+mẫu)?\s*(?:[;—,\-]+|\()\s*['\"]?(Bài\s+số\s+\d+)['\"]?(?:\s+khớp\s+với\b.*|\s*\))\.?$",
         cleaned,

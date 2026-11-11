@@ -75,6 +75,8 @@ class LmsQualityGateway(Protocol):
         self,
         page: Any,
         class_codes: list[str],
+        *,
+        target_lessons_by_class: dict[str, list[int]] | None = None,
     ) -> dict[str, list[dict[str, Any]]]: ...
 
 
@@ -3629,6 +3631,8 @@ class PlaywrightLmsQualityGateway:
         self,
         page: Any,
         class_codes: list[str],
+        *,
+        target_lessons_by_class: dict[str, list[int]] | None = None,
     ) -> dict[str, list[dict[str, Any]]]:
         from services.lms_quality_service import fetch_lms_class_slots_via_page
 
@@ -3636,6 +3640,7 @@ class PlaywrightLmsQualityGateway:
             page,
             class_names=class_codes,
             timeout_ms=self._timeout_ms,
+            target_lessons_by_class=target_lessons_by_class,
         )
 
 

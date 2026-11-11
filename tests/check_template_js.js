@@ -2067,7 +2067,7 @@ async function checkWeeklyHistoryAndCsvExport() {
         })`,
         harness.context,
       ) ===
-        '[LMS] Nhận xét thiếu ý; [LMS] Nhận xét Checkpoint chưa đủ cấu trúc năng lực; [Zalo] Đã báo cáo nhưng ghi sai ngày/buổi ( Bài số 6 ); [Zalo] Đã báo cáo nhưng ghi sai ngày ( ghi ngày 22/10 nhưng lịch là ngày 21/10, buổi 13)' &&
+        '[LMS] Nhận xét HS sơ sài, thiếu đủ 3 ý (4/4 HS); [LMS] Nhận xét Checkpoint chưa đủ cấu trúc năng lực (4/5 HS); [Zalo] Đã báo cáo nhưng ghi sai ngày/buổi ( Bài số 6 ); [Zalo] Đã báo cáo nhưng ghi sai ngày ( ghi ngày 22/10 nhưng lịch là ngày 21/10, buổi 13)' &&
       vm.runInContext(
         `normalizeZaloStatusDisplay('❌ Chưa tìm thấy trong khoảng đã kiểm chứng – Có minh chứng')`,
         harness.context,
@@ -3040,6 +3040,38 @@ async function checkPhase57FrontendHardening() {
       spckFrontendCheck.noteEval === '✅ Đã hoàn thành nhận xét',
     'DEC-042: LMS_SPCK_MISSING must resolve to is_failed=true, FAIL, and ❌ Chưa nộp SPCK trên LMS; LMS_SPCK_NOTE must resolve to is_failed=false and NOTE',
   );
+  const attendanceReportingCheck = vm.runInContext(
+    `(() => {
+      const row = {
+        status: '✅ Đã báo cáo', evidence_state: 'SUBMITTED_VERIFIED',
+        lms_status: '❌ Chưa nộp LMS', nx_lms_checked: false,
+        evaluation_status: '❌ Chưa nộp SPCK trên LMS',
+        lms_attendance: {status: 'VERIFIED', attended_count: 7, absent_count: 1, unverified_count: 0},
+        lms_comments: {status: 'COMPLETE', submitted_count: 7, exempt_count: 1},
+        lms_spck: {status: 'COMPLETE', submitted_count: 7, attended_count: 7, exempt_count: 1},
+        qc_issue_note: '[LMS] Chưa nộp SPCK (8/8 HS)',
+        lms_quality_issues: [{code: 'LMS_QUALITY_FAIL', severity: 'NOTE', text: '[LMS] Nhận xét thiếu ý (2/7 HS)'}]
+      };
+      const complete = resolveDashboardRowLmsStatus(row) === '✅ Đã nhận xét 7/7 HS đi học · 1 HS nghỉ miễn'
+        && !resolveRowIsFailed(row) && resolveRowIssueSeverity(row) === 'NOTE'
+        && resolveDashboardRowEvaluationStatus(row).includes('SPCK 7/7 HS đi học · 1 HS nghỉ miễn')
+        && resolveDashboardRowIssueDescription(row).includes('Nhận xét thiếu ý (2/7 HS)');
+      row.lms_comments.status = 'EXEMPT'; row.lms_spck.status = 'EXEMPT'; row.lms_attendance.status = 'EXEMPT';
+      const exempt = !resolveRowIsFailed(row) && resolveDashboardRowEvaluationStatus(row).includes('Không áp dụng');
+      row.lms_comments.status = 'UNVERIFIED'; row.lms_spck.status = 'UNVERIFIED';
+      const unknown = !resolveRowIsFailed(row) && resolveDashboardRowEvaluationStatus(row).includes('Chờ xác minh');
+      row.evidence_state = 'NOT_FOUND_VERIFIED';
+      const missingZalo = resolveRowIsFailed(row);
+      row.evidence_state = 'SUBMITTED_VERIFIED'; row.lms_comments.status = 'MISSING';
+      row.evaluation_status = '✅ Đã hoàn thành nhận xét';
+      const missingLms = resolveRowIsFailed(row)
+        && resolveDashboardRowEvaluationStatus(row) === '⏳ Đã hoàn tất nhận xét Zalo, chưa nhận xét LMS';
+      const manual = !hasRowSpckMissingFail({qc_issue_note: '[LMS] Chưa nộp SPCK (8/8 HS)'});
+      return complete && exempt && unknown && missingZalo && missingLms && manual;
+    })()`,
+    harness.context,
+  );
+  assertFrontend(attendanceReportingCheck, 'attendance counts, exemptions, uncertain evidence, quality NOTE, and real missing submissions must remain distinct');
 }
 
 async function runFrontendBehaviorChecks() {

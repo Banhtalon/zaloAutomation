@@ -965,16 +965,6 @@
         function normalizeAutoIssueTextInJs(rawText) {
             const cleaned = String(rawText || '').replace(/\s+/g, ' ').replace(/^[;| ]+|[;| ]+$/g, '').trim();
             if (!cleaned) return '';
-            if (
-                /^\[LMS\]\s*(?:(?:Nhận|Nhan)\s+x[eé]t\s+(?:HS\s+)?s[oơ]\s+s[aà]i\s*,?\s*thi[eế]u\s*(?:đủ\s*)?3\s*[yý]|(?:Nhận|Nhan)\s+x[eé]t\s+thi[eế]u\s+[yý])(?:\s*\([^)]*\))?\.?$/i.test(cleaned)
-            ) {
-                return '[LMS] Nhận xét thiếu ý';
-            }
-            if (
-                /^\[LMS\]\s*(?:Nhận|Nhan)\s+x[eé]t\s+Checkpoint\s+ch[uư]a\s+[đd][uủ]\s+c[aấ]u\s+tr[uú]c\s+n[aă]ng\s+l[uự]c(?:\s*\([^)]*\))?\.?$/i.test(cleaned)
-            ) {
-                return '[LMS] Nhận xét Checkpoint chưa đủ cấu trúc năng lực';
-            }
             const mTemplate = cleaned.match(
                 /^(?:\[Zalo\]\s*)?Đã báo cáo nhưng ghi sai ngày\/buổi(?:\s+trong\s+mẫu)?\s*(?:[;—,\-]+|\()\s*['"]?(Bài\s+số\s+\d+)['"]?(?:\s+khớp\s+với\b.*|\s*\))\.?$/i
             );
@@ -1036,6 +1026,8 @@
         function hasRowSpckMissingFail(r) {
             if (!r || typeof r !== 'object') return false;
             const st = r.scan_target && typeof r.scan_target === 'object' ? r.scan_target : {};
+            const spck = r.lms_spck || st.lms_spck;
+            if (spck && spck.status) return spck.status === 'MISSING';
             const spckFailRe = /^\[LMS\]\s*Chưa\s+nộp\s+SPCK\b/i;
             const checkVal = val => {
                 if (!val) return false;
@@ -1054,8 +1046,6 @@
             return (
                 checkVal(r.lms_quality_issues || st.lms_quality_issues)
                 || checkVal(r.quality_issues || st.quality_issues)
-                || checkVal(r.issue_description)
-                || checkVal(r.qc_issue_note !== undefined && r.qc_issue_note !== null ? r.qc_issue_note : st.qc_issue_note)
             );
         }
 
@@ -1235,6 +1225,25 @@
         function resolveDashboardRowLmsStatus(r) {
             if (!r || typeof r !== 'object') return 'Chưa quét LMS';
             const st = r.scan_target && typeof r.scan_target === 'object' ? r.scan_target : {};
+            const comments = r.lms_comments || st.lms_comments;
+            const attendance = r.lms_attendance || st.lms_attendance;
+            if (comments && comments.status) {
+                if (comments.status === 'EXEMPT') {
+                    if (attendance && attendance.status === 'EXEMPT') return '✅ Không áp dụng nhận xét LMS (toàn bộ học viên nghỉ)';
+                    return resolveRowCategory(r) === 'EXEMPT' ? '✅ Miễn nhận xét LMS (Buổi 14)' : '⏳ Chờ xác minh điểm danh/nhận xét LMS';
+                }
+                if (comments.status === 'UNVERIFIED') return '⏳ Chờ xác minh điểm danh/nhận xét LMS';
+                if (['COMPLETE', 'MISSING', 'REVIEW'].includes(comments.status)) {
+                    if (!attendance || ![comments.submitted_count, attendance.attended_count, attendance.absent_count].every(n => Number.isInteger(n) && n >= 0)) {
+                        return '⏳ Chờ xác minh điểm danh/nhận xét LMS';
+                    }
+                    let status = `${comments.status === 'MISSING' ? '❌' : '✅'} Đã nhận xét ${comments.submitted_count}/${attendance.attended_count} HS đi học`;
+                    if (attendance.absent_count) status += ` · ${attendance.absent_count} HS nghỉ miễn`;
+                    if (comments.status === 'REVIEW') status += ' · cần xem lại chất lượng';
+                    if (attendance.unverified_count) status += ' · còn điểm danh chờ xác minh';
+                    return status;
+                }
+            }
             const rawLms = String(r.lms_status || st.lms_status || '').trim();
             if (rawLms && rawLms !== 'Chưa quét LMS') return rawLms;
             const nxLms = typeof r.nx_lms_checked === 'boolean'
@@ -1315,6 +1324,19 @@
             return parts.join('; ');
         }
 
+        function resolveDashboardRowSpckStatus(r) {
+            const st = r.scan_target && typeof r.scan_target === 'object' ? r.scan_target : {};
+            const spck = r.lms_spck || st.lms_spck;
+            if (!spck || spck.status === 'NOT_REQUIRED') return '';
+            if (spck.status === 'EXEMPT') return 'SPCK không áp dụng (toàn bộ học viên nghỉ)';
+            if (spck.status === 'UNVERIFIED') return 'SPCK chờ xác minh';
+            if (!['COMPLETE', 'MISSING', 'PARTIAL'].includes(spck.status)) return '';
+            if (![spck.submitted_count, spck.attended_count, spck.exempt_count].every(n => Number.isInteger(n) && n >= 0)) return 'SPCK chờ xác minh';
+            let text = `SPCK ${spck.submitted_count}/${spck.attended_count} HS đi học`;
+            if (spck.exempt_count) text += ` · ${spck.exempt_count} HS nghỉ miễn`;
+            return text;
+        }
+
         function resolveDashboardRowEvaluationStatus(r) {
             if (!r || typeof r !== 'object') return '';
             const st = r.scan_target && typeof r.scan_target === 'object' ? r.scan_target : {};
@@ -1329,9 +1351,18 @@
             const lmsStatus = resolveDashboardRowLmsStatus(r);
             const zaloDone = ['DONE', 'LATE', 'EXEMPT'].includes(category);
             const lmsDone = lmsStatus.startsWith('✅') || lmsStatus.includes('Dry-run LMS') || lmsStatus.includes('Chờ tích BCNB');
-            if (zaloDone && lmsDone && hasRowSpckMissingFail(r)) {
+            if (zaloDone && hasRowSpckMissingFail(r)) {
                 return '❌ Chưa nộp SPCK trên LMS';
             }
+            const comments = r.lms_comments || st.lms_comments;
+            const spck = r.lms_spck || st.lms_spck;
+            const attendance = r.lms_attendance || st.lms_attendance;
+            if (zaloDone && comments) {
+                if (comments.status === 'UNVERIFIED') return '⏳ Chờ xác minh điểm danh/nhận xét LMS';
+                if (comments.status === 'EXEMPT' && attendance && attendance.status === 'EXEMPT') return '✅ Không áp dụng LMS (toàn bộ học viên nghỉ)';
+                if (['COMPLETE', 'MISSING', 'REVIEW', 'EXEMPT'].includes(comments.status)) explicitEval = '';
+            }
+            if (zaloDone && spck && spck.status === 'UNVERIFIED' && !lmsStatus.startsWith('❌') && !lmsStatus.startsWith('⚠️')) return '⏳ Chờ xác minh SPCK trên LMS';
             if (explicitEval) {
                 if (
                     zaloDone
@@ -1349,7 +1380,10 @@
                 return explicitEval;
             }
             if (lmsStatus === 'Chưa quét LMS') return '';
-            if (zaloDone && lmsDone) return '✅ Đã hoàn thành nhận xét';
+            if (zaloDone && lmsDone) {
+                const spckStatus = resolveDashboardRowSpckStatus(r);
+                return '✅ Đã hoàn thành nhận xét' + (spckStatus ? ` · ${spckStatus}` : '');
+            }
             if (lmsDone && !zaloDone) return '⏳ Đã hoàn tất nhận xét LMS, chưa nhận xét Zalo';
             if (zaloDone && !lmsDone) return '⏳ Đã hoàn tất nhận xét Zalo, chưa nhận xét LMS';
             return '❌ Chưa hoàn thành nhận xét';
@@ -1531,6 +1565,13 @@
                             td.appendChild(lmsDetail);
                         }
                         const resolvedEval = resolveDashboardRowEvaluationStatus(r);
+                        const resolvedSpck = resolveDashboardRowSpckStatus(r);
+                        if (resolvedSpck) {
+                            const spckDetail = document.createElement('div');
+                            spckDetail.className = 'status-detail';
+                            spckDetail.textContent = resolvedSpck;
+                            td.appendChild(spckDetail);
+                        }
                         if (resolvedEval) {
                             const evalDetail = document.createElement('div');
                             evalDetail.className = 'status-detail font-medium text-slate-700';

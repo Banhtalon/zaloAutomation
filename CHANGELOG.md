@@ -4,6 +4,14 @@ Tài liệu này ghi lại toàn bộ quá trình hình thành, phát triển ki
 
 ---
 
+## [2026-11-11] — Phase 6.2, kiểm tra SPCK theo buổi và nhận xét theo điểm danh
+
+- Sửa `services/lms_quality_service.py`, `services/external_gateways.py`, `services/zalo_parallel_service.py` để giới hạn truy vấn vào buổi được quét, xác minh SPCK còn thiếu theo học viên và nhận bài chờ duyệt. Dữ liệu lỗi hoặc không đầy đủ chuyển sang chờ xác minh.
+- Dùng chung điểm danh cho nhận xét và SPCK, miễn học viên nghỉ ở đúng buổi. Nhận xét một đoạn có ba ý được chấp nhận, lời nhắc chất lượng giữ số lượng và lý do.
+- Đồng bộ kết quả qua `services/report_status.py`, `repositories/report_repository.py`, `services/report_email_service.py`, `api/job_routes.py`, `static/js/jobs.js`. `services/bcnb_safety.py` giữ chi tiết QC khi chuẩn hóa ghi chú. `services/zalo_bcnb_service.py` giữ cảnh báo SPCK cũ trong lịch sử khi kết quả hiện tại chưa xác minh. Dashboard ưu tiên kết quả mới khi nhận xét MISSING. Ghi chú hiển thị đơn lẻ không tạo kết luận thiếu SPCK.
+- Thêm `tests/test_spck_session_fetch.py`, `tests/test_lms_attendance_quality.py`, `tests/test_attendance_reporting.py`, cập nhật các kiểm thử LMS/report/BCNB/JavaScript liên quan.
+- Cập nhật kế hoạch chi tiết ở `UPGRADE_PROGRESS.md`, bổ sung `DEC-043`, ghi bằng chứng mới ở `PROJECT_STATE.md`. Review độc lập Sol 6.1 high đã PASS sau sửa, 37 test mục tiêu và kiểm tra JavaScript PASS. Gate cô lập cuối đạt `QUALITY GATE PASSED`, 695/695 test, coverage 78.6%, Ruff/Mypy PASS, secret scan 0. Manifest SHA-256 xác nhận source/test giữ đúng bản đã kiểm tra. Bản đối chiếu chỉ đọc 14 buổi và ghi chú lịch sử nằm ngoài repository. Thao tác ghi production chưa được nghiệm thu.
+
 ## [2026-11-11] — Hotfix Truy Vấn GraphQL `findAllStudentWorks` (`StudentWorkQuery` & `latestData`/`publishedData`), Khử PII URL & Giới Hạn Stream Byte Khi Kiểm Tra SPCK Trên MindX LMS (`DEC-036`, `DEC-040`, `DEC-042`)
 
 ### 🛠️ Sửa lỗi & Củng cố khử PII URL + giới hạn bộ nhớ trên LMS

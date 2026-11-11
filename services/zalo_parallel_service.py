@@ -33,6 +33,8 @@ from services.bcnb_safety import (
 )
 from services.lms_quality_service import (
     fetch_and_evaluate_lms_quality,
+    fetch_lms_slots_for_targets,
+    lms_target_lessons_by_class,
     inspect_and_attach_quality_issues,
     is_lms_fetch_unavailable,
 )
@@ -2587,6 +2589,7 @@ async def run_parallel_zalo_batch(
             }
 
         scan_results = list(scan_results_by_key.values())
+        requested_lms_lessons = lms_target_lessons_by_class(scan_results)
         prefetched_lms_slots: dict[str, list[dict[str, Any]]] | None = None
         pre_codes: list[str] = []
         pre_gw = getattr(runtime.external, "lms_quality", None)
@@ -2613,7 +2616,9 @@ async def run_parallel_zalo_batch(
             if pre_codes:
                 if type(pre_gw).__name__ != "PlaywrightLmsQualityGateway":
                     try:
-                        fetched_pre = await pre_gw.fetch_class_slots(None, pre_codes)
+                        fetched_pre = await fetch_lms_slots_for_targets(
+                            pre_gw, None, pre_codes, requested_lms_lessons
+                        )
                         prefetched_lms_slots = (
                             fetched_pre
                             if isinstance(fetched_pre, dict)
@@ -2644,8 +2649,8 @@ async def run_parallel_zalo_batch(
                     lms_pre_page = None
                     try:
                         lms_pre_page = await session.new_page()
-                        fetched_pre = await pre_gw.fetch_class_slots(
-                            lms_pre_page, pre_codes
+                        fetched_pre = await fetch_lms_slots_for_targets(
+                            pre_gw, lms_pre_page, pre_codes, requested_lms_lessons
                         )
                         if isinstance(fetched_pre, dict) and fetched_pre:
                             prefetched_lms_slots = fetched_pre
@@ -2775,8 +2780,8 @@ async def run_parallel_zalo_batch(
                     return
                 lms_prefetch_retried = True
                 try:
-                    retried_slots = await pre_gw.fetch_class_slots(
-                        worker_page, pre_codes
+                    retried_slots = await fetch_lms_slots_for_targets(
+                        pre_gw, worker_page, pre_codes, requested_lms_lessons
                     )
                     if isinstance(retried_slots, dict) and retried_slots:
                         prefetched_lms_slots = retried_slots

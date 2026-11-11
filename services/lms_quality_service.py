@@ -5,7 +5,7 @@ Evaluates:
 2. Session type classification: Checkpoint sessions (Coding B5/B9, Robotics B4/B8, or Rubric)
    vs Regular sessions (all other sessions except exempted Lesson 14).
 3. LMS per-student comments (`studentAttendance`) for attended students (`ATTENDED`, `LATE_ARRIVED`),
-   enforcing 3-part structure on regular sessions and competency rubric on checkpoint sessions,
+   checking 3-part content on regular sessions and competency rubric on checkpoint sessions,
    without ever exposing student PII (names or raw comments) in issue reports.
 4. Zalo report content issues: wrong date, wrong lesson number, or lesson title mismatch against LMS.
 """
@@ -18,6 +18,7 @@ import asyncio
 import base64
 import contextlib
 import html
+import inspect
 import json
 import math
 import os
@@ -53,7 +54,6 @@ MAX_LMS_QUALITY_CLASSES_PER_BATCH = 60
 MAX_LMS_SLOTS_PER_CLASS = 20
 MAX_LMS_STUDENTS_PER_SLOT = 50
 MIN_SUBSTANTIVE_SUMMARY_CHARS = 15
-MIN_REGULAR_COMMENT_CHARS = 110
 MIN_SPCK_COMMENT_CHARS = 50
 MIN_SPCK_COMMENT_WORDS = 12
 SPCK_REQUIRED_LESSONS = frozenset({12, 13, 14})
@@ -68,6 +68,7 @@ ALLOWED_LMS_TOKEN_KEYS = frozenset(
 )
 
 ATTENDED_STATUSES = frozenset({"ATTENDED", "LATE_ARRIVED"})
+ABSENT_STATUSES = frozenset({"ABSENT", "ABSENT_WITH_NOTICE"})
 
 CODING_TRACK_TOKENS = frozenset(
     {
@@ -114,7 +115,7 @@ SUMMARY_PREFIX_STRIP_RE = re.compile(
 
 AUTO_COMMENT_HEADER_RE = re.compile(
     r"^\s*(?:[-–—•*]*\s*(?:đánh|danh)\s+gi[aá]\s+chung\s*[:\-–—]?\s*\n?\s*)?"
-    r"(?:nh[aậ]n\s+x[eé]t\s+bu[oổ]i\s+h[oọ]c\s+s[oố]\s*\d+\s*:[^\n]*\n?)?",
+    r"(?:nh[aậ]n\s+x[eé]t\s+bu[oổ]i\s+h[oọ]c\s+s[oố]\s*\d+\s*:\s*)?",
     flags=re.IGNORECASE,
 )
 
@@ -128,16 +129,21 @@ STRENGTH_SIGNALS = (
     "tiep thu",
     "hoan thanh",
     "lam tot",
-    "thao tac",
+    "thao tac tot",
+    "thao tac nhanh",
+    "thao tac thanh thao",
+    "thao tac chinh xac",
     "chu dong",
     "tich cuc",
     "nhanh nhen",
     "sang tao",
-    "tu duy",
-    "lap rap",
-    "lap trinh",
-    "van dung",
-    "ap dung",
+    "tu duy tot",
+    "lap rap dung",
+    "lap rap tot",
+    "lap trinh duoc",
+    "van dung tot",
+    "ap dung duoc",
+    "thuc hanh tot",
 )
 
 IMPROVEMENT_SIGNALS = (
@@ -193,26 +199,6 @@ ADVICE_SIGNALS = (
     "thay mong",
     "co tin",
     "thay tin",
-)
-
-EXPLICIT_STRENGTH_HEADERS = (
-    "diem manh",
-    "uu diem",
-)
-
-EXPLICIT_IMPROVEMENT_HEADERS = (
-    "diem can cai thien",
-    "can cai thien",
-    "diem yeu",
-    "han che",
-    "van de can cai thien",
-)
-
-EXPLICIT_ADVICE_HEADERS = (
-    "loi khuyen",
-    "goi y giai phap",
-    "giai phap",
-    "de xuat",
     "huong khac phuc",
 )
 
@@ -411,7 +397,7 @@ def _strip_comment_header_and_student_name(
                 without_header,
                 flags=re.IGNORECASE,
             ).strip()
-    return without_header
+    return re.sub(r"^\s*\([A-Za-z0-9]+(?:-[A-Za-z0-9]+)+\)\s*", "", without_header).strip()
 
 
 def _is_valid_checkpoint_student_comment(body_text: str) -> bool:
@@ -424,43 +410,127 @@ def _is_valid_checkpoint_student_comment(body_text: str) -> bool:
     return pillar_hits == 3
 
 
-def _is_valid_regular_student_comment(body_text: str) -> bool:
+def _regular_comment_review_reasons(body_text: str) -> list[str]:
     """Check whether a regular session student comment covers all 3 required parts:
     1. Điểm mạnh (Strengths)
     2. Điểm cần cải thiện (Areas for improvement)
     3. Lời khuyên / Giải pháp (Actionable advice)
     """
     folded = fold_text(body_text)
-    if not folded:
-        return False
 
-    has_explicit_strength = any(h in folded for h in EXPLICIT_STRENGTH_HEADERS)
-    has_explicit_improvement = any(h in folded for h in EXPLICIT_IMPROVEMENT_HEADERS)
-    has_explicit_advice = any(h in folded for h in EXPLICIT_ADVICE_HEADERS)
-    if (
-        has_explicit_strength
-        and has_explicit_improvement
-        and has_explicit_advice
-        and len(folded) >= 80
+    def has_signal(signals: tuple[str, ...]) -> bool:
+        return any(re.search(r"\b" + re.escape(s.strip()) + r"\b", folded) for s in signals)
+
+    reasons = []
+    if len(folded) < 80:
+        reasons.append("nhận xét ngắn")
+    if not has_signal(
+        STRENGTH_SIGNALS
+        + ("nam duoc", "hieu duoc", "biet cach", "biet su dung", "thuc hien tot", "su dung tot")
     ):
-        return True
+        reasons.append("chưa rõ điểm mạnh")
+    if not has_signal(
+        IMPROVEMENT_SIGNALS
+        + (
+            "chua nam",
+            "chua hieu",
+            "chua biet",
+            "con gap kho khan",
+            "con sai",
+            "can can than",
+            "can chu dong",
+        )
+    ):
+        reasons.append("chưa rõ điểm cần cải thiện")
+    if not has_signal(
+        ADVICE_SIGNALS
+        + (
+            "hay thu",
+            "hay luyen",
+            "hay on",
+            "can luyen tap",
+            "can on lai",
+            "on lai",
+            "luyen them",
+            "kiem tra lai",
+        )
+    ):
+        reasons.append("chưa rõ lời khuyên/giải pháp")
+    return reasons
 
-    if len(folded) < MIN_REGULAR_COMMENT_CHARS:
-        return False
 
-    # Count distinct sentences / bullet clauses
-    segments = [
-        seg.strip()
-        for seg in re.split(r"(?:[\n•\-*]+|[.!?]+(?:\s+|$))", body_text)
-        if len(seg.strip()) >= 12
-    ]
-    if len(segments) < 3:
-        return False
+def _is_valid_regular_student_comment(body_text: str) -> bool:
+    return not _regular_comment_review_reasons(body_text)
 
-    has_strength = any(sig in folded for sig in STRENGTH_SIGNALS)
-    has_improvement = any(sig in folded for sig in IMPROVEMENT_SIGNALS)
-    has_advice = any(sig in folded for sig in ADVICE_SIGNALS)
-    return bool(has_strength and has_improvement and has_advice)
+
+def _attendance_student_key(entry: Mapping[str, Any]) -> str:
+    key = str(entry.get("studentKey") or entry.get("studentId") or "").strip()
+    student = entry.get("student")
+    return key or (
+        str(student.get("id") or student.get("studentKey") or "").strip()
+        if isinstance(student, Mapping)
+        else ""
+    )
+
+
+def _evaluate_lms_attendance(
+    student_attendance: Any, slot_data: Mapping[str, Any] | None = None
+) -> tuple[dict[str, Any], list[dict[str, Any]], list[Any]]:
+    """One attendance decision for comments and SPCK; unknown evidence never means absence."""
+    data = slot_data or {}
+    rows = student_attendance if isinstance(student_attendance, list) else []
+    partial = any(
+        data.get(flag)
+        for flag in (
+            "truncated",
+            "studentAttendanceTruncated",
+            "studentAttendanceFetchError",
+            "attendanceAmbiguous",
+        )
+    )
+    overflow = len(rows) > MAX_LMS_STUDENTS_PER_SLOT
+    attended: list[dict[str, Any]] = []
+    absent = 0
+    unknown = 0
+    seen_keys: set[str] = set()
+    for row in rows[:MAX_LMS_STUDENTS_PER_SLOT]:
+        if not isinstance(row, dict):
+            unknown += 1
+            continue
+        key = _attendance_student_key(row)
+        if key and key in seen_keys:
+            unknown += 1
+            continue
+        if key:
+            seen_keys.add(key)
+        status = str(row.get("status") or "").strip().upper()
+        if status in ATTENDED_STATUSES:
+            attended.append(row)
+        elif status in ABSENT_STATUSES:
+            absent += 1
+        else:
+            unknown += 1
+    unknown += max(0, len(rows) - MAX_LMS_STUDENTS_PER_SLOT)
+    unverified = not rows or unknown > 0 or partial
+    status = "UNVERIFIED" if unverified else ("EXEMPT" if not attended else "VERIFIED")
+    metadata = {
+        "status": status,
+        "attended_count": len(attended),
+        "absent_count": absent,
+        "unverified_count": unknown,
+        "exempt_count": absent,
+        "total_count": len(rows),
+    }
+    issues = []
+    if unverified:
+        if overflow:
+            text = f"[LMS] Danh sách học viên vượt giới hạn kiểm tra ({len(rows)} > {MAX_LMS_STUDENTS_PER_SLOT} HS), cần kiểm tra thủ công"
+        elif not rows:
+            text = "[LMS] Chưa kiểm tra được danh sách học viên trên LMS, cần kiểm tra thủ công"
+        else:
+            text = "[LMS] Điểm danh chưa đầy đủ hoặc chưa xác định, cần kiểm tra thủ công"
+        issues.append(make_structured_issue(ISSUE_CODE_LMS_MANUAL_CHECK, text))
+    return metadata, attended, issues
 
 
 def _normalize_comment_for_dedup(body_text: str) -> str:
@@ -474,90 +544,48 @@ def evaluate_lms_student_comments(
     *,
     is_checkpoint: bool,
     lesson: str | int | None = "",
+    slot_data: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Evaluate per-student LMS comments for attended students without exposing PII (Requirement #4)."""
-    if is_lesson_14(lesson):
-        return {
-            "is_exempt": True,
-            "is_checkpoint": False,
-            "attended_count": 0,
-            "missing_count": 0,
-            "shallow_count": 0,
-            "failed_count": 0,
-            "duplicate_count": 0,
-            "issues": [],
-        }
-
-    if not isinstance(student_attendance, list) or len(student_attendance) == 0:
-        return {
-            "is_exempt": False,
-            "is_checkpoint": is_checkpoint,
-            "attended_count": 0,
-            "missing_count": 0,
-            "shallow_count": 0,
-            "failed_count": 0,
-            "duplicate_count": 0,
-            "issues": [
-                make_structured_issue(
-                    ISSUE_CODE_LMS_MANUAL_CHECK,
-                    "[LMS] Chưa kiểm tra được danh sách học viên trên LMS, cần kiểm tra thủ công",
-                )
-            ],
-        }
-
-    raw_total_records = len(student_attendance)
-    overflow_records = raw_total_records > MAX_LMS_STUDENTS_PER_SLOT
-    attended_entries: list[dict[str, Any]] = []
-    for raw_entry in student_attendance[:MAX_LMS_STUDENTS_PER_SLOT]:
-        if not isinstance(raw_entry, dict):
-            continue
-        status = str(raw_entry.get("status") or "").strip().upper()
-        if status in ATTENDED_STATUSES:
-            attended_entries.append(raw_entry)
+    """Check only verified attendees; quality uncertainty is a quantified QC note."""
+    attendance, attended_entries, attendance_issues = _evaluate_lms_attendance(
+        student_attendance, slot_data
+    )
+    exempt = is_lesson_14(lesson) or attendance["status"] == "EXEMPT"
+    base = {
+        "is_exempt": exempt,
+        "is_checkpoint": is_checkpoint and not exempt,
+        "attended_count": attendance["attended_count"],
+        "missing_count": 0,
+        "shallow_count": 0,
+        "failed_count": 0,
+        "duplicate_count": 0,
+        "submitted_count": 0,
+        "review_reasons": {},
+        "attendance": attendance,
+        "status": "EXEMPT" if exempt else "UNVERIFIED",
+        "exempt_count": attendance["total_count"]
+        if is_lesson_14(lesson)
+        else attendance["exempt_count"],
+        "issues": [],
+    }
+    if exempt:
+        return base
+    if attendance["status"] == "UNVERIFIED":
+        return {**base, "issues": attendance_issues}
 
     attended_count = len(attended_entries)
-    if attended_count == 0:
-        no_attended_issues: list[Any] = [
-            make_structured_issue(
-                ISSUE_CODE_LMS_MANUAL_CHECK,
-                "[LMS] Chưa có học viên điểm danh có mặt trên LMS, cần kiểm tra thủ công",
-            )
-        ]
-        if overflow_records:
-            no_attended_issues.append(
-                make_structured_issue(
-                    ISSUE_CODE_LMS_MANUAL_CHECK,
-                    f"[LMS] Danh sách học viên vượt giới hạn kiểm tra ({raw_total_records} > {MAX_LMS_STUDENTS_PER_SLOT} HS), cần kiểm tra thủ công",
-                )
-            )
-        return {
-            "is_exempt": False,
-            "is_checkpoint": is_checkpoint,
-            "attended_count": 0,
-            "missing_count": 0,
-            "shallow_count": 0,
-            "failed_count": 0,
-            "duplicate_count": 0,
-            "issues": no_attended_issues,
-        }
-
     missing_count = 0
     shallow_count = 0
+    reasons_count: dict[str, int] = {}
     normalized_bodies: list[str] = []
     slot_has_rubric = is_checkpoint and _has_checkpoint_rubric_in_slot(
         {"studentAttendance": attended_entries}
     )
-
     for entry in attended_entries:
         student_obj = entry.get("student")
-        full_name = (
-            str(student_obj.get("fullName") or "")
-            if isinstance(student_obj, dict)
-            else ""
-        )
+        full_name = str(student_obj.get("fullName") or "") if isinstance(student_obj, dict) else ""
         body = _strip_comment_header_and_student_name(
-            entry.get("comment"),
-            student_full_name=full_name,
+            entry.get("comment"), student_full_name=full_name
         )
         if not body.strip():
             missing_count += 1
@@ -574,68 +602,49 @@ def evaluate_lms_student_comments(
                     or _is_valid_regular_student_comment(body)
                 )
             )
+            if not is_valid:
+                shallow_count += 1
         else:
-            is_valid = _is_valid_regular_student_comment(body)
-        if not is_valid:
-            shallow_count += 1
+            reasons = _regular_comment_review_reasons(body)
+            if reasons:
+                shallow_count += 1
+                for reason in reasons:
+                    reasons_count[reason] = reasons_count.get(reason, 0) + 1
 
-    failed_count = missing_count + shallow_count
     issues: list[Any] = []
-
-    if is_checkpoint:
-        if missing_count == attended_count:
-            issues.append(
-                f"[LMS] Chưa nhận xét HS buổi Checkpoint ({missing_count}/{attended_count} HS)"
-            )
-        elif failed_count > 0:
-            issues.append("[LMS] Nhận xét Checkpoint chưa đủ cấu trúc năng lực")
-    else:
-        if missing_count == attended_count:
-            issues.append(
-                f"[LMS] Chưa nhận xét học viên ({missing_count}/{attended_count} HS)"
-            )
-        elif missing_count > 0 and shallow_count > 0:
-            issues.append(
-                f"[LMS] Thiếu nhận xét học viên ({missing_count}/{attended_count} HS)"
-            )
-            issues.append("[LMS] Nhận xét thiếu ý")
-        elif missing_count > 0:
-            issues.append(
-                f"[LMS] Thiếu nhận xét học viên ({missing_count}/{attended_count} HS)"
-            )
-        elif shallow_count > 0:
-            issues.append("[LMS] Nhận xét thiếu ý")
-
-    # Duplicate comment count is tracked as metadata only; do not flag copy-paste as an issue
-    # as long as each comment satisfies the required 3-part structure.
-    duplicate_count = 0
-    if not is_checkpoint and len(normalized_bodies) >= 2:
-        counts_by_body: dict[str, int] = {}
-        for b in normalized_bodies:
-            counts_by_body[b] = counts_by_body.get(b, 0) + 1
-        dup_total = sum(c for c in counts_by_body.values() if c >= 2)
-        if dup_total >= 2:
-            duplicate_count = dup_total
-
-    if overflow_records:
+    if missing_count and (not is_checkpoint or missing_count == attended_count):
+        label = "HS buổi Checkpoint" if is_checkpoint else "học viên"
+        prefix = "Chưa nhận xét" if missing_count == attended_count else "Thiếu nhận xét"
+        issues.append(f"[LMS] {prefix} {label} ({missing_count}/{attended_count} HS)")
+    if is_checkpoint and 0 < missing_count + shallow_count and missing_count < attended_count:
+        issues.append("[LMS] Nhận xét Checkpoint chưa đủ cấu trúc năng lực")
+    elif shallow_count and not is_checkpoint:
+        submitted_count = attended_count - missing_count
+        details = ", ".join(
+            f"{reason}: {count}/{submitted_count}" for reason, count in reasons_count.items()
+        )
         issues.append(
             make_structured_issue(
-                ISSUE_CODE_LMS_MANUAL_CHECK,
-                f"[LMS] Danh sách học viên vượt giới hạn kiểm tra ({raw_total_records} > {MAX_LMS_STUDENTS_PER_SLOT} HS), cần kiểm tra thủ công",
+                "LMS_COMMENT_REVIEW",
+                f"[LMS] Nhận xét cần xem lại ({shallow_count}/{submitted_count} nhận xét - {details})",
+                severity=SEVERITY_NOTE,
             )
         )
-
+    counts_by_body: dict[str, int] = {}
+    if not is_checkpoint:
+        for body in normalized_bodies:
+            counts_by_body[body] = counts_by_body.get(body, 0) + 1
     return {
-        "is_exempt": False,
-        "is_checkpoint": is_checkpoint,
-        "attended_count": attended_count,
+        **base,
+        "status": "MISSING" if missing_count else ("REVIEW" if shallow_count else "COMPLETE"),
         "missing_count": missing_count,
+        "submitted_count": attended_count - missing_count,
         "shallow_count": shallow_count,
-        "failed_count": failed_count,
-        "duplicate_count": duplicate_count,
+        "failed_count": missing_count + shallow_count,
+        "review_reasons": reasons_count,
+        "duplicate_count": sum(count for count in counts_by_body.values() if count >= 2),
         "issues": issues,
     }
-
 
 SPCK_TITLE_PLACEHOLDER_PATTERNS = (
     r"^spck(?:\s*(?:buoi|b|lesson|slot)?\s*\d+)?$",
@@ -1005,7 +1014,9 @@ def evaluate_lms_spck_quality(
     empty_res: dict[str, Any] = {
         "is_spck_lesson": lesson_num in SPCK_REQUIRED_LESSONS,
         "is_robotics": is_robotics,
+        "status": "NOT_REQUIRED" if lesson_num not in SPCK_REQUIRED_LESSONS else "UNVERIFIED",
         "attended_count": 0,
+        "exempt_count": 0,
         "submitted_count": 0,
         "missing_submission_count": 0,
         "missing_student_info_count": 0,
@@ -1020,51 +1031,30 @@ def evaluate_lms_spck_quality(
     if lesson_num not in SPCK_REQUIRED_LESSONS or not isinstance(slot_data, Mapping):
         return empty_res
 
-    if bool(slot_data.get("studentWorksFetchError")):
-        return {
-            **empty_res,
-            "issues": [
-                make_structured_issue(
-                    ISSUE_CODE_LMS_MANUAL_CHECK,
-                    "[LMS] Chưa kiểm tra được dữ liệu SPCK trên LMS, cần kiểm tra thủ công",
-                )
-            ],
-        }
-
     student_attendance = slot_data.get("studentAttendance")
-    attended_entries: list[dict[str, Any]] = []
-    if isinstance(student_attendance, list):
-        for raw_entry in student_attendance[:MAX_LMS_STUDENTS_PER_SLOT]:
-            if not isinstance(raw_entry, dict):
-                continue
-            status = str(raw_entry.get("status") or "").strip().upper()
-            if status in ATTENDED_STATUSES:
-                attended_entries.append(raw_entry)
-
-    attended_count = len(attended_entries)
-    if attended_count == 0:
-        if is_lesson_14(lesson_num) and "studentWorks" in slot_data:
-            return {
-                **empty_res,
-                "issues": [
-                    make_structured_issue(
-                        ISSUE_CODE_LMS_MANUAL_CHECK,
-                        "[LMS] Chưa có học viên điểm danh có mặt ở Buổi 14 để kiểm tra SPCK, cần kiểm tra thủ công",
-                    )
-                ],
-            }
-        return empty_res
-
-    raw_works = slot_data.get("studentWorks")
-    if raw_works is None and "studentWorks" not in slot_data:
-        return {
-            **empty_res,
+    attendance, attended_entries, attendance_issues = _evaluate_lms_attendance(
+        student_attendance, slot_data
+    )
+    attended_count = attendance["attended_count"]
+    empty_res.update(
+        {
             "attended_count": attended_count,
+            "exempt_count": attendance["exempt_count"],
+            "attendance": attendance,
         }
-    if not isinstance(raw_works, Sequence) or isinstance(raw_works, (str, bytes)):
+    )
+    if attendance["status"] == "EXEMPT":
+        return {**empty_res, "status": "EXEMPT"}
+    if attendance["status"] == "UNVERIFIED":
+        return {**empty_res, "issues": attendance_issues}
+    raw_works = slot_data.get("studentWorks")
+    if (
+        bool(slot_data.get("studentWorksFetchError"))
+        or not isinstance(raw_works, Sequence)
+        or isinstance(raw_works, (str, bytes))
+    ):
         return {
             **empty_res,
-            "attended_count": attended_count,
             "issues": [
                 make_structured_issue(
                     ISSUE_CODE_LMS_MANUAL_CHECK,
@@ -1076,20 +1066,20 @@ def evaluate_lms_spck_quality(
     active_works: list[dict[str, Any]] = []
     for w in raw_works:
         if not isinstance(w, Mapping):
-            continue
+            return {
+                **empty_res,
+                "issues": [
+                    make_structured_issue(
+                        ISSUE_CODE_LMS_MANUAL_CHECK,
+                        "[LMS] Dữ liệu SPCK không đầy đủ, cần kiểm tra thủ công",
+                    )
+                ],
+            }
+
         is_del = w.get("isDeleted")
         if is_del is True or str(is_del or "").strip().lower() == "true":
             continue
         active_works.append(dict(w))
-
-    def _entry_student_key(entry: Mapping[str, Any]) -> str:
-        k = str(entry.get("studentKey") or entry.get("studentId") or "").strip()
-        if k:
-            return k
-        stu = entry.get("student")
-        if isinstance(stu, Mapping):
-            return str(stu.get("id") or stu.get("studentKey") or "").strip()
-        return ""
 
     def _entry_student_name(entry: Mapping[str, Any]) -> str:
         stu = entry.get("student")
@@ -1109,7 +1099,7 @@ def evaluate_lms_spck_quality(
     for entry in attendance_slice:
         if not isinstance(entry, Mapping):
             continue
-        s_key = _entry_student_key(entry)
+        s_key = _attendance_student_key(entry)
         status = str(entry.get("status") or "").strip().upper()
         if status in ATTENDED_STATUSES:
             if s_key:
@@ -1135,7 +1125,7 @@ def evaluate_lms_spck_quality(
         else:
             unknown_owner_works.append(w)
 
-    if unknown_owner_works or (unkeyed_attended_count > 0 and active_works):
+    if unknown_owner_works or unkeyed_attended_count > 0:
         return {
             **empty_res,
             "attended_count": attended_count,
@@ -1172,6 +1162,7 @@ def evaluate_lms_spck_quality(
         return {
             **empty_res,
             "attended_count": attended_count,
+            "status": "MISSING",
             "submitted_count": 0,
             "missing_submission_count": attended_count,
             "issues": issues,
@@ -1278,6 +1269,8 @@ def evaluate_lms_spck_quality(
             )
 
     return {
+        **empty_res,
+        "status": "PARTIAL" if missing_submission_count else "COMPLETE",
         "is_spck_lesson": True,
         "is_robotics": is_robotics,
         "attended_count": attended_count,
@@ -1294,6 +1287,28 @@ def evaluate_lms_spck_quality(
     }
 
 
+def _lms_quality_metadata(
+    attendance: Mapping[str, Any], comments: Mapping[str, Any], spck: Mapping[str, Any]
+) -> dict[str, Any]:
+    return {
+        "lms_attendance": dict(attendance),
+        "lms_comments": {
+            "status": comments["status"],
+            "submitted_count": comments.get("submitted_count", 0),
+            "missing_count": comments.get("missing_count", 0),
+            "review_count": comments.get("shallow_count", 0),
+            "exempt_count": comments.get("exempt_count", 0),
+        },
+        "lms_spck": {
+            "status": spck["status"],
+            "submitted_count": spck.get("submitted_count", 0),
+            "missing_count": spck.get("missing_submission_count", 0),
+            "exempt_count": spck.get("exempt_count", 0),
+            "attended_count": attendance.get("attended_count", 0),
+        },
+    }
+
+
 def evaluate_lms_slot_quality(
     slot_data: dict[str, Any] | None,
     *,
@@ -1301,168 +1316,62 @@ def evaluate_lms_slot_quality(
     khoi: str = "",
     lesson: str | int | None = "",
 ) -> dict[str, Any]:
-    """Evaluate lesson summary, student comments, and SPCK (Lessons 12-14) for one LMS slot."""
-    lesson_num = _parse_lesson_number(lesson)
+    """Evaluate one session with the same verified attendance for comments and SPCK."""
     lesson_14_flag = is_lesson_14(lesson)
-    if lesson_14_flag and isinstance(slot_data, dict) and not any(
-        slot_data.get(flag)
-        for flag in (
-            "overflow_class_limit",
-            "duplicate_class",
-            "missing_class",
-            "fetch_error",
-            "studentWorksFetchError",
-        )
-    ) and "studentWorks" not in slot_data:
-        return {
-            "is_exempt": True,
-            "is_checkpoint": False,
-            "has_valid_summary": True,
-            "summary_clean": "",
-            "attended_count": 0,
-            "failed_comment_count": 0,
-            "issues": [],
-        }
+    data = slot_data if isinstance(slot_data, dict) else {}
+    checkpoint = (
+        False if lesson_14_flag else is_checkpoint_session(class_code, khoi, lesson, slot_data=data)
+    )
+    unavailable_issue = ""
     if not isinstance(slot_data, dict):
-        return {
-            "is_exempt": lesson_14_flag,
-            "is_checkpoint": False if lesson_14_flag else is_checkpoint_session(class_code, khoi, lesson),
-            "has_valid_summary": lesson_14_flag,
-            "summary_clean": "",
-            "attended_count": 0,
-            "failed_comment_count": 0,
-            "issues": [
-                make_structured_issue(
-                    ISSUE_CODE_LMS_MANUAL_CHECK,
-                    "[LMS] Chưa kiểm tra được dữ liệu buổi học trên LMS, cần kiểm tra thủ công",
-                )
-            ],
-        }
-
-    if bool(slot_data.get("overflow_class_limit")):
-        return {
-            "is_exempt": lesson_14_flag,
-            "is_checkpoint": False if lesson_14_flag else is_checkpoint_session(class_code, khoi, lesson),
-            "has_valid_summary": lesson_14_flag,
-            "summary_clean": "",
-            "attended_count": 0,
-            "failed_comment_count": 0,
-            "issues": [
-                make_structured_issue(
-                    ISSUE_CODE_LMS_MANUAL_CHECK,
-                    "[LMS] Vượt giới hạn số lớp kiểm tra LMS trong một đợt, cần kiểm tra thủ công",
-                )
-            ],
-        }
-    if bool(slot_data.get("duplicate_class")):
-        return {
-            "is_exempt": lesson_14_flag,
-            "is_checkpoint": False if lesson_14_flag else is_checkpoint_session(class_code, khoi, lesson),
-            "has_valid_summary": lesson_14_flag,
-            "summary_clean": "",
-            "attended_count": 0,
-            "failed_comment_count": 0,
-            "issues": [
-                make_structured_issue(
-                    ISSUE_CODE_LMS_MANUAL_CHECK,
-                    "[LMS] Phát hiện trùng mã lớp trên LMS, cần kiểm tra thủ công",
-                )
-            ],
-        }
-    if bool(slot_data.get("missing_class")):
-        return {
-            "is_exempt": lesson_14_flag,
-            "is_checkpoint": False if lesson_14_flag else is_checkpoint_session(class_code, khoi, lesson),
-            "has_valid_summary": lesson_14_flag,
-            "summary_clean": "",
-            "attended_count": 0,
-            "failed_comment_count": 0,
-            "issues": [
-                make_structured_issue(
-                    ISSUE_CODE_LMS_MANUAL_CHECK,
-                    "[LMS] Không tìm thấy dữ liệu lớp trên LMS, cần kiểm tra thủ công",
-                )
-            ],
-        }
-    if bool(slot_data.get("fetch_error")):
-        return {
-            "is_exempt": lesson_14_flag,
-            "is_checkpoint": False if lesson_14_flag else is_checkpoint_session(class_code, khoi, lesson),
-            "has_valid_summary": lesson_14_flag,
-            "summary_clean": "",
-            "attended_count": 0,
-            "failed_comment_count": 0,
-            "issues": [
-                make_structured_issue(
-                    ISSUE_CODE_LMS_MANUAL_CHECK,
-                    "[LMS] Không tải được đầy đủ dữ liệu buổi học từ LMS, cần kiểm tra thủ công",
-                )
-            ],
-        }
-    if lesson_14_flag:
-        spck_eval_14 = evaluate_lms_spck_quality(
-            slot_data,
-            class_code=class_code,
-            khoi=khoi,
-            lesson=14,
+        unavailable_issue = (
+            "[LMS] Chưa kiểm tra được dữ liệu buổi học trên LMS, cần kiểm tra thủ công"
         )
-        l14_issues = list(spck_eval_14.get("issues") or [])
-        if bool(slot_data.get("truncated")) and not any(
-            "vượt giới hạn" in issue_text(item) for item in l14_issues
-        ):
-            l14_issues.append(
-                make_structured_issue(
-                    ISSUE_CODE_LMS_MANUAL_CHECK,
-                    "[LMS] Dữ liệu buổi học trên LMS vượt giới hạn kiểm tra, cần kiểm tra thủ công",
-                )
-            )
+    for flag, text in (
+        ("overflow_class_limit", "Vượt giới hạn số lớp kiểm tra LMS trong một đợt"),
+        ("duplicate_class", "Phát hiện trùng mã lớp trên LMS"),
+        ("missing_class", "Không tìm thấy dữ liệu lớp trên LMS"),
+        ("fetch_error", "Không tải được đầy đủ dữ liệu buổi học từ LMS"),
+    ):
+        if data.get(flag):
+            unavailable_issue = f"[LMS] {text}, cần kiểm tra thủ công"
+            break
+    if unavailable_issue:
+        attendance, _, _ = _evaluate_lms_attendance(None)
         return {
-            "is_exempt": True,
-            "is_checkpoint": False,
-            "has_valid_summary": True,
+            **_lms_quality_metadata(
+                attendance,
+                {"status": "EXEMPT" if lesson_14_flag else "UNVERIFIED"},
+                {
+                    "status": "UNVERIFIED"
+                    if _parse_lesson_number(lesson) in SPCK_REQUIRED_LESSONS
+                    else "NOT_REQUIRED"
+                },
+            ),
+            "is_exempt": lesson_14_flag,
+            "is_checkpoint": checkpoint,
+            "has_valid_summary": lesson_14_flag,
             "summary_clean": "",
-            "attended_count": int(spck_eval_14.get("attended_count") or 0),
+            "attended_count": 0,
             "failed_comment_count": 0,
-            "spck_submitted_count": int(spck_eval_14.get("submitted_count") or 0),
-            "issues": l14_issues,
+            "issues": [make_structured_issue(ISSUE_CODE_LMS_MANUAL_CHECK, unavailable_issue)],
         }
-    checkpoint = is_checkpoint_session(
-        class_code,
-        khoi,
-        lesson,
-        slot_data=slot_data,
-    )
-    summary_eval = evaluate_lms_slot_summary(slot_data.get("summary"))
     comments_eval = evaluate_lms_student_comments(
-        slot_data.get("studentAttendance"),
-        is_checkpoint=checkpoint,
-        lesson=lesson,
+        data.get("studentAttendance"), is_checkpoint=checkpoint, lesson=lesson, slot_data=data
     )
-    issues: list[Any] = []
-    if summary_eval["issue"]:
-        issues.append(summary_eval["issue"])
-    issues.extend(comments_eval["issues"])
-    if lesson_num in SPCK_REQUIRED_LESSONS and (
-        "studentWorks" in slot_data or "studentWorksFetchError" in slot_data
-    ):
-        spck_eval = evaluate_lms_spck_quality(
-            slot_data,
-            class_code=class_code,
-            khoi=khoi,
-            lesson=lesson_num,
-        )
-        issues.extend(spck_eval["issues"])
-    if bool(slot_data.get("truncated")) and not any(
-        "vượt giới hạn" in issue_text(item) for item in issues
-    ):
-        issues.append(
-            make_structured_issue(
-                ISSUE_CODE_LMS_MANUAL_CHECK,
-                "[LMS] Dữ liệu buổi học trên LMS vượt giới hạn kiểm tra, cần kiểm tra thủ công",
-            )
-        )
+    spck_eval = evaluate_lms_spck_quality(data, class_code=class_code, khoi=khoi, lesson=lesson)
+    summary_eval = (
+        {"has_valid_summary": True, "summary_clean": "", "issue": ""}
+        if lesson_14_flag
+        else evaluate_lms_slot_summary(data.get("summary"))
+    )
+    issues = [summary_eval["issue"]] if summary_eval["issue"] else []
+    for item in [*comments_eval["issues"], *spck_eval["issues"]]:
+        if issue_text(item) not in {issue_text(existing) for existing in issues}:
+            issues.append(item)
     return {
-        "is_exempt": False,
+        **_lms_quality_metadata(comments_eval["attendance"], comments_eval, spck_eval),
+        "is_exempt": lesson_14_flag,
         "is_checkpoint": checkpoint,
         "has_valid_summary": bool(summary_eval["has_valid_summary"]),
         "summary_clean": str(summary_eval["summary_clean"] or ""),
@@ -1470,7 +1379,6 @@ def evaluate_lms_slot_quality(
         "failed_comment_count": int(comments_eval["failed_count"]),
         "issues": issues,
     }
-
 
 _NEXT_LESSON_SECTION_MARKERS = (
     "buoi hoc ke tiep",
@@ -1731,6 +1639,7 @@ async def fetch_lms_class_slots_via_page(
     *,
     class_names: list[str],
     timeout_ms: int = 12000,
+    target_lessons_by_class: dict[str, list[int]] | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
     """Query MindX LMS GraphQL for slot summaries and studentAttendance of the given classes.
 
@@ -1867,7 +1776,7 @@ async def fetch_lms_class_slots_via_page(
                                 resolved_centres.append(s_cid)
 
     js_script = """
-    async ({ endpoint, classCodes, centres, maxSlots, maxStudents, timeoutMs, preResolvedToken, allowedHostname, allowedTokenKeys }) => {
+    async ({ endpoint, classCodes, centres, maxSlots, maxStudents, timeoutMs, preResolvedToken, allowedHostname, allowedTokenKeys, targetLessons }) => {
         const isTokenUsable = (rawToken, expTime) => {
             if (typeof rawToken !== 'string') return false;
             let clean = rawToken.trim().replace(/^"|"$/g, '');
@@ -2075,10 +1984,11 @@ async def fetch_lms_class_slots_via_page(
             }
         `;
         const studentWorksQuery = `
-            query findAllStudentWorks($classIds: [String]) {
+            query findAllStudentWorks($sessionId: String, $studentId: String) {
                 findAllStudentWorks(
                     payload: {
-                        classId_in: $classIds
+                        classSessionId_equals: $sessionId
+                        studentId_equals: $studentId
                     }
                 ) {
                     data {
@@ -2501,6 +2411,7 @@ async def fetch_lms_class_slots_via_page(
             const studentNamesSet = new Set();
             const inactiveStudentIds = new Set();
             let studentCounter = 0;
+            let identityAmbiguous = false;
             const rawClassStudents = Array.isArray(item.students) ? item.students : [];
             for (const cs of rawClassStudents.slice(0, maxStudents * 2)) {
                 const stuObj = (cs && cs.student && typeof cs.student === 'object') ? cs.student : null;
@@ -2509,6 +2420,7 @@ async def fetch_lms_class_slots_via_page(
                 if (fullName && fullName.length >= 3) {
                     studentNamesSet.add(fullName);
                 }
+                if (!stuId || studentIdToKey.has(stuId)) identityAmbiguous = true;
                 if (stuId && !studentIdToKey.has(stuId)) {
                     studentCounter += 1;
                     studentIdToKey.set(stuId, `stu_${studentCounter}`);
@@ -2533,12 +2445,13 @@ async def fetch_lms_class_slots_via_page(
                         studentCounter += 1;
                         studentIdToKey.set(stuId, `stu_${studentCounter}`);
                     }
+                    if (stuId && fullName && studentIdToName.has(stuId) && studentIdToName.get(stuId) !== fullName) identityAmbiguous = true;
                     if (stuId && fullName && !studentIdToName.has(stuId)) {
                         studentIdToName.set(stuId, fullName);
                     }
                 }
             }
-            const classIdStr = (item && item.id != null) ? String(item.id).trim().slice(0, 64) : '';
+            const classIdStr = (item && item.id != null) ? String(item.id).trim() : '';
             if (codeKey) {
                 matchedClassMeta[codeKey] = {
                     classId: classIdStr,
@@ -2552,8 +2465,10 @@ async def fetch_lms_class_slots_via_page(
             return item.slots.slice(0, maxSlots).map((s) => {
                 const rawAtt = Array.isArray(s && s.studentAttendance) ? s.studentAttendance : null;
                 const attTruncated = Array.isArray(rawAtt) && rawAtt.length > maxStudents;
+                const attendanceIds = Array.isArray(rawAtt) ? rawAtt.slice(0, maxStudents).map((a) => a && a.student && a.student.id) : [];
+                const attendanceAmbiguous = attendanceIds.some((id) => typeof id !== 'string' || !id || id.trim() !== id || id.length > 64) || new Set(attendanceIds).size !== attendanceIds.length;
                 return {
-                    _id: (s && s._id != null) ? String(s._id).slice(0, 64) : '',
+                    _id: (s && s._id != null) ? String(s._id) : '',
                     index: (s && typeof s.index === 'number' && Number.isFinite(s.index)) ? s.index : null,
                     date: (s && typeof s.date === 'string') ? s.date.slice(0, 64) : '',
                     startTime: (s && typeof s.startTime === 'string') ? s.startTime.slice(0, 64) : '',
@@ -2562,7 +2477,8 @@ async def fetch_lms_class_slots_via_page(
                     ...(s && typeof s.cancelled === 'boolean' ? { cancelled: s.cancelled } : {}),
                     ...(s && typeof s.isCancelled === 'boolean' ? { isCancelled: s.isCancelled } : {}),
                     summary: (s && typeof s.summary === 'string') ? s.summary.slice(0, 6000) : '',
-                    truncated: Boolean(slotsTruncated || attTruncated),
+                    truncated: Boolean(slotsTruncated || attTruncated || identityAmbiguous || rawClassStudents.length > maxStudents * 2 || (s && typeof s.summary === 'string' && s.summary.length > 6000) || (rawAtt && rawAtt.some((a) => a && typeof a.comment === 'string' && a.comment.length > 15000))),
+                    attendanceAmbiguous,
                     studentAttendance: Array.isArray(rawAtt)
                         ? rawAtt.slice(0, maxStudents).map((att) => {
                             const stuObj = (att && att.student && typeof att.student === 'object') ? att.student : null;
@@ -2781,35 +2697,13 @@ async def fetch_lms_class_slots_via_page(
             }
         }
 
-        // Tier 3: Fetch findAllStudentWorks for classes that have SPCK slots (index 11, 12, 13 -> Buổi 12, 13, 14)
-        const spckCodes = [];
-        const spckClassIds = [];
-        const classIdToCodes = new Map();
-        for (const code of classCodes) {
-            const meta = matchedClassMeta[code];
-            const slotsArr = Array.isArray(out[code]) ? out[code] : [];
-            const hasSpckSlot = slotsArr.some((s) => s && (s.index === 11 || s.index === 12 || s.index === 13));
-            if (!hasSpckSlot || !meta) continue;
-            if (!meta.classId) {
-                for (const s of slotsArr) {
-                    if (s && (s.index === 11 || s.index === 12 || s.index === 13)) {
-                        s.studentWorksFetchError = true;
-                    }
-                }
-                continue;
-            }
-            spckCodes.push(code);
-            if (!classIdToCodes.has(meta.classId)) {
-                classIdToCodes.set(meta.classId, []);
-                spckClassIds.push(meta.classId);
-            }
-            classIdToCodes.get(meta.classId).push(code);
-        }
-
-        if (spckClassIds.length > 0 && !authFailed) {
-            const WORK_CLASS_CHUNK_SIZE = 10;
-            const MAX_WORKS_PER_CHUNK = 2000;
-            const MAX_WORKS_RESPONSE_BYTES = 5 * 1024 * 1024;
+        // The LMS silently caps unpaginated work queries at 20 rows: scope by session,
+        // then verify every missing attendee (or every attendee at the cap) separately.
+        const MAX_WORK_REQUESTS = 120;
+        const MAX_WORKS_RESPONSE_BYTES = 5 * 1024 * 1024;
+        const WORK_RESPONSE_CAP = 20;
+        let workRequests = 0;
+        const workDeadline = Date.now() + Math.max(15000, (timeoutMs || 12000) * 3);
             const readBoundedJson = async (resp, maxBytes) => {
                 if (resp && resp.headers && typeof resp.headers.get === 'function') {
                     const rawCl = resp.headers.get('content-length');
@@ -2866,141 +2760,95 @@ async def fetch_lms_class_slots_via_page(
                 }
                 return { overflow: false, data: await resp.json() };
             };
-            for (let cStart = 0; cStart < spckClassIds.length; cStart += WORK_CLASS_CHUNK_SIZE) {
-                const chunkIds = spckClassIds.slice(cStart, cStart + WORK_CLASS_CHUNK_SIZE);
-                const chunkCodes = [];
-                for (const cid of chunkIds) {
-                    const codesForCid = classIdToCodes.get(cid) || [];
-                    for (const cCode of codesForCid) {
-                        if (!chunkCodes.includes(cCode)) chunkCodes.push(cCode);
-                    }
+        const fetchSessionWorks = async (sessionId, studentId) => {
+            if (authFailed || workRequests >= MAX_WORK_REQUESTS || Date.now() >= workDeadline) return null;
+            workRequests += 1;
+            const ctrl = new AbortController();
+            const timer = setTimeout(() => ctrl.abort(), Math.min(timeoutMs || 12000, Math.max(1, workDeadline - Date.now())));
+            try {
+                const resp = await fetch(endpoint, {
+                    method: 'POST',
+                    headers: { 'content-type': 'application/json', 'authorization': bearerHeader, 'token': rawTokenHeader },
+                    body: JSON.stringify({
+                        operationName: 'findAllStudentWorks',
+                        variables: { sessionId, ...(studentId ? { studentId } : {}) },
+                        query: studentWorksQuery
+                    }),
+                    signal: ctrl.signal
+                });
+                if (!resp.ok) {
+                    if (isAuthErrorPayload(resp.status, null)) authFailed = true;
+                    return null;
                 }
-                if (authFailed) {
-                    for (const code of chunkCodes) {
-                        const slotsArr = Array.isArray(out[code]) ? out[code] : [];
-                        for (const s of slotsArr) {
-                            if (s && (s.index === 11 || s.index === 12 || s.index === 13)) {
-                                s.studentWorksFetchError = true;
-                            }
-                        }
-                    }
+                const bounded = await readBoundedJson(resp, MAX_WORKS_RESPONSE_BYTES);
+                if (bounded.overflow || ctrl.signal.aborted || Date.now() >= workDeadline) return null;
+                const payload = bounded.data;
+                if (payload && Array.isArray(payload.errors) && payload.errors.length) {
+                    if (isAuthErrorPayload(resp.status, payload)) authFailed = true;
+                    return null;
+                }
+                const result = (((payload || {}).data || {}).findAllStudentWorks || {});
+                const rows = result.data;
+                if (!Array.isArray(rows) || rows.length > maxStudents * 2 || result.truncated === true || result.hasNextPage === true) return null;
+                const total = result.total != null ? result.total : result.totalCount;
+                if (total != null && (!Number.isInteger(Number(total)) || Number(total) !== rows.length)) return null;
+                return rows;
+            } catch (_) {
+                return null;
+            } finally {
+                clearTimeout(timer);
+            }
+        };
+        const exactId = (value) => typeof value === 'string' && value.trim() && value === value.trim() && value.length <= 64 ? value : '';
+        for (const code of classCodes) {
+            const meta = matchedClassMeta[code];
+            const slotsArr = Array.isArray(out[code]) ? out[code] : [];
+            for (const s of slotsArr) {
+                if (!s || ![11, 12, 13].includes(s.index)) continue;
+                if (targetLessons && (!Array.isArray(targetLessons[code]) || !targetLessons[code].includes(s.index + 1))) continue;
+                const slotTime = Date.parse(s.date);
+                if (Number.isFinite(slotTime) && slotTime > Date.now()) continue;
+                const attendance = Array.isArray(s.studentAttendance) ? s.studentAttendance : [];
+                const attendedKeys = attendance.filter((a) => a && ['ATTENDED', 'LATE_ARRIVED'].includes(String(a.status || '').trim().toUpperCase())).map((a) => a.studentKey);
+                if (!attendedKeys.length) { s.studentWorks = []; continue; }
+                const slotId = exactId(s._id);
+                if (!meta || !exactId(meta.classId) || !slotId || !Number.isFinite(slotTime) || s.truncated || s.attendanceAmbiguous ||
+                    slotsArr.filter((v) => v && v._id === s._id).length !== 1 ||
+                    attendedKeys.some((k) => !k) || new Set(attendedKeys).size !== attendedKeys.length) {
+                    s.studentWorksFetchError = true;
                     continue;
                 }
-                let chunkOk = false;
-                let chunkWorks = [];
-                for (let attempt = 0; attempt < 2; attempt++) {
-                    if (authFailed) break;
-                    const ctrl = new AbortController();
-                    const timer = setTimeout(() => ctrl.abort(), Math.max(timeoutMs || 12000, 15000));
-                    try {
-                        const resp = await fetch(endpoint, {
-                            method: 'POST',
-                            headers: {
-                                'content-type': 'application/json',
-                                'authorization': bearerHeader,
-                                'token': rawTokenHeader
-                            },
-                            body: JSON.stringify({
-                                operationName: 'findAllStudentWorks',
-                                variables: {
-                                    classIds: chunkIds
-                                },
-                                query: studentWorksQuery
-                            }),
-                            signal: ctrl.signal
-                        });
-                        if (!resp.ok) {
-                            if (isAuthErrorPayload(resp.status, null)) {
-                                authFailed = true;
-                                break;
-                            }
-                            if (attempt === 0) {
-                                await new Promise((r) => setTimeout(r, 300));
-                                continue;
-                            }
-                            break;
-                        }
-                        const bounded = await readBoundedJson(resp, MAX_WORKS_RESPONSE_BYTES);
-                        if (bounded.overflow) {
-                            try { ctrl.abort(); } catch (_) {}
-                            chunkOk = false;
-                            break;
-                        }
-                        const payload = bounded.data;
-                        if (payload && Array.isArray(payload.errors) && payload.errors.length > 0) {
-                            if (isAuthErrorPayload(resp.status, payload)) {
-                                authFailed = true;
-                                break;
-                            }
-                            if (attempt === 0) {
-                                await new Promise((r) => setTimeout(r, 300));
-                                continue;
-                            }
-                            break;
-                        }
-                        const rawWorks = (((payload || {}).data || {}).findAllStudentWorks || {}).data;
-                        if (!Array.isArray(rawWorks) || rawWorks.length > MAX_WORKS_PER_CHUNK) {
-                            chunkOk = false;
-                            break;
-                        }
-                        chunkWorks = rawWorks;
-                        chunkOk = true;
-                        break;
-                    } catch (_) {
-                        if (attempt === 0) {
-                            await new Promise((r) => setTimeout(r, 300));
-                            continue;
-                        }
-                        chunkOk = false;
-                    } finally {
-                        clearTimeout(timer);
-                    }
-                }
-                if (!chunkOk) {
-                    for (const code of chunkCodes) {
-                        const slotsArr = Array.isArray(out[code]) ? out[code] : [];
-                        for (const s of slotsArr) {
-                            if (s && (s.index === 11 || s.index === 12 || s.index === 13)) {
-                                s.studentWorksFetchError = true;
-                            }
-                        }
-                    }
+                const rawIds = Array.from(meta.studentIdToKey).filter(([, key]) => attendedKeys.includes(key)).map(([id]) => id);
+                if (rawIds.length !== attendedKeys.length || rawIds.some((id) => !exactId(id))) {
+                    s.studentWorksFetchError = true;
                     continue;
                 }
-                const worksByClassId = new Map();
-                for (const w of chunkWorks) {
-                    if (!w || typeof w !== 'object') continue;
-                    const isDel = String(w.isDeleted || '').trim().toLowerCase();
-                    if (w.isDeleted === true || isDel === 'true') continue;
-                    const cid = w.classId != null ? String(w.classId).trim() : '';
-                    if (!cid) continue;
-                    if (!worksByClassId.has(cid)) {
-                        worksByClassId.set(cid, []);
-                    }
-                    worksByClassId.get(cid).push(w);
+                const validateWorks = (rows, studentId) => {
+                    if (!rows) return false;
+                    const ids = new Set();
+                    return rows.every((w) => {
+                        if (!w || typeof w !== 'object' || !exactId(w.id) || ids.has(w.id)) return false;
+                        ids.add(w.id);
+                        return w.classId === meta.classId && w.classSessionId === slotId &&
+                            exactId(w.studentId) && meta.studentIdToKey.has(w.studentId) &&
+                            (!studentId || w.studentId === studentId) &&
+                            (w.classSessionNumber == null || [s.index, s.index + 1].includes(Number(w.classSessionNumber)));
+                    });
+                };
+                const sessionWorks = await fetchSessionWorks(slotId);
+                if (!validateWorks(sessionWorks)) { s.studentWorksFetchError = true; continue; }
+                let matchedWorks = sessionWorks.filter((w) => w.isDeleted !== true && String(w.isDeleted || '').toLowerCase() !== 'true');
+                const capped = sessionWorks.length >= WORK_RESPONSE_CAP;
+                let complete = true;
+                for (const studentId of rawIds) {
+                    if (!capped && matchedWorks.some((w) => w.studentId === studentId)) continue;
+                    const individual = await fetchSessionWorks(slotId, studentId);
+                    if (!validateWorks(individual, studentId) || individual.length >= WORK_RESPONSE_CAP) { complete = false; break; }
+                    const priorWorks = matchedWorks.filter((w) => w.studentId === studentId);
+                    if (priorWorks.some((w) => !individual.some((v) => JSON.stringify(v) === JSON.stringify(w)))) { complete = false; break; }
+                    matchedWorks = matchedWorks.filter((w) => w.studentId !== studentId).concat(individual.filter((w) => w.isDeleted !== true && String(w.isDeleted || '').toLowerCase() !== 'true'));
                 }
-                for (const code of chunkCodes) {
-                    const meta = matchedClassMeta[code];
-                    const slotsArr = Array.isArray(out[code]) ? out[code] : [];
-                    const classWorks = (meta && worksByClassId.get(meta.classId)) || [];
-                    for (const s of slotsArr) {
-                        if (!s || (s.index !== 11 && s.index !== 12 && s.index !== 13)) continue;
-                        const slotId = String(s._id || '').trim();
-                        const slotNumber = Number(s.index) + 1;
-                        const matchedWorks = classWorks.filter((w) => {
-                            const wSessionId = w.classSessionId != null ? String(w.classSessionId).trim() : '';
-                            if (slotId && wSessionId) {
-                                return wSessionId === slotId;
-                            }
-                            if (!wSessionId && w.classSessionNumber != null) {
-                                return Number(w.classSessionNumber) === slotNumber;
-                            }
-                            return false;
-                        });
-                        if (matchedWorks.length > maxStudents * 2) {
-                            s.studentWorksFetchError = true;
-                            continue;
-                        }
+                if (!complete || matchedWorks.length > maxStudents * 2 || new Set(matchedWorks.map((w) => w.id)).size !== matchedWorks.length) { s.studentWorksFetchError = true; continue; }
                         s.studentWorks = matchedWorks.map((w) => {
                             const rawStuId = w.studentId != null ? String(w.studentId).trim() : '';
                             if (!rawStuId || !meta || !meta.studentIdToKey.has(rawStuId)) {
@@ -3020,6 +2868,13 @@ async def fetch_lms_class_slots_via_page(
                                 if (Array.isArray(w[field]) && w[field].length > 0) return w[field];
                                 return [];
                             };
+                            for (const obj of [latestObj, pubObj]) {
+                                if (!obj) continue;
+                                if (['title', 'thumbnail', 'comment'].some((k) => typeof obj[k] === 'string' && obj[k].length > (k === 'title' ? 500 : k === 'thumbnail' ? 1000 : 15000)) ||
+                                    ['imageUrl', 'attachmentUrls', 'videoUrls', 'relatedUrls'].some((k) => Array.isArray(obj[k]) && (obj[k].length > (k === 'videoUrls' || k === 'relatedUrls' ? 20 : 30) || obj[k].some((v) => typeof v === 'string' ? v.length > 1000 : v && (String(v.name || '').length > 300 || String(v.url || '').length > 1000))))) {
+                                    s.studentWorksFetchError = true;
+                                }
+                            }
                             const stuKey = meta.studentIdToKey.get(rawStuId) || '';
                             const ownerName = meta.studentIdToName.get(rawStuId) || '';
                             const namesList = meta.studentNames || [];
@@ -3062,8 +2917,6 @@ async def fetch_lms_class_slots_via_page(
                                 comment: cleanWorkComment
                             };
                         });
-                    }
-                }
             }
         }
         if (authFailed) {
@@ -3291,6 +3144,7 @@ async def fetch_lms_class_slots_via_page(
             "maxSlots": MAX_LMS_SLOTS_PER_CLASS,
             "maxStudents": MAX_LMS_STUDENTS_PER_SLOT,
             "timeoutMs": int(timeout_ms),
+            "targetLessons": target_lessons_by_class,
             "preResolvedToken": pre_resolved_token,
             "allowedHostname": LMS_ALLOWED_HOSTNAME,
             "allowedTokenKeys": sorted(ALLOWED_LMS_TOKEN_KEYS),
@@ -3681,6 +3535,7 @@ def inspect_and_attach_quality_issues(
             )
 
         slot_evaluated = False
+        slot_eval: dict[str, Any] | None = None
         if has_lms_map:
             slot_evaluated = True
             if not class_code or lesson_num is None:
@@ -3754,6 +3609,13 @@ def inspect_and_attach_quality_issues(
                         else:
                             lms_issues = [slot_issue] if slot_issue else []
 
+        if slot_evaluated:
+            metadata_eval = slot_eval or evaluate_lms_slot_quality(None, class_code=class_code, khoi=khoi_str, lesson=lesson_str)
+            for metadata_key in ("lms_attendance", "lms_comments", "lms_spck"):
+                result[metadata_key] = dict(metadata_eval[metadata_key])
+                if st_dict is not None:
+                    st_dict[metadata_key] = dict(metadata_eval[metadata_key])
+
         if slot_evaluated or lms_summary_clean:
             result["lms_lesson_summary"] = lms_summary_clean
             if st_dict is not None:
@@ -3800,6 +3662,14 @@ def inspect_and_attach_quality_issues(
             for prior_l in prior_lms_issues:
                 pt = issue_text(prior_l)
                 if pt and pt not in seen_lms:
+                    if slot_evaluated and issue_code(prior_l) in {ISSUE_CODE_LMS_SPCK_MISSING, ISSUE_CODE_LMS_SPCK_NOTE}:
+                        previous = list(result.get("lms_previous_quality_issues") or [])
+                        if pt not in {issue_text(item) for item in previous}:
+                            previous.append(prior_l)
+                        result["lms_previous_quality_issues"] = previous
+                        if st_dict is not None:
+                            st_dict["lms_previous_quality_issues"] = list(previous)
+                        continue
                     seen_lms.add(pt)
                     lms_issues.append(prior_l)
 
@@ -3914,6 +3784,45 @@ def is_lms_fetch_unavailable(
     return inspected > 0
 
 
+def lms_target_lessons_by_class(scan_results: list[dict[str, Any]]) -> dict[str, list[int]]:
+    """Limit SPCK reads to lessons explicitly requested by scan targets."""
+    targets: dict[str, list[int]] = {}
+    for row in scan_results:
+        if not isinstance(row, dict):
+            continue
+        target = row.get("scan_target")
+        target = target if isinstance(target, dict) else {}
+        evidence = row.get("evidence")
+        evidence = evidence if isinstance(evidence, dict) else {}
+        context = evidence.get("date_context")
+        context = context if isinstance(context, dict) else {}
+        code = normalize_class_code(target.get("class_code") or context.get("target_class_code") or row.get("class_code") or "")
+        if not code:
+            continue
+        lesson = _parse_lesson_number(target.get("lesson") or context.get("target_lesson") or row.get("lesson"))
+        lessons = targets.setdefault(code, [])
+        if lesson is not None and lesson not in lessons:
+            lessons.append(lesson)
+    return targets
+
+
+async def fetch_lms_slots_for_targets(
+    gateway: Any,
+    page: Any,
+    class_codes: list[str],
+    target_lessons_by_class: dict[str, list[int]],
+) -> Any:
+    """Keep existing injected gateways compatible with their two-argument contract."""
+    operation = gateway.fetch_class_slots
+    parameters = inspect.signature(operation).parameters
+    supports_targets = "target_lessons_by_class" in parameters or any(
+        p.kind == inspect.Parameter.VAR_KEYWORD for p in parameters.values()
+    )
+    if supports_targets:
+        return await operation(page, class_codes, target_lessons_by_class=target_lessons_by_class)
+    return await operation(page, class_codes)
+
+
 async def fetch_and_evaluate_lms_quality(
     page: Any,
     scan_results: list[dict[str, Any]],
@@ -3921,11 +3830,13 @@ async def fetch_and_evaluate_lms_quality(
     lms_slots_by_class: dict[str, list[dict[str, Any]]] | None = None,
     lms_quality_gateway: Any = None,
     allow_page_fallback: bool = False,
+    target_lessons_by_class: dict[str, list[int]] | None = None,
 ) -> dict[str, list[dict[str, Any]]] | None:
     """Shared helper to fetch LMS class slots (if needed) and attach quality issues onto scan_results."""
     resolved_lms_slots: dict[str, list[dict[str, Any]]] | None = (
         dict(lms_slots_by_class) if isinstance(lms_slots_by_class, dict) else None
     )
+    requested_lessons = target_lessons_by_class if target_lessons_by_class is not None else lms_target_lessons_by_class(scan_results)
     active_gateway = lms_quality_gateway
     if (
         os.getenv("ZALO_QUALITY_ISOLATED") == "1"
@@ -3966,8 +3877,8 @@ async def fetch_and_evaluate_lms_quality(
         if active_gateway is not None:
             if candidate_codes and hasattr(active_gateway, "fetch_class_slots"):
                 try:
-                    fetched = await active_gateway.fetch_class_slots(
-                        page, candidate_codes
+                    fetched = await fetch_lms_slots_for_targets(
+                        active_gateway, page, candidate_codes, requested_lessons
                     )
                     if isinstance(fetched, dict):
                         resolved_lms_slots = fetched
@@ -3991,7 +3902,7 @@ async def fetch_and_evaluate_lms_quality(
         ):
             try:
                 fetched_slots = await fetch_lms_class_slots_via_page(
-                    page, class_names=candidate_codes
+                    page, class_names=candidate_codes, target_lessons_by_class=requested_lessons
                 )
                 if isinstance(fetched_slots, dict) and fetched_slots:
                     resolved_lms_slots = fetched_slots

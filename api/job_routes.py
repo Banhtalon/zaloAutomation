@@ -11,6 +11,7 @@ from services.report_status import (
     SUBMITTED_EVIDENCE_STATES,
     categorize_row,
     is_failed,
+    resolve_lms_status,
 )
 from services.zalo_preflight import effective_scan_worker_count
 
@@ -19,6 +20,9 @@ router = APIRouter()
 
 
 def _annotate_item_status(item: dict[str, Any]) -> dict[str, Any]:
+    status = resolve_lms_status(item, str(item.get("lms_status") or ""))
+    if status:
+        item["lms_status"] = status
     item["category"] = categorize_row(item)
     item["is_failed"] = is_failed(item)
     return item
@@ -283,6 +287,9 @@ async def get_job_targets(
                 res_val["bcnb_update_state"] = eff_bcnb_state
             res_val["category"] = category
             res_val["is_failed"] = failed
+            lms_status = resolve_lms_status(res_val, str(res_val.get("lms_status") or ""))
+            if lms_status:
+                res_val["lms_status"] = lms_status
             target["category"] = category
             target["is_failed"] = failed
         else:

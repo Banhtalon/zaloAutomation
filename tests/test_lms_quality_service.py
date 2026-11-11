@@ -112,11 +112,10 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(res["attended_count"], 6)
         self.assertEqual(res["shallow_count"], 6)
         self.assertEqual(res["duplicate_count"], 6)
-        self.assertEqual(
-            res["issues"],
-            ["[LMS] Nhận xét thiếu ý"],
-        )
-        joined_issues = " ; ".join(res["issues"])
+        self.assertEqual(res["status"], "REVIEW")
+        self.assertEqual(res["review_reasons"], {"chưa rõ điểm cần cải thiện": 6})
+        self.assertEqual(issue_severity(res["issues"][0]), SEVERITY_NOTE)
+        joined_issues = " ; ".join(issue_text(item) for item in res["issues"])
         self.assertNotIn("Học Viên Ẩn Danh", joined_issues)
 
     def test_regular_session_comments_accept_3_part_structure(self) -> None:
@@ -333,13 +332,9 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
             scan_results,
             lms_slots_by_class=slots_by_class,
         )
-        self.assertEqual(
-            scan_results[0]["lms_quality_issues"],
-            [
-                "[LMS] Chưa ghi nội dung bài học",
-                "[LMS] Nhận xét thiếu ý",
-            ],
-        )
+        self.assertEqual(scan_results[0]["lms_quality_issues"][0], "[LMS] Chưa ghi nội dung bài học")
+        self.assertEqual(issue_severity(scan_results[0]["lms_quality_issues"][1]), SEVERITY_NOTE)
+        self.assertIn("1/1 nhận xét", issue_text(scan_results[0]["lms_quality_issues"][1]))
 
         # Re-evaluating after teacher fixes LMS content must clear stale issues
         fixed_slots_by_class = {
@@ -518,7 +513,9 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
             lesson=14,
         )
         self.assertTrue(exempt["is_exempt"])
-        self.assertEqual(exempt["issues"], [])
+        self.assertEqual(exempt["lms_comments"]["status"], "EXEMPT")
+        self.assertEqual(exempt["lms_spck"]["status"], "UNVERIFIED")
+        self.assertEqual(issue_code(exempt["issues"][0]), ISSUE_CODE_LMS_MANUAL_CHECK)
 
     async def test_missing_data_61st_class_21st_slot_and_duplicate_class_flagged(
         self,
@@ -975,7 +972,8 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
         pos_res = evaluate_lms_slot_quality(
             pos_slot, class_code="VT-C4K-PTB16", khoi="Coding", lesson=1
         )
-        self.assertIn("[LMS] Nhận xét thiếu ý", pos_res["issues"])
+        self.assertEqual(pos_res["lms_comments"]["status"], "REVIEW")
+        self.assertIn("chưa rõ điểm cần cải thiện", issue_text(pos_res["issues"][0]))
 
         # 2. Numbered Checkpoint rubric without "Điểm năng lực" on non-default session (B6) is recognized as Checkpoint
         numbered_rubric = (
@@ -1930,7 +1928,7 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
         fetch_calls = 0
         observed_worker_slots: list[dict] = []
 
-        async def _fake_pw_fetch(_page: object, codes: list[str]) -> dict:
+        async def _fake_pw_fetch(_page: object, codes: list[str], *, target_lessons_by_class: dict | None = None) -> dict:
             nonlocal fetch_calls
             fetch_calls += 1
             if fetch_calls == 1:
@@ -2338,7 +2336,7 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
             [ISSUE_CODE_LMS_MANUAL_CHECK],
         )
 
-        # 6. Browser JS findAllStudentWorks batch fetch, 2-word given name detection (including accentless),
+        # 6. Browser JS findAllStudentWorks session fetch, 2-word given name detection (including accentless),
         #    PII scrubbing (including relatedUrls.name), pagination cap safety, and Lesson 14 BCNB checker note update
         exp_future = int(time.time()) + 7200
         payload_b64 = (
@@ -2402,11 +2400,15 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
                 const qText = String(body.query || '');
                 const varsObj = body.variables || {};
                 // Enforce exact MindX LMS GraphQL schema invariants:
-                // 1) $classIds must be [String] (NOT [ID])
+                // 1) Exact session/student filters use String IDs; never class-wide queries
                 // 2) StudentWorkQuery does NOT accept pageIndex or itemsPerPage
                 // 3) StudentWork fields title/thumbnail/comment live inside latestData / publishedData
                 if (
-                    qText.includes('$classIds: [ID]') ||
+                    !qText.includes('$sessionId: String') ||
+                    !qText.includes('classSessionId_equals: $sessionId') ||
+                    !qText.includes('studentId_equals: $studentId') ||
+                    qText.includes('classId_in') ||
+                    varsObj.sessionId !== 'slot_14_id' ||
                     qText.includes('pageIndex') ||
                     qText.includes('itemsPerPage') ||
                     varsObj.pageIndex !== undefined ||
@@ -2917,9 +2919,8 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("Le Anh Dung", serialized_unknown_owner)
         self.assertNotIn("unknown_stu_777", serialized_unknown_owner)
-        self.assertEqual(
-            fetched_unknown_owner["VT-JSB15"][0]["studentWorks"],
-            [{"unknownOwner": True}],
+        self.assertTrue(
+            fetched_unknown_owner["VT-JSB15"][0].get("studentWorksFetchError")
         )
         eval_unknown_owner = evaluate_lms_slot_quality(
             fetched_unknown_owner["VT-JSB15"][0],

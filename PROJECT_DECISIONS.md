@@ -1194,3 +1194,18 @@
      - Giữ nguyên miễn trừ báo cáo Zalo cho Buổi 14 (`CATEGORY_EXEMPT`), nhưng cho phép `inspect_and_attach_quality_issues` và `_maybe_update_row_checker_note` đánh giá LMS SPCK và đồng bộ cột `Mô tả vấn đề (TE/TF/QC)` trên Teaching cho cả Buổi 14.
 - Consequences: Tự động kiểm soát chặt chẽ nghĩa vụ nộp SPCK ở Buổi 12, 13, 14 theo đúng chuẩn học vụ MindX; phân biệt chính xác lỗi chưa nộp (`0/N` $\rightarrow$ báo đỏ & gửi Email Quản lý) với nhắc nhở hoàn thiện thành phần phụ (`NOTE` $\rightarrow$ ghi tự động lên Teaching cho TE/TF/QC), đồng thời bảo vệ tuyệt đối PII học viên.
 - Supersedes: Mở rộng `DEC-038` và `DEC-041` với ngoại lệ lỗi `LMS_SPCK_MISSING` (`0/N` học viên nộp SPCK ở Buổi 12, 13, 14).
+
+## DEC-043 — SPCK theo buổi và điểm danh, nhận xét có lý do kiểm tra
+
+- Date: 2026-11-11.
+- Status: Implemented locally, kiểm chứng và đồng bộ theo PROJECT_STATE.md.
+- Context: Truy vấn SPCK gộp nhiều lớp có thể bị giới hạn 20 kết quả và tạo cảnh báo thiếu bài sai. LMS khóa nhận xét và sản phẩm đối với học viên nghỉ. Kiểm tra câu chữ cứng gây cảnh báo chung chung khi giáo viên đã nhận xét.
+- Decision:
+  - Xác định buổi bằng lớp, ngày, số buổi và mã buổi. Truy vấn SPCK theo mã buổi. Xác minh học viên đi học còn thiếu bằng cặp mã buổi và mã học viên. Bài chờ duyệt được tính đã nộp. Lỗi đọc, dữ liệu không đầy đủ hoặc không khớp danh tính chuyển sang chờ xác minh.
+  - Sĩ số cần nhận xét/SPCK gồm ATTENDED và LATE_ARRIVED. ABSENT và ABSENT_WITH_NOTICE được miễn riêng buổi đã nghỉ. Buổi đi học tiếp theo được đánh giá theo điểm danh của buổi đó. Toàn lớp nghỉ có trạng thái không áp dụng. Điểm danh trống, trùng, không xác định hoặc bị cắt cần kiểm tra thủ công.
+  - Buổi 14 tiếp tục miễn nhận xét theo quyết định hiện hành, vẫn kiểm tra SPCK của học viên đi học. Nghĩa vụ báo cáo Zalo tiếp tục áp dụng theo quy tắc từng buổi.
+  - Nhận xét buổi thường đánh giá ba ý trong nội dung, chấp nhận viết cùng một đoạn. Các dấu hiệu ngắn hoặc chưa nhận ra ý tạo nhắc QC có số lượng và lý do. Cơ chế nhận diện dựa trên từ/cụm từ vẫn cần người kiểm tra khi câu chữ chưa được nhận diện.
+  - Dashboard và báo cáo dùng số lượng được xác minh. Ghi chú hiển thị tự do không đủ để tự kết luận chưa nộp SPCK. Dữ liệu lịch sử thiếu thông tin điểm danh tiếp tục dùng quy tắc tương thích và cần lần kiểm tra mới để có số lượng mới.
+  - Đính chính ghi chú cũ trên Teaching phải có bản xem trước, bằng chứng phần ghi tự động, duyệt của Owner và đọc lại để phát hiện thay đổi đồng thời trước khi ghi.
+- Consequences: Giảm cảnh báo sai và thể hiện rõ học viên được miễn. Kết quả kiểm tra mã nguồn và đối chiếu chỉ đọc được ghi riêng với nghiệm thu thao tác ghi trên hệ thống thật.
+- Supersedes: Bổ sung điều kiện xác minh và miễn theo điểm danh cho DEC-041, DEC-042.

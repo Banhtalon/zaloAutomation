@@ -23,6 +23,8 @@ from services.report_status import (
     is_failed,
     is_lesson_14,
     issue_text,
+    resolve_lms_status,
+    resolve_spck_status,
 )
 
 
@@ -181,7 +183,7 @@ def build_weekly_summary_csv(
             zalo_status = (
                 f"[{dry_badge}] {zalo_status}" if zalo_status else f"[{dry_badge}]"
             )
-        lms_status = str(row.get("lms_status") or "").strip()
+        lms_status = resolve_lms_status(row, str(row.get("lms_status") or "").strip())
         eval_status = str(row.get("evaluation_status") or "").strip()
         row_category = str(row.get("category") or "").strip() or categorize_row(row)
         if (
@@ -192,7 +194,7 @@ def build_weekly_summary_csv(
             )
         ):
             eval_status = ""
-        if not eval_status and (zalo_status or lms_status):
+        if (not eval_status or "lms_comments" in row or "lms_comments" in st) and (zalo_status or lms_status):
             eval_status = _resolve_row_evaluation_status(
                 zalo_status=zalo_status,
                 lms_status=lms_status,
@@ -200,6 +202,7 @@ def build_weekly_summary_csv(
                 nx_lms_checked=row.get("nx_lms_checked"),
                 row=row,
                 category=row_category,
+                raw_evaluation_status=eval_status,
             )
         issue_desc = str(row.get("issue_description") or "").strip()
         if issue_desc:
@@ -503,6 +506,8 @@ def _resolve_row_evaluation_status(
     category: str | None = None,
 ) -> str:
     """Resolve the unified Teaching evaluation status for a weekly summary row."""
+    if row is not None:
+        lms_status = resolve_lms_status(row, lms_status)
     clean_raw = str(raw_evaluation_status or "").strip()
     row_category = category or categorize_row(
         {
@@ -527,8 +532,24 @@ def _resolve_row_evaluation_status(
         or ("Chờ tích BCNB" in lms_status)
         or (lms_status in {"", "Chưa quét LMS"} and bool(nx_lms_checked))
     )
-    if row is not None and has_spck_missing_fail(row) and zalo_done and lms_done:
+    if row is not None and has_spck_missing_fail(row) and zalo_done:
         return "❌ Chưa nộp SPCK trên LMS"
+    if row is not None and zalo_done:
+        raw_st = row.get("scan_target")
+        st = raw_st if isinstance(raw_st, Mapping) else {}
+        comments = row.get("lms_comments", st.get("lms_comments"))
+        spck = row.get("lms_spck", st.get("lms_spck"))
+        attendance = row.get("lms_attendance", st.get("lms_attendance"))
+        if isinstance(comments, Mapping):
+            if comments.get("status") == "UNVERIFIED":
+                return "⏳ Chờ xác minh điểm danh/nhận xét LMS"
+            if comments.get("status") == "EXEMPT":
+                if isinstance(attendance, Mapping) and attendance.get("status") == "EXEMPT":
+                    return "✅ Không áp dụng LMS (toàn bộ học viên nghỉ)"
+            if comments.get("status") in {"COMPLETE", "REVIEW", "EXEMPT"}:
+                clean_raw = ""
+        if isinstance(spck, Mapping) and spck.get("status") == "UNVERIFIED" and not lms_failed_or_warn:
+            return "⏳ Chờ xác minh SPCK trên LMS"
     if lms_status.startswith("⚠️") or zalo_review:
         if zalo_done and lms_status.startswith("⚠️"):
             return "⚠️ Đã nhận xét Zalo, LMS cần kiểm tra"
@@ -546,7 +567,8 @@ def _resolve_row_evaluation_status(
                 return "✅ Đã hoàn thành nhận xét"
             return clean_raw
     if zalo_done and lms_done:
-        return "✅ Đã hoàn thành nhận xét"
+        spck_status = resolve_spck_status(row) if row is not None else ""
+        return "✅ Đã hoàn thành nhận xét" + (f" · {spck_status}" if spck_status else "")
     if lms_done and not zalo_done:
         if clean_raw.startswith("⚠️") or (
             clean_raw and "chưa nhận xét zalo" in clean_raw.lower()
@@ -637,17 +659,8 @@ def _resolve_row_issue_description(
     fb_dict = fb or {}
     qc_note = _first_defined_str(item, st, fb_dict, key="qc_issue_note")
     _add(qc_note, split_semicolon=False)
-    _add(item.get("quality_issues") or st.get("quality_issues"))
-    _add(
-        item.get("lms_quality_issues")
-        or st.get("lms_quality_issues")
-        or fb_dict.get("lms_quality_issues")
-    )
-    _add(
-        item.get("zalo_content_issues")
-        or st.get("zalo_content_issues")
-        or fb_dict.get("zalo_content_issues")
-    )
+    for key in ("quality_issues", "lms_quality_issues", "zalo_content_issues"):
+        _add(next((src[key] for src in (item, st) if key in src and src[key] is not None), fb_dict.get(key)))
     lms_summary = _first_defined_str(item, st, fb_dict, key="lms_lesson_summary")
     for zalo_issue in evaluate_zalo_content_issues(
         item,
@@ -724,7 +737,14 @@ def _sanitize_dashboard_item(
     if isinstance(nx_lms_checked, bool):
         st["nx_lms_checked"] = nx_lms_checked
 
-    resolved_lms_status = lms_status
+    # Inspection counts belong to this result, never the week's fallback snapshot.
+    lms_inspection = {}
+    for key in ("lms_attendance", "lms_comments", "lms_spck"):
+        value = item.get(key, st.get(key))
+        if isinstance(value, Mapping):
+            lms_inspection[key] = dict(value)
+            st[key] = dict(value)
+    resolved_lms_status = resolve_lms_status(item, lms_status)
     if resolved_lms_status == "Chưa quét LMS":
         if nx_lms_checked is True:
             resolved_lms_status = "✅ Đã nộp LMS"
@@ -811,30 +831,16 @@ def _sanitize_dashboard_item(
         if "_origin_snapshot_id" in item
         else (snapshot_id if snapshot_id is not None else item.get("snapshot_id"))
     )
-    resolved_quality_issues = list(
-        item.get("quality_issues")
-        or st.get("quality_issues")
-        or fb.get("quality_issues")
-        or []
-    )
-    resolved_lms_quality_issues = list(
-        item.get("lms_quality_issues")
-        or st.get("lms_quality_issues")
-        or fb.get("lms_quality_issues")
-        or []
-    )
-    resolved_zalo_content_issues = list(
-        item.get("zalo_content_issues")
-        or st.get("zalo_content_issues")
-        or fb.get("zalo_content_issues")
-        or []
-    )
-    if resolved_quality_issues:
-        st["quality_issues"] = list(resolved_quality_issues)
-    if resolved_lms_quality_issues:
-        st["lms_quality_issues"] = list(resolved_lms_quality_issues)
-    if resolved_zalo_content_issues:
-        st["zalo_content_issues"] = list(resolved_zalo_content_issues)
+    resolved_issue_lists = {
+        key: list(next((src[key] for src in (item, st) if key in src and src[key] is not None), fb.get(key)) or [])
+        for key in ("quality_issues", "lms_quality_issues", "zalo_content_issues")
+    }
+    resolved_quality_issues = resolved_issue_lists["quality_issues"]
+    resolved_lms_quality_issues = resolved_issue_lists["lms_quality_issues"]
+    resolved_zalo_content_issues = resolved_issue_lists["zalo_content_issues"]
+    st["quality_issues"] = list(resolved_quality_issues)
+    st["lms_quality_issues"] = list(resolved_lms_quality_issues)
+    st["zalo_content_issues"] = list(resolved_zalo_content_issues)
     lms_fetch_unavailable = bool(
         item.get("lms_fetch_unavailable")
         or st.get("lms_fetch_unavailable")
@@ -875,6 +881,8 @@ def _sanitize_dashboard_item(
         "lms_quality_issues": resolved_lms_quality_issues,
         "zalo_content_issues": resolved_zalo_content_issues,
         "lms_fetch_unavailable": lms_fetch_unavailable,
+        **lms_inspection,
+        **{key: item.get(key, st.get(key)) for key in ("lms_spck_submitted_count", "lms_previous_quality_issues") if key in item or key in st},
         "source_job_id": resolved_source_job_id,
         "snapshot_id": resolved_snapshot_id,
         "scan_target": st,
@@ -3777,7 +3785,7 @@ class ReportRepository:
                 or sanitized.get("timestamp")
                 or "—"
             ).strip()
-            row_entry = {
+            row_entry: dict[str, Any] = {
                 "class_code": class_code,
                 "teacher": str(sanitized.get("person") or "Chưa phân công").strip()
                 or "Chưa phân công",
@@ -3788,6 +3796,8 @@ class ReportRepository:
                 or "—",
                 "zalo_status": str(sanitized.get("status") or "Chưa xác định").strip(),
                 "lms_status": resolved_lms_status,
+                **{key: sanitized[key] for key in ("lms_attendance", "lms_comments", "lms_spck") if key in sanitized},
+                **{key: sanitized[key] for key in ("lms_spck_submitted_count", "lms_previous_quality_issues") if key in sanitized},
                 "evaluation_status": str(sanitized.get("evaluation_status") or ""),
                 "issue_description": str(sanitized.get("issue_description") or ""),
                 "qc_issue_note": str(sanitized.get("qc_issue_note") or ""),

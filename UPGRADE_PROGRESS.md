@@ -1,7 +1,7 @@
 # KẾ HOẠCH CHI TIẾT & TIẾN ĐỘ NÂNG CẤP DỰ ÁN (UPGRADE PLAN & PROGRESS)
 
-**Cập nhật lần cuối:** `2026-11-11 09:10 +07:00`
-**Trạng thái hiện tại:** Đã hoàn tất **Phase 0 → Phase 3.2 (`45/45` ✅)**, hoàn tất **Wave 4 (Phase 4.0 → Phase 4.4: `25/25` ✅ — Kiểm định chất lượng nội dung LMS/Zalo, Tự động ghi `Mô tả vấn đề` lên Teaching & Bảng Email Quản lý 9 cột)**, hoàn tất **Wave 5 (Phase 5.0 → 5.8: `59/59` ✅ — Hardening toàn diện luồng kiểm tra báo cáo)**, và hoàn tất **Phase 6.1 (`7/7` ✅ — Kiểm định Nộp Sản Phẩm Cuối Khóa SPCK Buổi 12, 13, 14 & Hotfix GraphQL/PII `DEC-042`)**.
+**Cập nhật lần cuối:** `2026-11-11 17:08 +07:00`
+**Trạng thái hiện tại:** Đã hoàn tất **Phase 0 → Phase 3.2 (`45/45` ✅)**, hoàn tất **Wave 4 (Phase 4.0 → Phase 4.4: `25/25` ✅ — Kiểm định chất lượng nội dung LMS/Zalo, Tự động ghi `Mô tả vấn đề` lên Teaching & Bảng Email Quản lý 9 cột)**, hoàn tất **Wave 5 (Phase 5.0 → 5.8: `59/59` ✅ — Hardening toàn diện luồng kiểm tra báo cáo)**, và hoàn tất **Phase 6.1 (`7/7` ✅ — Kiểm định Nộp Sản Phẩm Cuối Khóa SPCK Buổi 12, 13, 14 & Hotfix GraphQL/PII `DEC-042`)**. Phase 6.2 đã hoàn tất source/local (`6/6`), có bản đối chiếu cảnh báo lịch sử chờ duyệt trước thao tác ghi thật.
 
 ---
 
@@ -32,6 +32,27 @@
 | **Phase 5.7** | **Giao diện vận hành bám dữ liệu server** | P1 | ✅ Hoàn thành | `8/8` |
 | **Phase 5.8** | **Dọn dẹp, tài liệu & nghiệm thu Wave 5** | P2 | ✅ Hoàn thành | `7/7` |
 | **Phase 6.1** | **Kiểm định Nộp Sản Phẩm Cuối Khóa (SPCK) ở Buổi 12, 13, 14 (`DEC-042`)** | P1 (Cao) | ✅ Hoàn thành | `7/7` |
+| **Phase 6.2** | **Sửa kết quả SPCK, kiểm tra nhận xét theo điểm danh và đối chiếu cảnh báo cũ** | P0 | ✅ Source/local đạt kiểm chứng | `6/6` |
+
+### Kế hoạch 6.2
+
+1. Khóa phạm vi ở mã lấy dữ liệu LMS, bộ chấm, nơi hiển thị và xuất báo cáo, kiểm thử cùng tài liệu tiến độ. Điểm khôi phục mã nguồn là `1209dee`.
+2. Ghép đúng lớp, ngày, buổi học và xác định người đi học theo điểm danh. Tính người đến muộn vào sĩ số cần kiểm tra. Miễn người đã xác nhận nghỉ ở riêng buổi đó. Phân biệt toàn lớp nghỉ với danh sách thiếu, trùng, bị cắt hoặc chưa điểm danh.
+3. Đọc SPCK buổi 12–14 theo mã buổi. Với học viên đi học còn thiếu, xác minh theo cả buổi và học viên. Tính bài chờ duyệt và chỉ báo thiếu sau khi xác minh. Kiểm thử dữ liệu nhóm bị giới hạn 20 bài, trả rỗng, lỗi kết nối và phản hồi mơ hồ.
+4. Chấm nhận xét buổi thường theo ba ý dù viết chung một đoạn. Phân biệt chưa nộp nhận xét, nhận xét ngắn và ý bot chưa nhận ra. Hiển thị số lượng, lý do và số học viên được miễn. Đối chiếu cách thể hiện trên Dashboard, Teaching và báo cáo quản lý.
+5. Tạo bản xem trước cho các buổi bị gắn cờ trong đợt 475. Lấy kết quả cũ ở chế độ chỉ đọc, đối chiếu LMS, chỉ đề xuất thay phần ghi chú tự động. Việc chỉnh dữ liệu Teaching thật cần duyệt bản xem trước và kiểm tra lại ghi chú ngay trước khi ghi.
+6. Chạy kiểm thử mục tiêu, kiểm tra JavaScript, toàn bộ kiểm tra cô lập và review độc lập Sol 6.1 high. Ghi bằng chứng vào tài liệu tiến độ, rà soát phạm vi, commit và đồng bộ GitHub.
+
+### Tiến độ 6.2
+
+- [x] Khóa phạm vi và baseline sạch `1209dee`, giao ba worker Sol 6.1 high theo phần SPCK, điểm danh/nhận xét và báo cáo.
+- [x] Truy vấn đúng buổi và học viên, kiểm thử giới hạn 20 kết quả, bài chờ duyệt, lỗi/thiếu dữ liệu và giới hạn tài nguyên.
+- [x] Miễn học viên nghỉ đúng buổi, tính người đến muộn, phân biệt toàn lớp nghỉ với điểm danh chưa xác định. Buổi 14 vẫn kiểm tra SPCK.
+- [x] Giải thích cảnh báo nhận xét bằng số lượng/lý do, đồng bộ Dashboard/API/CSV/email và nội dung ghi chú Teaching. Sửa thêm lỗi Dashboard giữ kết luận hoàn thành cũ.
+- [x] Đối chiếu chỉ đọc 14 buổi của đợt 475 và 14 ghi chú Teaching khớp lịch sử. Ba cảnh báo thiếu SPCK sai được xác nhận. 10 lớp đã có 57/57 nhận xét, bản sửa đánh dấu 26 nhận xét cần người xem lại ở 8 lớp. Bản xem trước lưu ngoài repository.
+- [x] Gate cuối `CHECK_QUALITY.ps1 -Isolated` đạt 695/695 test, coverage 78.6%, Ruff/Mypy PASS, secret scan 0. JavaScript PASS, review Sol 6.1 high PASS, manifest source/test khớp. Review đã phát hiện và sửa đường đồng bộ Teaching đưa cảnh báo SPCK lịch sử trở lại kết quả hiện tại khi dữ liệu mới chưa xác minh. Bản sửa và tài liệu được đóng gói để commit/push theo DEC-040.
+
+Điều kiện triển khai thực tế tiếp theo là duyệt bản xem trước sửa ghi chú lịch sử và đọc lại dữ liệu trước khi ghi. Kết quả kiểm thử local và đọc LMS được ghi trong `PROJECT_STATE.md`.
 
 ---
 

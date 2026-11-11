@@ -48,6 +48,8 @@ from services.report_status import (
     CATEGORY_LATE,
     ISSUE_CODE_LEGACY_UNCLASSIFIED_FAIL,
     ISSUE_CODE_LMS_MANUAL_CHECK,
+    ISSUE_CODE_LMS_SPCK_MISSING,
+    ISSUE_CODE_LMS_SPCK_NOTE,
     SUBMITTED_EVIDENCE_STATES,
     VERIFIED_EVIDENCE_STATES,
     categorize_row,
@@ -619,6 +621,22 @@ def _collect_row_verifiable_auto_issues(
         for x in existing_auto
         if issue_text(x).upper().startswith("[LMS]")
     ]
+    target = result.get("scan_target")
+    target = target if isinstance(target, dict) else {}
+    spck = result.get("lms_spck", target.get("lms_spck"))
+    if isinstance(spck, Mapping) and spck.get("status") == "UNVERIFIED":
+        prior_spck = [
+            item for item in existing_lms_auto
+            if issue_code(item) in {ISSUE_CODE_LMS_SPCK_MISSING, ISSUE_CODE_LMS_SPCK_NOTE}
+        ]
+        history = list(result.get("lms_previous_quality_issues") or [])
+        history_texts = {issue_text(item) for item in history}
+        history.extend(item for item in prior_spck if issue_text(item) not in history_texts)
+        if history:
+            result["lms_previous_quality_issues"] = history
+            if isinstance(result.get("scan_target"), dict):
+                result["scan_target"]["lms_previous_quality_issues"] = list(history)
+        existing_lms_auto = [item for item in existing_lms_auto if item not in prior_spck]
     if lms_slots_by_class is None or lms_unavailable:
         lms_auto = list(existing_lms_auto)
     elif has_lms_manual_check and all_slots_empty_stub:
