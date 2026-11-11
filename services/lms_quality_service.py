@@ -1128,7 +1128,7 @@ def evaluate_lms_spck_quality(
         if w_key:
             if w_key in attended_by_key:
                 works_by_key.setdefault(w_key, []).append(w)
-            elif w_key in non_attended_keys:
+            elif w_key in non_attended_keys or bool(w.get("inactiveInClass")):
                 continue
             else:
                 unknown_owner_works.append(w)
@@ -2047,6 +2047,13 @@ async def fetch_lms_class_slots_via_page(
                     data {
                         id
                         name
+                        students {
+                            activeInClass
+                            student {
+                                id
+                                fullName
+                            }
+                        }
                         slots {
                             _id
                             index
@@ -2068,31 +2075,44 @@ async def fetch_lms_class_slots_via_page(
             }
         `;
         const studentWorksQuery = `
-            query findAllStudentWorks($classIds: [ID], $pageIndex: Int, $itemsPerPage: Int) {
+            query findAllStudentWorks($classIds: [String]) {
                 findAllStudentWorks(
                     payload: {
-                        classId_in: $classIds,
-                        pageIndex: $pageIndex,
-                        itemsPerPage: $itemsPerPage
+                        classId_in: $classIds
                     }
                 ) {
                     data {
                         id
-                        title
+                        status
                         classId
                         classSessionId
                         classSessionNumber
                         studentId
-                        thumbnail
-                        imageUrl
-                        attachmentUrls
-                        videoUrls
-                        relatedUrls {
-                            name
-                            url
-                        }
-                        comment
                         isDeleted
+                        latestData {
+                            title
+                            thumbnail
+                            imageUrl
+                            attachmentUrls
+                            videoUrls
+                            relatedUrls {
+                                name
+                                url
+                            }
+                            comment
+                        }
+                        publishedData {
+                            title
+                            thumbnail
+                            imageUrl
+                            attachmentUrls
+                            videoUrls
+                            relatedUrls {
+                                name
+                                url
+                            }
+                            comment
+                        }
                     }
                 }
             }
@@ -2106,64 +2126,351 @@ async def fetch_lms_class_slots_via_page(
         const foldVi = (str) => foldViChars(str)
             .replace(/\\s+/g, ' ')
             .trim();
-        const replaceCaseInsensitive = (sourceText, needle, replacement) => {
-            const src = String(sourceText || '').normalize('NFC');
-            const ndlTokens = foldVi(needle).split(' ').filter(Boolean);
-            if (!src || ndlTokens.length === 0) return src;
-            const foldedSrc = foldViChars(src);
-            if (foldedSrc.length !== src.length) return src;
-            const firstTok = ndlTokens[0];
-            if (ndlTokens.length === 1 && firstTok.length < 3) return src;
-            let result = '';
-            let cursor = 0;
-            while (cursor < src.length) {
-                const hit = foldedSrc.indexOf(firstTok, cursor);
-                if (hit === -1) {
-                    result += src.slice(cursor);
-                    break;
-                }
-                let pos = hit + firstTok.length;
-                let matchedAll = true;
-                for (let tIdx = 1; tIdx < ndlTokens.length; tIdx++) {
-                    let wsEnd = pos;
-                    while (wsEnd < foldedSrc.length && /\\s/.test(foldedSrc[wsEnd])) {
-                        wsEnd += 1;
-                    }
-                    const nextTok = ndlTokens[tIdx];
-                    if (wsEnd === pos || !foldedSrc.startsWith(nextTok, wsEnd)) {
-                        matchedAll = false;
-                        break;
-                    }
-                    pos = wsEnd + nextTok.length;
-                }
-                if (matchedAll) {
-                    result += src.slice(cursor, hit) + replacement;
-                    cursor = pos;
-                } else {
-                    result += src.slice(cursor, hit + 1);
-                    cursor = hit + 1;
+        const buildFoldedWithMap = (rawStr) => {
+            const src = String(rawStr || '').normalize('NFC');
+            let folded = '';
+            const spans = [];
+            for (let i = 0; i < src.length; ) {
+                const cStart = i;
+                const cp = src.codePointAt(i);
+                i += (cp !== undefined && cp > 0xFFFF) ? 2 : 1;
+                while (i < src.length && /[\\u0300-\\u036f]/.test(src[i])) i += 1;
+                const chunk = foldViChars(src.slice(cStart, i));
+                for (let k = 0; k < chunk.length; k++) {
+                    folded += chunk[k];
+                    spans.push([cStart, i]);
                 }
             }
-            return result;
+            return { src, folded, spans };
         };
-        const scrubStudentNames = (rawText, namesList) => {
-            let text = String(rawText || '');
-            if (!text) return '';
+        const URL_RESERVED_TOKENS = new Set([
+            'https', 'http', 'youtube', 'youtu', 'canva', 'google', 'presentation',
+            'slides', 'slide', 'drive', 'github', 'vercel', 'netlify', 'mindx',
+            'static', 'resources', 'uploads', 'images', 'documents', 'watch',
+            'design', 'share', 'media', 'index', 'project', 'admin', 'class'
+        ]);
+        const consumeUrlSepUnit = (f, p) => {
+            const ch = f[p];
+            if (/[\\s\\-_+.]/.test(ch)) return p + 1;
+            if (ch === '%') {
+                const mSep = f.slice(p, p + 15).match(/^%(?:25)*(?:20|2b|2d|2e|5f)/);
+                if (mSep) return p + mSep[0].length;
+            }
+            return -1;
+        };
+        const replaceTokenGroup = (partStr, grp, replacement, urlMode) => {
+            if (!partStr || !Array.isArray(grp) || grp.length === 0) return String(partStr || '');
+            const grpChars = grp.join('').length;
+            if (urlMode) {
+                if (grp.length === 1 ? (grpChars < 5 || URL_RESERVED_TOKENS.has(grp[0])) : grpChars < 4) return partStr;
+            } else if (grp.length === 1 && grpChars < 3) {
+                return String(partStr);
+            }
+            const allowConcat = urlMode && (grp.length >= 3 || (grp.length >= 2 && grpChars >= 7));
+            const strongMulti = grp.length >= 3 && grpChars >= 8;
+            const { src, folded, spans } = buildFoldedWithMap(partStr);
+            if (!src || !folded) return src;
+            const firstTok = grp[0];
+            let outStr = '';
+            let fCur = 0;
+            let sCur = 0;
+            while (fCur < folded.length) {
+                const hit = folded.indexOf(firstTok, fCur);
+                if (hit === -1) break;
+                const leftOk = hit === 0 || !/[a-z]/.test(folded[hit - 1]) || strongMulti
+                    || /%(?:25)*[0-9a-f]{2}$/.test(folded.slice(Math.max(0, hit - 25), hit));
+                if (!leftOk) { fCur = hit + 1; continue; }
+                let pos = hit + firstTok.length;
+                let ok = true;
+                for (let t = 1; t < grp.length; t++) {
+                    const nextTok = grp[t];
+                    if (!urlMode) {
+                        let ws = pos;
+                        while (ws < folded.length) {
+                            if (/[\\s\\-_+]/.test(folded[ws])) { ws += 1; continue; }
+                            if (folded[ws] === '%') {
+                                const mSep = folded.slice(ws, ws + 25).match(/^%(?:25)*(?:20|2b|2d|2e|5f)/);
+                                if (mSep) { ws += mSep[0].length; continue; }
+                            }
+                            break;
+                        }
+                        if (ws === pos || !folded.startsWith(nextTok, ws)) { ok = false; break; }
+                        pos = ws + nextTok.length;
+                    } else {
+                        let sepEnd = pos;
+                        let sc = 0;
+                        while (sepEnd < folded.length && sc < 16) {
+                            const nx = consumeUrlSepUnit(folded, sepEnd);
+                            if (nx === -1) break;
+                            sepEnd = nx;
+                            sc += 1;
+                        }
+                        if (sc > 0 && folded.startsWith(nextTok, sepEnd)) pos = sepEnd + nextTok.length;
+                        else if (allowConcat && sc === 0 && folded.startsWith(nextTok, pos)) pos += nextTok.length;
+                        else { ok = false; break; }
+                    }
+                }
+                const rightOk = ok && (pos === folded.length || !/[a-z]/.test(folded[pos]) || strongMulti);
+                if (rightOk && spans[hit][0] >= sCur) {
+                    outStr += src.slice(sCur, spans[hit][0]) + replacement;
+                    sCur = spans[pos - 1][1];
+                    fCur = pos;
+                    while (fCur < spans.length && spans[fCur][0] < sCur) fCur += 1;
+                } else {
+                    fCur = hit + 1;
+                }
+            }
+            return outStr + src.slice(sCur);
+        };
+        const decodePunycode = (enc) => {
+            const str = String(enc || '').toLowerCase();
+            if (!str || str.length > 255 || !/^[a-z0-9-]+$/.test(str)) return null;
+            const out = [];
+            const delim = str.lastIndexOf('-');
+            let idx = 0;
+            if (delim > 0) {
+                for (let j = 0; j < delim; j++) out.push(str.charCodeAt(j));
+                idx = delim + 1;
+            } else if (delim === 0) {
+                idx = 1;
+            }
+            let n = 128;
+            let i = 0;
+            let bias = 72;
+            while (idx < str.length) {
+                const oldi = i;
+                let w = 1;
+                for (let k = 36; ; k += 36) {
+                    if (idx >= str.length) return null;
+                    const c = str.charCodeAt(idx++);
+                    const digit = (c >= 48 && c <= 57) ? c - 22 : ((c >= 97 && c <= 122) ? c - 97 : 36);
+                    if (digit >= 36 || digit > Math.floor((0x7fffffff - i) / w)) return null;
+                    i += digit * w;
+                    const t = k <= bias ? 1 : (k >= bias + 26 ? 26 : k - bias);
+                    if (digit < t) break;
+                    if (w > Math.floor(0x7fffffff / (36 - t))) return null;
+                    w *= (36 - t);
+                }
+                const outLen = out.length + 1;
+                let delta = oldi === 0 ? Math.floor((i - oldi) / 700) : Math.floor((i - oldi) / 2);
+                delta += Math.floor(delta / outLen);
+                let kBias = 0;
+                while (delta > 455) { delta = Math.floor(delta / 35); kBias += 36; }
+                bias = Math.floor(kBias + (36 * delta) / (delta + 38));
+                if (Math.floor(i / outLen) > 0x7fffffff - n) return null;
+                n += Math.floor(i / outLen);
+                i %= outLen;
+                if (n > 0x10ffff || (n >= 0xd800 && n <= 0xdfff)) return null;
+                out.splice(i, 0, n);
+                i += 1;
+            }
+            try { return String.fromCodePoint(...out); } catch (_) { return null; }
+        };
+        const SAFE_MULTI_PCT_RE = /%(?:25){1,8}(20|2[BbDdEe]|3[0-9]|4[1-9A-Fa-f]|5[0-9AaFf]|6[1-9A-Fa-f]|7[0-9AaEe]|[89A-Fa-f][0-9A-Fa-f])/g;
+        const UNSAFE_LEFTOVER_PCT_RE = /%(?:25)+(?:20|2[BbDdEe]|3[0-9]|4[1-9A-Fa-f]|5[0-9AaFf]|6[1-9A-Fa-f]|7[0-9AaEe]|[89A-Fa-f][0-9A-Fa-f])|%[89A-Fa-f][0-9A-Fa-f]/;
+        const decodeUrlSafeChars = (rawPart) => {
+            let s = String(rawPart || '');
+            if (!s.includes('%')) return { text: s, unsafe: false };
+            s = s.replace(SAFE_MULTI_PCT_RE, '%$1');
+            s = s.replace(
+                /%(3[0-9]|4[1-9A-Fa-f]|5[0-9AaFf]|6[1-9A-Fa-f]|7[0-9AaEe]|2[DdEe])/g,
+                (_m, hex) => String.fromCharCode(parseInt(hex, 16))
+            );
+            s = s.replace(
+                /(?:%[C-Dc-d][0-9A-Fa-f]%[89ABab][0-9A-Fa-f]|%[Ee][0-9A-Fa-f](?:%[89ABab][0-9A-Fa-f]){2}|%[Ff][0-7](?:%[89ABab][0-9A-Fa-f]){3})/g,
+                (cpSeq) => { try { return decodeURIComponent(cpSeq); } catch (_) { return cpSeq; } }
+            );
+            if (UNSAFE_LEFTOVER_PCT_RE.test(s)) {
+                return { text: s, unsafe: true };
+            }
+            return { text: s, unsafe: false };
+        };
+        const encodeNonAsciiUrlChars = (partStr) => String(partStr || '').replace(
+            /[^\\x00-\\x7F]+/gu,
+            (seq) => { try { return encodeURIComponent(seq); } catch (_) { return ''; } }
+        );
+        const buildNameGroups = (namesList) => {
+            const allGroups = [];
             for (const fullName of namesList) {
                 if (!fullName || fullName.length < 3) continue;
-                text = replaceCaseInsensitive(text, fullName, '[HS]');
-                const tokens = fullName.split(/\\s+/).filter(Boolean);
-                if (tokens.length >= 2) {
-                    const tailTwo = tokens.slice(-2).join(' ');
-                    if (tailTwo.length >= 4) {
-                        text = replaceCaseInsensitive(text, tailTwo, '[HS]');
+                const ft = foldVi(fullName).split(' ').filter(Boolean);
+                if (ft.length === 0) continue;
+                allGroups.push(ft);
+                if (ft.length >= 3) allGroups.push(ft.slice(-2));
+            }
+            return allGroups;
+        };
+        const scrubHostAuthority = (rawAuth, nameGroups) => {
+            const atIdx = rawAuth.lastIndexOf('@');
+            const hostPort = atIdx >= 0 ? rawAuth.slice(atIdx + 1) : rawAuth;
+            if (!hostPort || hostPort.startsWith('[')) return hostPort;
+            const pm = hostPort.match(/^([^:]+)(:\\d*)$/);
+            const rawHost = pm ? pm[1] : hostPort;
+            const port = pm ? pm[2] : '';
+            const rawLabels = rawHost.split('.');
+            const uniLabels = [];
+            const asciiLabels = [];
+            let hadInvalidPuny = false;
+            for (const rl of rawLabels) {
+                const dlRes = decodeUrlSafeChars(rl);
+                if (dlRes.unsafe) {
+                    uniLabels.push('hs');
+                    asciiLabels.push('hs');
+                    hadInvalidPuny = true;
+                    continue;
+                }
+                const dl = dlRes.text;
+                if (/^xn--/i.test(dl)) {
+                    const puny = decodePunycode(dl.slice(4));
+                    if (puny === null) {
+                        uniLabels.push('hs');
+                        asciiLabels.push('hs');
+                        hadInvalidPuny = true;
+                    } else {
+                        uniLabels.push(puny);
+                        asciiLabels.push(dl.toLowerCase());
+                    }
+                } else {
+                    uniLabels.push(dl);
+                    asciiLabels.push(/^[\\x00-\\x7F]*$/.test(dl) ? dl : null);
+                }
+            }
+            const uniHost = uniLabels.join('.');
+            let scrubbed = uniHost;
+            for (const grp of nameGroups) {
+                if (grp.length >= 2 || (grp.length === 1 && grp[0].length >= 5)) {
+                    scrubbed = replaceTokenGroup(scrubbed, grp, 'hs', true);
+                }
+            }
+            if (!hadInvalidPuny && scrubbed === uniHost && asciiLabels.every((x) => x !== null)) {
+                return asciiLabels.join('.') + port;
+            }
+            const safeHost = foldViChars(scrubbed).replace(/[^a-z0-9.-]/g, '-').replace(/-{2,}/g, '-');
+            return (safeHost || 'hs') + port;
+        };
+        const NON_HOST_PCT_RE = /%(?:25)*(?:2f|5c|20|2b|3a|3f|23)/i;
+        const FILE_EXT_TLD_RE = /^(?:png|jpe?g|gif|webp|svg|bmp|ico|pdf|pptx?|docx?|xlsx?|zip|rar|7z|tar|gz|mp[34]|mov|avi|mkv|webm|wav|sb3|py|js|ts|jsx|tsx|html?|css|json|xml|txt|csv|md)$/i;
+        const isPlausibleBareHost = (hostPart, hasPathAfter) => {
+            if (!hostPart || NON_HOST_PCT_RE.test(hostPart)) return false;
+            const noPort = hostPart.replace(/:\\d+$/, '');
+            const labels = noPort.split('.');
+            if (labels.length < 2 || labels.some((lb) => !lb)) return false;
+            const tld = labels[labels.length - 1];
+            if (/^xn--/i.test(tld)) return true;
+            if (!/^[a-z]{2,24}$/i.test(tld)) return false;
+            if (hasPathAfter) return true;
+            if (FILE_EXT_TLD_RE.test(tld)) return false;
+            return labels.length >= 3 || labels.some((lb) => /^xn--/i.test(lb));
+        };
+        const scrubStudentUrl = (rawUrl, namesList) => {
+            const raw = String(rawUrl || '').trim().slice(0, 4096);
+            if (!raw) return '';
+            const nameGroups = buildNameGroups(namesList);
+            const m = raw.match(/^((?:https?:)?\\/\\/)((?:(?!%(?:25)*2f)[^/?#])+)([\\s\\S]*)$/i);
+            const bareRaw = !m
+                ? raw.match(/^((?:[\\p{L}\\p{M}\\p{N}_%-]+\\.)+(?:xn--[^\\s/?#&='"<>.:]*|[a-z]{2,24})(?::\\d+)?)([/?#][\\s\\S]*|$)/iu)
+                : null;
+            const bareM = (bareRaw && isPlausibleBareHost(bareRaw[1], Boolean(bareRaw[2]))) ? bareRaw : null;
+            const scheme = m ? m[1] : '';
+            const cleanHost = m
+                ? scrubHostAuthority(m[2], nameGroups)
+                : (bareM ? scrubHostAuthority(bareM[1], nameGroups) : '');
+            const restRes = decodeUrlSafeChars(m ? m[3] : (bareM ? bareM[2] : raw));
+            if (restRes.unsafe) {
+                return (scheme + encodeNonAsciiUrlChars(cleanHost) + (cleanHost ? '/HS' : 'HS')).slice(0, 1000);
+            }
+            let rest = restRes.text;
+            if (/xn--/i.test(rest)) {
+                rest = rest.replace(
+                    /(%(?:25)*[0-9a-f]{2}|^|[^a-z0-9._-])((?:[a-z0-9_-]+\\.)*xn--[^\\s/?#&='"<>.:]*(?:\\.(?:xn--[^\\s/?#&='"<>.:]*|[a-z0-9_-]+))*)/gi,
+                    (_full, pre, hostCandidate) => {
+                        if (hostCandidate.includes('.')) {
+                            return pre + scrubHostAuthority(hostCandidate, nameGroups);
+                        }
+                        const puny = decodePunycode(hostCandidate.slice(4));
+                        if (puny === null) return pre + 'hs';
+                        let sc = puny;
+                        for (const grp of nameGroups) sc = replaceTokenGroup(sc, grp, 'hs', true);
+                        if (sc === puny) return pre + hostCandidate;
+                        return pre + (foldViChars(sc).replace(/[^a-z0-9_-]/gi, '-') || 'hs');
+                    }
+                );
+            }
+            for (const grp of nameGroups) {
+                if (rest) rest = replaceTokenGroup(rest, grp, 'HS', true);
+            }
+            let finalUrl = scheme + encodeNonAsciiUrlChars(cleanHost) + encodeNonAsciiUrlChars(rest);
+            if (finalUrl.length > 1000) finalUrl = finalUrl.slice(0, 1000).replace(/%[0-9A-Fa-f]?$/, '');
+            return finalUrl;
+        };
+        const URL_IN_TEXT_RE = /(?:https?:\\/\\/|\\/\\/(?:(?:[\\p{L}\\p{M}\\p{N}_%-]+\\.)+(?:xn--[^\\s/?#&='"<>.:]*|[a-z]{2,24})(?::\\d+)?|localhost(?::\\d+)?|xn--[^\\s/?#&='"<>.:]*|[a-z0-9._:-]+\\/))[^\\s"'<>]*|(?:[\\p{L}\\p{M}\\p{N}_-]+\\.)*xn--[^\\s/?#&='"<>.:]*(?:\\.(?:xn--[^\\s/?#&='"<>.:]*|[\\p{L}\\p{M}\\p{N}_-]+))*(?::\\d+)?(?:[/?#][^\\s"'<>]*)?|(?:[\\p{L}\\p{M}\\p{N}_%-]+\\.)+(?:xn--[^\\s/?#&='"<>.:]*|[a-z]{2,24})(?::\\d+)?[/?#][^\\s"'<>]*|(?:[\\p{L}\\p{M}\\p{N}_%-]+\\.){2,}(?:xn--[^\\s/?#&='"<>.:]*|[a-z]{2,24})(?::\\d+)?/giu;
+        const scrubFreeTextChunk = (chunk, nameGroups) => {
+            if (!chunk) return '';
+            let outChunk = chunk;
+            if (/%[0-9a-f]{2}/i.test(outChunk)) {
+                outChunk = outChunk.replace(/[^\\s"'<>]*%(?:25){9,}[0-9a-f]{2}[^\\s"'<>]*/gi, '[HS]');
+                outChunk = outChunk.replace(/[^\\s"'<>]*%[0-9a-f]{2}[^\\s"'<>]*/gi, (tok) => {
+                    const td = decodeUrlSafeChars(tok);
+                    if (!td.text) return tok;
+                    let tsc = td.text;
+                    for (const grp of nameGroups) {
+                        tsc = replaceTokenGroup(tsc, grp, '[HS]', true);
+                        if (grp.length === 1) tsc = replaceTokenGroup(tsc, grp, '[HS]', false);
+                    }
+                    if (tsc !== td.text) return td.unsafe ? '[HS]' : tsc;
+                    return tok;
+                });
+                const d = decodeUrlSafeChars(outChunk);
+                if (d.text) {
+                    let sc = d.text;
+                    for (const grp of nameGroups) sc = replaceTokenGroup(sc, grp, '[HS]', false);
+                    if (sc !== d.text) {
+                        outChunk = d.unsafe
+                            ? sc.replace(/[^\\s"'<>]*\\[HS\\][^\\s"'<>]*%[89a-f][0-9a-f][^\\s"'<>]*/gi, '[HS]')
+                            : sc;
                     }
                 }
             }
-            return text;
+            for (const grp of nameGroups) {
+                outChunk = replaceTokenGroup(outChunk, grp, '[HS]', false);
+            }
+            return outChunk;
+        };
+        const scrubStudentNames = (rawText, namesList) => {
+            const text = String(rawText || '');
+            if (!text) return '';
+            const nameGroups = buildNameGroups(namesList);
+            let res = '';
+            let lastIdx = 0;
+            URL_IN_TEXT_RE.lastIndex = 0;
+            let mUrl;
+            while ((mUrl = URL_IN_TEXT_RE.exec(text)) !== null) {
+                if (mUrl.index > lastIdx) {
+                    res += scrubFreeTextChunk(text.slice(lastIdx, mUrl.index), nameGroups);
+                }
+                const matchedUrl = mUrl[0];
+                const trailMatch = matchedUrl.match(/[.,;:!?)\\]}]+$/);
+                const coreUrl = trailMatch ? matchedUrl.slice(0, -trailMatch[0].length) : matchedUrl;
+                const trail = trailMatch ? trailMatch[0] : '';
+                const hasSchemeOrPunyPrefix = /^(?:https?:\\/\\/|\\/\\/|xn--)/i.test(coreUrl);
+                const bareCheck = !hasSchemeOrPunyPrefix ? coreUrl.match(/^([^/?#]+)([/?#][\\s\\S]*|$)/) : null;
+                if (!hasSchemeOrPunyPrefix && (!bareCheck || !isPlausibleBareHost(bareCheck[1], Boolean(bareCheck[2])))) {
+                    res += scrubFreeTextChunk(matchedUrl, nameGroups);
+                } else {
+                    res += scrubStudentUrl(coreUrl, namesList) + trail;
+                }
+                lastIdx = mUrl.index + matchedUrl.length;
+                if (matchedUrl.length === 0) URL_IN_TEXT_RE.lastIndex += 1;
+            }
+            if (lastIdx < text.length) {
+                res += scrubFreeTextChunk(text.slice(lastIdx), nameGroups);
+            }
+            return res;
         };
         const checkTitleHasStudentName = (rawTitle, ownerName, namesList) => {
-            const foldedTitle = foldVi(rawTitle);
+            const rawStr = String(rawTitle || '');
+            const decodedTitle = rawStr.includes('%') ? (decodeUrlSafeChars(rawStr).text || rawStr) : rawStr;
+            const foldedTitle = foldVi(decodedTitle.replace(/(?:%(?:25)*(?:20|2b|2d|2e|5f)|[\\-_+./])+/gi, ' '));
             if (!foldedTitle) return false;
             if (foldedTitle.includes('[hs]')) return true;
             const candidates = ownerName ? [ownerName, ...namesList] : namesList;
@@ -2192,7 +2499,27 @@ async def fetch_lms_class_slots_via_page(
             const studentIdToKey = new Map();
             const studentIdToName = new Map();
             const studentNamesSet = new Set();
+            const inactiveStudentIds = new Set();
             let studentCounter = 0;
+            const rawClassStudents = Array.isArray(item.students) ? item.students : [];
+            for (const cs of rawClassStudents.slice(0, maxStudents * 2)) {
+                const stuObj = (cs && cs.student && typeof cs.student === 'object') ? cs.student : null;
+                const stuId = stuObj && stuObj.id != null ? String(stuObj.id).trim() : '';
+                const fullName = stuObj && typeof stuObj.fullName === 'string' ? stuObj.fullName.trim() : '';
+                if (fullName && fullName.length >= 3) {
+                    studentNamesSet.add(fullName);
+                }
+                if (stuId && !studentIdToKey.has(stuId)) {
+                    studentCounter += 1;
+                    studentIdToKey.set(stuId, `stu_${studentCounter}`);
+                }
+                if (stuId && fullName && !studentIdToName.has(stuId)) {
+                    studentIdToName.set(stuId, fullName);
+                }
+                if (stuId && cs && cs.activeInClass === false) {
+                    inactiveStudentIds.add(stuId);
+                }
+            }
             for (const s of item.slots.slice(0, maxSlots)) {
                 const rawAtt = Array.isArray(s && s.studentAttendance) ? s.studentAttendance : [];
                 for (const att of rawAtt.slice(0, maxStudents)) {
@@ -2217,6 +2544,7 @@ async def fetch_lms_class_slots_via_page(
                     classId: classIdStr,
                     studentIdToKey,
                     studentIdToName,
+                    inactiveStudentIds,
                     studentNames: Array.from(studentNamesSet)
                 };
             }
@@ -2479,74 +2807,168 @@ async def fetch_lms_class_slots_via_page(
         }
 
         if (spckClassIds.length > 0 && !authFailed) {
-            const allWorks = [];
-            let worksFetchOk = false;
-            for (let pageIdx = 0; pageIdx < 5; pageIdx++) {
-                const ctrl = new AbortController();
-                const timer = setTimeout(() => ctrl.abort(), Math.max(timeoutMs || 12000, 15000));
-                try {
-                    const resp = await fetch(endpoint, {
-                        method: 'POST',
-                        headers: {
-                            'content-type': 'application/json',
-                            'authorization': bearerHeader,
-                            'token': rawTokenHeader
-                        },
-                        body: JSON.stringify({
-                            operationName: 'findAllStudentWorks',
-                            variables: {
-                                classIds: spckClassIds,
-                                pageIndex: pageIdx,
-                                itemsPerPage: 200
+            const WORK_CLASS_CHUNK_SIZE = 10;
+            const MAX_WORKS_PER_CHUNK = 2000;
+            const MAX_WORKS_RESPONSE_BYTES = 5 * 1024 * 1024;
+            const readBoundedJson = async (resp, maxBytes) => {
+                if (resp && resp.headers && typeof resp.headers.get === 'function') {
+                    const rawCl = resp.headers.get('content-length');
+                    if (rawCl != null && String(rawCl).trim() !== '') {
+                        const parsedCl = Number(rawCl);
+                        if (Number.isFinite(parsedCl) && parsedCl > maxBytes) {
+                            if (resp.body && typeof resp.body.cancel === 'function') {
+                                try { await resp.body.cancel(); } catch (_) {}
+                            }
+                            return { overflow: true, data: null };
+                        }
+                    }
+                }
+                if (resp && resp.body && typeof resp.body.getReader === 'function') {
+                    const reader = resp.body.getReader();
+                    const decoder = new TextDecoder('utf-8');
+                    let totalBytes = 0;
+                    const chunks = [];
+                    while (true) {
+                        const step = await reader.read();
+                        if (!step || step.done) break;
+                        const val = step.value;
+                        const byteLen = (val && typeof val.byteLength === 'number')
+                            ? val.byteLength
+                            : (typeof val === 'string'
+                                ? (typeof TextEncoder !== 'undefined' ? new TextEncoder().encode(val).byteLength : val.length)
+                                : 0);
+                        totalBytes += byteLen;
+                        if (totalBytes > maxBytes) {
+                            try { await reader.cancel(); } catch (_) {}
+                            return { overflow: true, data: null };
+                        }
+                        if (typeof val === 'string') {
+                            chunks.push(val);
+                        } else if (val) {
+                            chunks.push(decoder.decode(val, { stream: true }));
+                        }
+                    }
+                    chunks.push(decoder.decode());
+                    return { overflow: false, data: JSON.parse(chunks.join('')) };
+                }
+                if (resp && typeof resp.text === 'function') {
+                    const txt = await resp.text();
+                    if (txt.length > maxBytes) {
+                        return { overflow: true, data: null };
+                    }
+                    const utf8Bytes = (typeof TextEncoder !== 'undefined')
+                        ? new TextEncoder().encode(txt).byteLength
+                        : txt.length;
+                    if (utf8Bytes > maxBytes) {
+                        return { overflow: true, data: null };
+                    }
+                    return { overflow: false, data: JSON.parse(txt) };
+                }
+                return { overflow: false, data: await resp.json() };
+            };
+            for (let cStart = 0; cStart < spckClassIds.length; cStart += WORK_CLASS_CHUNK_SIZE) {
+                const chunkIds = spckClassIds.slice(cStart, cStart + WORK_CLASS_CHUNK_SIZE);
+                const chunkCodes = [];
+                for (const cid of chunkIds) {
+                    const codesForCid = classIdToCodes.get(cid) || [];
+                    for (const cCode of codesForCid) {
+                        if (!chunkCodes.includes(cCode)) chunkCodes.push(cCode);
+                    }
+                }
+                if (authFailed) {
+                    for (const code of chunkCodes) {
+                        const slotsArr = Array.isArray(out[code]) ? out[code] : [];
+                        for (const s of slotsArr) {
+                            if (s && (s.index === 11 || s.index === 12 || s.index === 13)) {
+                                s.studentWorksFetchError = true;
+                            }
+                        }
+                    }
+                    continue;
+                }
+                let chunkOk = false;
+                let chunkWorks = [];
+                for (let attempt = 0; attempt < 2; attempt++) {
+                    if (authFailed) break;
+                    const ctrl = new AbortController();
+                    const timer = setTimeout(() => ctrl.abort(), Math.max(timeoutMs || 12000, 15000));
+                    try {
+                        const resp = await fetch(endpoint, {
+                            method: 'POST',
+                            headers: {
+                                'content-type': 'application/json',
+                                'authorization': bearerHeader,
+                                'token': rawTokenHeader
                             },
-                            query: studentWorksQuery
-                        }),
-                        signal: ctrl.signal
-                    });
-                    if (!resp.ok) {
-                        if (isAuthErrorPayload(resp.status, null)) {
-                            authFailed = true;
+                            body: JSON.stringify({
+                                operationName: 'findAllStudentWorks',
+                                variables: {
+                                    classIds: chunkIds
+                                },
+                                query: studentWorksQuery
+                            }),
+                            signal: ctrl.signal
+                        });
+                        if (!resp.ok) {
+                            if (isAuthErrorPayload(resp.status, null)) {
+                                authFailed = true;
+                                break;
+                            }
+                            if (attempt === 0) {
+                                await new Promise((r) => setTimeout(r, 300));
+                                continue;
+                            }
+                            break;
                         }
-                        worksFetchOk = false;
-                        break;
-                    }
-                    const payload = await resp.json();
-                    if (payload && Array.isArray(payload.errors) && payload.errors.length > 0) {
-                        if (isAuthErrorPayload(resp.status, payload)) {
-                            authFailed = true;
+                        const bounded = await readBoundedJson(resp, MAX_WORKS_RESPONSE_BYTES);
+                        if (bounded.overflow) {
+                            try { ctrl.abort(); } catch (_) {}
+                            chunkOk = false;
+                            break;
                         }
-                        worksFetchOk = false;
+                        const payload = bounded.data;
+                        if (payload && Array.isArray(payload.errors) && payload.errors.length > 0) {
+                            if (isAuthErrorPayload(resp.status, payload)) {
+                                authFailed = true;
+                                break;
+                            }
+                            if (attempt === 0) {
+                                await new Promise((r) => setTimeout(r, 300));
+                                continue;
+                            }
+                            break;
+                        }
+                        const rawWorks = (((payload || {}).data || {}).findAllStudentWorks || {}).data;
+                        if (!Array.isArray(rawWorks) || rawWorks.length > MAX_WORKS_PER_CHUNK) {
+                            chunkOk = false;
+                            break;
+                        }
+                        chunkWorks = rawWorks;
+                        chunkOk = true;
                         break;
+                    } catch (_) {
+                        if (attempt === 0) {
+                            await new Promise((r) => setTimeout(r, 300));
+                            continue;
+                        }
+                        chunkOk = false;
+                    } finally {
+                        clearTimeout(timer);
                     }
-                    const pageWorks = (((payload || {}).data || {}).findAllStudentWorks || {}).data;
-                    if (!Array.isArray(pageWorks)) {
-                        worksFetchOk = false;
-                        break;
-                    }
-                    allWorks.push(...pageWorks);
-                    if (pageWorks.length < 200) {
-                        worksFetchOk = true;
-                        break;
-                    }
-                } catch (_) {
-                    worksFetchOk = false;
-                    break;
-                } finally {
-                    clearTimeout(timer);
                 }
-            }
-            if (!worksFetchOk) {
-                for (const code of spckCodes) {
-                    const slotsArr = Array.isArray(out[code]) ? out[code] : [];
-                    for (const s of slotsArr) {
-                        if (s && (s.index === 11 || s.index === 12 || s.index === 13)) {
-                            s.studentWorksFetchError = true;
+                if (!chunkOk) {
+                    for (const code of chunkCodes) {
+                        const slotsArr = Array.isArray(out[code]) ? out[code] : [];
+                        for (const s of slotsArr) {
+                            if (s && (s.index === 11 || s.index === 12 || s.index === 13)) {
+                                s.studentWorksFetchError = true;
+                            }
                         }
                     }
+                    continue;
                 }
-            } else {
                 const worksByClassId = new Map();
-                for (const w of allWorks) {
+                for (const w of chunkWorks) {
                     if (!w || typeof w !== 'object') continue;
                     const isDel = String(w.isDeleted || '').trim().toLowerCase();
                     if (w.isDeleted === true || isDel === 'true') continue;
@@ -2557,7 +2979,7 @@ async def fetch_lms_class_slots_via_page(
                     }
                     worksByClassId.get(cid).push(w);
                 }
-                for (const code of spckCodes) {
+                for (const code of chunkCodes) {
                     const meta = matchedClassMeta[code];
                     const slotsArr = Array.isArray(out[code]) ? out[code] : [];
                     const classWorks = (meta && worksByClassId.get(meta.classId)) || [];
@@ -2584,37 +3006,59 @@ async def fetch_lms_class_slots_via_page(
                             if (!rawStuId || !meta || !meta.studentIdToKey.has(rawStuId)) {
                                 return { unknownOwner: true };
                             }
+                            const latestObj = (w.latestData && typeof w.latestData === 'object') ? w.latestData : null;
+                            const pubObj = (w.publishedData && typeof w.publishedData === 'object') ? w.publishedData : null;
+                            const pickStr = (field) => {
+                                if (latestObj && typeof latestObj[field] === 'string' && latestObj[field].trim()) return latestObj[field];
+                                if (pubObj && typeof pubObj[field] === 'string' && pubObj[field].trim()) return pubObj[field];
+                                if (typeof w[field] === 'string' && w[field].trim()) return w[field];
+                                return '';
+                            };
+                            const pickArr = (field) => {
+                                if (latestObj && Array.isArray(latestObj[field]) && latestObj[field].length > 0) return latestObj[field];
+                                if (pubObj && Array.isArray(pubObj[field]) && pubObj[field].length > 0) return pubObj[field];
+                                if (Array.isArray(w[field]) && w[field].length > 0) return w[field];
+                                return [];
+                            };
                             const stuKey = meta.studentIdToKey.get(rawStuId) || '';
                             const ownerName = meta.studentIdToName.get(rawStuId) || '';
                             const namesList = meta.studentNames || [];
-                            const rawTitle = typeof w.title === 'string' ? w.title.trim().slice(0, 500) : '';
+                            const isInactive = Boolean(meta.inactiveStudentIds && meta.inactiveStudentIds.has(rawStuId));
+                            const rawTitle = pickStr('title').trim().slice(0, 500);
                             const hasStudentInfo = checkTitleHasStudentName(rawTitle, ownerName, namesList);
                             const cleanTitle = scrubStudentNames(rawTitle, namesList).slice(0, 500);
-                            const rawWorkComment = typeof w.comment === 'string' ? w.comment.slice(0, 15000) : '';
+                            const rawWorkComment = pickStr('comment').slice(0, 15000);
                             const cleanWorkComment = scrubStudentNames(rawWorkComment, namesList).slice(0, 15000);
+                            const rawThumb = pickStr('thumbnail');
+                            const rawImages = pickArr('imageUrl');
+                            const rawAttachments = pickArr('attachmentUrls');
+                            const rawVideos = pickArr('videoUrls');
+                            const rawRelated = pickArr('relatedUrls');
                             return {
                                 ...(stuKey ? { studentKey: stuKey } : {}),
+                                ...(isInactive ? { inactiveInClass: true } : {}),
                                 title: cleanTitle,
                                 hasStudentInfoInTitle: Boolean(hasStudentInfo),
-                                thumbnail: typeof w.thumbnail === 'string' ? w.thumbnail.trim().slice(0, 1000) : '',
-                                imageUrl: Array.isArray(w.imageUrl)
-                                    ? w.imageUrl.filter((u) => typeof u === 'string' && u.trim()).slice(0, 30).map((u) => u.trim().slice(0, 1000))
-                                    : [],
-                                attachmentUrls: Array.isArray(w.attachmentUrls)
-                                    ? w.attachmentUrls.filter((u) => typeof u === 'string' && u.trim()).slice(0, 30).map((u) => u.trim().slice(0, 1000))
-                                    : [],
-                                videoUrls: Array.isArray(w.videoUrls)
-                                    ? w.videoUrls.filter((u) => typeof u === 'string' && u.trim()).slice(0, 20).map((u) => u.trim().slice(0, 1000))
-                                    : [],
-                                relatedUrls: Array.isArray(w.relatedUrls)
-                                    ? w.relatedUrls
-                                        .filter((r) => r && typeof r === 'object' && (r.url || r.name))
-                                        .slice(0, 20)
-                                        .map((r) => ({
-                                            name: typeof r.name === 'string' ? scrubStudentNames(r.name.trim(), namesList).slice(0, 300) : '',
-                                            url: typeof r.url === 'string' ? r.url.trim().slice(0, 1000) : ''
-                                        }))
-                                    : [],
+                                thumbnail: scrubStudentUrl(rawThumb, namesList),
+                                imageUrl: rawImages
+                                    .filter((u) => typeof u === 'string' && u.trim())
+                                    .slice(0, 30)
+                                    .map((u) => scrubStudentUrl(u, namesList)),
+                                attachmentUrls: rawAttachments
+                                    .filter((u) => typeof u === 'string' && u.trim())
+                                    .slice(0, 30)
+                                    .map((u) => scrubStudentUrl(u, namesList)),
+                                videoUrls: rawVideos
+                                    .filter((u) => typeof u === 'string' && u.trim())
+                                    .slice(0, 20)
+                                    .map((u) => scrubStudentUrl(u, namesList)),
+                                relatedUrls: rawRelated
+                                    .filter((r) => r && typeof r === 'object' && (r.url || r.name))
+                                    .slice(0, 20)
+                                    .map((r) => ({
+                                        name: typeof r.name === 'string' ? scrubStudentNames(r.name.trim(), namesList).slice(0, 300) : '',
+                                        url: typeof r.url === 'string' ? scrubStudentUrl(r.url, namesList) : ''
+                                    })),
                                 comment: cleanWorkComment
                             };
                         });

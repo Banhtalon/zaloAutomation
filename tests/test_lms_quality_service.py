@@ -655,16 +655,11 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
         class NodeEvalPage:
             async def evaluate(self, script: str, args: dict) -> dict:
                 payload_json = json.dumps({"script": script, "args": args})
-                inline_js = (
-                    f"const {{ script, args }} = {payload_json};\n"
-                    + runner_js.replace(
-                        "const fs = require('fs');\n        const { script, args } = JSON.parse(fs.readFileSync(0, 'utf8'));",
-                        "",
-                    )
-                )
                 proc = subprocess.run(
-                    ["node", "-e", inline_js],
+                    ["node", "-e", runner_js],
+                    input=payload_json,
                     text=True,
+                    encoding="utf-8",
                     capture_output=True,
                     check=True,
                 )
@@ -1740,16 +1735,11 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
                         "mode": self.mode,
                     }
                 )
-                inline_js = (
-                    f"const {{ script, args, expiredTok, validTok, mode }} = {payload_json};\n"
-                    + runner_auth_js.replace(
-                        "const fs = require('fs');\n        const { script, args, expiredTok, validTok, mode } = JSON.parse(fs.readFileSync(0, 'utf8'));",
-                        "",
-                    )
-                )
                 proc = subprocess.run(
-                    ["node", "-e", inline_js],
+                    ["node", "-e", runner_auth_js],
+                    input=payload_json,
                     text=True,
+                    encoding="utf-8",
                     capture_output=True,
                     check=True,
                 )
@@ -2362,7 +2352,11 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
 
         runner_spck_js = r"""
         const fs = require('fs');
-        const { script, args, paginateOverflow, unknownOwnerMode } = JSON.parse(fs.readFileSync(0, 'utf8'));
+        const { script, args, paginateOverflow, byteStreamOverflow, unknownOwnerMode, videoUrlMode } = JSON.parse(fs.readFileSync(0, 'utf8'));
+        let worksFetchCount = 0;
+        let streamChunksRead = 0;
+        let streamReaderCancelled = false;
+        let streamJsonCalled = false;
         global.window = { location: { hostname: 'lms.mindx.edu.vn' } };
         global.fetch = async (_url, req) => {
             const body = JSON.parse(req.body);
@@ -2376,6 +2370,16 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
                                 data: [{
                                     id: 'cls_jsb15_synthetic',
                                     name: 'VT-JSB15',
+                                    students: [
+                                        {
+                                            activeInClass: true,
+                                            student: { id: 'stu_raw_id_99', fullName: 'Nguyễn Văn Minh Quân' }
+                                        },
+                                        {
+                                            activeInClass: false,
+                                            student: { id: 'stu_dropped_88', fullName: 'Trần Hoàng Bách' }
+                                        }
+                                    ],
                                     slots: [{
                                         _id: 'slot_14_id',
                                         index: 13,
@@ -2394,6 +2398,58 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
                 };
             }
             if (body.operationName === 'findAllStudentWorks') {
+                worksFetchCount += 1;
+                const qText = String(body.query || '');
+                const varsObj = body.variables || {};
+                // Enforce exact MindX LMS GraphQL schema invariants:
+                // 1) $classIds must be [String] (NOT [ID])
+                // 2) StudentWorkQuery does NOT accept pageIndex or itemsPerPage
+                // 3) StudentWork fields title/thumbnail/comment live inside latestData / publishedData
+                if (
+                    qText.includes('$classIds: [ID]') ||
+                    qText.includes('pageIndex') ||
+                    qText.includes('itemsPerPage') ||
+                    varsObj.pageIndex !== undefined ||
+                    varsObj.itemsPerPage !== undefined ||
+                    !qText.includes('latestData') ||
+                    !qText.includes('publishedData')
+                ) {
+                    return {
+                        ok: false,
+                        status: 400,
+                        json: async () => ({
+                            errors: [{ message: 'GRAPHQL_VALIDATION_FAILED', extensions: { code: 'GRAPHQL_VALIDATION_FAILED' } }]
+                        })
+                    };
+                }
+                if (byteStreamOverflow) {
+                    const oneMbChunk = new Uint8Array(1024 * 1024).fill(65);
+                    let emitted = 0;
+                    return {
+                        ok: true,
+                        status: 200,
+                        headers: { get: () => null },
+                        body: {
+                            getReader: () => ({
+                                read: async () => {
+                                    if (emitted >= 8) {
+                                        return { done: true, value: undefined };
+                                    }
+                                    emitted += 1;
+                                    streamChunksRead += 1;
+                                    return { done: false, value: oneMbChunk };
+                                },
+                                cancel: async () => {
+                                    streamReaderCancelled = true;
+                                }
+                            })
+                        },
+                        json: async () => {
+                            streamJsonCalled = true;
+                            return { data: { findAllStudentWorks: { data: [] } } };
+                        }
+                    };
+                }
                 if (paginateOverflow) {
                     return {
                         ok: true,
@@ -2401,12 +2457,13 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
                         json: async () => ({
                             data: {
                                 findAllStudentWorks: {
-                                    data: Array.from({ length: 200 }, (_, idx) => ({
+                                    data: Array.from({ length: 2001 }, (_, idx) => ({
                                         id: 'work_overflow_' + idx,
-                                        title: 'Other work',
                                         classId: 'other_cls',
                                         classSessionId: 'other_slot',
-                                        isDeleted: 'false'
+                                        isDeleted: 'false',
+                                        latestData: { title: 'Other work', thumbnail: '', comment: '' },
+                                        publishedData: null
                                     }))
                                 }
                             }
@@ -2422,14 +2479,108 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
                                 findAllStudentWorks: {
                                     data: [{
                                         id: 'work_unknown',
-                                        title: 'Le Anh Dung - Secret Project',
                                         classId: 'cls_jsb15_synthetic',
                                         classSessionId: 'slot_14_id',
                                         classSessionNumber: 14,
                                         studentId: 'unknown_stu_777',
-                                        relatedUrls: [{ name: 'Le Anh Dung Deck', url: 'https://example.org/deck' }],
-                                        comment: 'Le Anh Dung lam bai',
-                                        isDeleted: 'false'
+                                        isDeleted: 'false',
+                                        latestData: {
+                                            title: 'Le Anh Dung - Secret Project',
+                                            thumbnail: '',
+                                            relatedUrls: [{ name: 'Le Anh Dung Deck', url: 'https://example.org/deck' }],
+                                            comment: 'Le Anh Dung lam bai'
+                                        },
+                                        publishedData: null
+                                    }]
+                                }
+                            }
+                        })
+                    };
+                }
+                if (videoUrlMode) {
+                    const ten25 = '25'.repeat(10);
+                    return {
+                        ok: true,
+                        status: 200,
+                        json: async () => ({
+                            data: {
+                                findAllStudentWorks: {
+                                    data: [{
+                                        id: 'work_video_url',
+                                        classId: 'cls_jsb15_synthetic',
+                                        classSessionId: 'slot_14_id',
+                                        classSessionNumber: 14,
+                                        studentId: 'stu_raw_id_99',
+                                        isDeleted: 'false',
+                                        latestData: {
+                                            title: 'SPCK %4Dinh%20Qu%C3%A2n / %254Dinh%2520Qu%25C3%25A2n (//minh-quân.github.io/app & minh-quân.github.io/app)',
+                                            thumbnail: 'https://cdn.example/spck%2F%25254Dinh-Qu%2525C3%2525A2n.png',
+                                            imageUrl: [
+                                                'https://static.mindx.edu.vn/clean-up.png',
+                                                'https://cdn.example/%254Dinh-Qu%25C3%25A2n.png',
+                                                'https://cdn.example/%2525254Dinh-Qu%252525C3%252525A2n.png',
+                                                'https://cdn.example/%' + ten25 + '4Dinh-Qu%' + ten25 + 'C3%' + ten25 + 'A2n.png',
+                                                'https://xn--minh-qun-oza.github.io/screen.png',
+                                                'https://xn--.example.com/bad-host.png'
+                                            ],
+                                            attachmentUrls: [
+                                                'https://static.mindx.edu.vn/Slide_%254Eguy%25E1%25BB%2585n%2520V%25C4%2583n%2520%254Dinh%2520Qu%25C3%25A2n.pptx',
+                                                'https://xn--bcher-kva.example.com/archive.zip'
+                                            ],
+                                            videoUrls: [
+                                                'https://www.youtube.com/watch?v=dQw4w9WgXcQ&author=%4Dinh-Qu%C3%A2n&ref=https%3A%2F%2Fxn--minh-qun-oza.github.io'
+                                            ],
+                                            relatedUrls: [
+                                                {
+                                                    name: 'Demo IDNA Punycode',
+                                                    url: 'https://xn--minh-qun-oza.github.io/demo'
+                                                },
+                                                {
+                                                    name: 'Bare Punycode Host',
+                                                    url: 'xn--minh-qun-oza.github.io/app'
+                                                },
+                                                {
+                                                    name: 'Malformed bare xn--.example.com/demo link',
+                                                    url: 'xn--.example.com/demo'
+                                                },
+                                                {
+                                                    name: 'Malformed query xn--',
+                                                    url: 'https://example.com/?ref=xn--.example.com&tok=xn--'
+                                                },
+                                                {
+                                                    name: 'Demo //minh-quan.github.io/app & //cdn.example/%4Dinh-Qu%C3%A2n.png',
+                                                    url: '//minh-quan.github.io/app'
+                                                },
+                                                {
+                                                    name: 'Unicode & Pct %4Dinh%20Qu%C3%A2n | %254Dinh%2520Qu%25C3%25A2n | %4Dinh%2BQu%C3%A2n | spck%2F%4Dinh%20Qu%C3%A2n.png | //minh-quân.github.io/app | minh-quân.github.io/app',
+                                                    url: '//minh-quân.github.io/app'
+                                                },
+                                                {
+                                                    name: 'Bare Unicode Host URL',
+                                                    url: 'minh-quân.github.io/app'
+                                                }
+                                            ],
+                                            comment: '1. Ý tưởng: Bố cục tốt của %4Dinh%20Qu%C3%A2n (%254Dinh%2520Qu%25C3%25A2n, file spck%2F%4Dinh%20Qu%C3%A2n.png) tại https://xn--minh-qun-oza.github.io/demo, //cdn.example/%4Dinh-Qu%C3%A2n.png và xn--.example.com/demo.\n2. Chức năng: Chạy mượt mà tại //minh-quan.github.io/app, //minh-quân.github.io/app, minh-quân.github.io/app và https://example.com/?ref=xn--.example.com (//nhận xét rõ ràng), hoàn thiện đầy đủ tính năng.'
+                                        },
+                                        publishedData: null
+                                    }, {
+                                        id: 'work_v2_rel_pct_slash',
+                                        status: 'pending',
+                                        classId: 'cls_jsb15_synthetic',
+                                        classSessionId: 'slot_14_id',
+                                        classSessionNumber: 14,
+                                        studentId: 'stu_raw_id_99',
+                                        isDeleted: 'false',
+                                        latestData: {
+                                            title: 'spck%2F%4Dinh%20Qu%C3%A2n.png',
+                                            thumbnail: 'spck%2F%4Dinh%20Qu%C3%A2n.png',
+                                            imageUrl: ['spck%2F%4Dinh%20Qu%C3%A2n.png'],
+                                            attachmentUrls: ['spck%2F%4Dinh%20Qu%C3%A2n.pptx'],
+                                            videoUrls: ['spck%2F%4Dinh%20Qu%C3%A2n.mp4'],
+                                            relatedUrls: [{ name: 'spck%2F%4Dinh%20Qu%C3%A2n.png', url: 'spck%2F%4Dinh%20Qu%C3%A2n.png' }],
+                                            comment: ''
+                                        },
+                                        publishedData: null
                                     }]
                                 }
                             }
@@ -2442,24 +2593,70 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
                     json: async () => ({
                         data: {
                             findAllStudentWorks: {
-                                data: [{
-                                    id: 'work_1',
-                                    title: 'Minh  Quan - Giới thiệu Tết cổ truyền',
-                                    classId: 'cls_jsb15_synthetic',
-                                    classSessionId: 'slot_14_id',
-                                    classSessionNumber: 14,
-                                    studentId: 'stu_raw_id_99',
-                                    thumbnail: 'https://static.mindx.edu.vn/thumb.png',
-                                    imageUrl: ['https://static.mindx.edu.vn/img1.png'],
-                                    attachmentUrls: ['https://static.mindx.edu.vn/project.zip'],
-                                    videoUrls: [],
-                                    relatedUrls: [{
-                                        name: 'GitHub của Nguyễn  Văn   Minh  Quân - Minh  Quan',
-                                        url: 'https://github.com/example/spck'
-                                    }],
-                                    comment: '1. Ý tưởng: Sản phẩm của Nguyễn  Văn  Minh  Quân có bố cục trang web rõ ràng.\n2. Chức năng: Minh  Quan đã hoàn thiện tốt hiệu ứng hình ảnh và tương tác.',
-                                    isDeleted: 'false'
-                                }]
+                                data: [
+                                    {
+                                        id: 'work_1',
+                                        status: 'pending',
+                                        classId: 'cls_jsb15_synthetic',
+                                        classSessionId: 'slot_14_id',
+                                        classSessionNumber: 14,
+                                        studentId: 'stu_raw_id_99',
+                                        isDeleted: 'false',
+                                        latestData: {
+                                            title: 'Minh  Quan - Giới thiệu Tết cổ truyền',
+                                            thumbnail: 'https://static.mindx.edu.vn/thumb_Nguyễn-Văn-Minh-Quân.png',
+                                            imageUrl: [
+                                                'https://static.mindx.edu.vn/img_minh-quan_1.png',
+                                                'https://static.mindx.edu.vn/img_Nguy%E1%BB%85n-V%C4%83n-Minh-Qu%C3%A2n_2.png',
+                                                'https://static.mindx.edu.vn/img_Nguye%CC%82%CC%83n_Va%CC%86n_Minh_Qua%CC%82n_nfd.png'
+                                            ],
+                                            attachmentUrls: [
+                                                'https://resources.mindx.edu.vn/uploads/documents/spck_STU_VT-JSB15_NGUYEN_VAN_MINH_QUAN_123.zip',
+                                                'https://firebasestorage.googleapis.com/v0/b/app/o/spck%2FB%C3%A0i_t%E1%BA%ADp%2FMinh_Qu%C3%A2n.zip?alt=media'
+                                            ],
+                                            videoUrls: [],
+                                            relatedUrls: [
+                                                {
+                                                    name: 'GitHub của Nguyễn  Văn   Minh  Quân - Minh  Quan',
+                                                    url: 'https://github.com/example/VT-JSB15/nguyen-van-minh-quan/?author=Nguy%E1%BB%85n+V%C4%83n+Minh+Qu%C3%A2n'
+                                                },
+                                                {
+                                                    name: 'Web chạy thử 🚀',
+                                                    url: 'https://minh-quan.github.io/🚀-tet-project'
+                                                }
+                                            ],
+                                            comment: ''
+                                        },
+                                        publishedData: {
+                                            title: '',
+                                            thumbnail: '',
+                                            imageUrl: [],
+                                            attachmentUrls: [],
+                                            videoUrls: [],
+                                            relatedUrls: [],
+                                            comment: '1. Ý tưởng: Sản phẩm của Nguyễn  Văn  Minh  Quân có bố cục trang web rõ ràng.\n2. Chức năng: Minh  Quan đã hoàn thiện tốt hiệu ứng hình ảnh và tương tác.'
+                                        }
+                                    },
+                                    {
+                                        id: 'work_dropped_inactive',
+                                        status: 'pending',
+                                        classId: 'cls_jsb15_synthetic',
+                                        classSessionId: 'slot_14_id',
+                                        classSessionNumber: 14,
+                                        studentId: 'stu_dropped_88',
+                                        isDeleted: 'false',
+                                        latestData: {
+                                            title: 'Trần Hoàng Bách - Old Draft',
+                                            thumbnail: '',
+                                            imageUrl: [],
+                                            attachmentUrls: [],
+                                            videoUrls: [],
+                                            relatedUrls: [],
+                                            comment: ''
+                                        },
+                                        publishedData: null
+                                    }
+                                ]
                             }
                         }
                     })
@@ -2469,6 +2666,14 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
         };
         (async () => {
             const res = await eval('(' + script + ')')(args);
+            if (byteStreamOverflow) {
+                res.__stream_stats__ = {
+                    worksFetchCount,
+                    streamChunksRead,
+                    streamReaderCancelled,
+                    streamJsonCalled
+                };
+            }
             process.stdout.write(JSON.stringify(res));
         })();
         """
@@ -2480,10 +2685,15 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
                 self,
                 *,
                 paginate_overflow: bool = False,
+                byte_stream_overflow: bool = False,
                 unknown_owner_mode: bool = False,
+                video_url_mode: bool = False,
             ) -> None:
                 self.paginate_overflow = paginate_overflow
+                self.byte_stream_overflow = byte_stream_overflow
                 self.unknown_owner_mode = unknown_owner_mode
+                self.video_url_mode = video_url_mode
+                self.last_raw_eval: dict = {}
 
             async def evaluate(self, script: str, args: dict) -> dict:
                 args_with_tok = {**args, "preResolvedToken": valid_jwt}
@@ -2494,7 +2704,9 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
                             "script": script,
                             "args": args_with_tok,
                             "paginateOverflow": self.paginate_overflow,
+                            "byteStreamOverflow": self.byte_stream_overflow,
                             "unknownOwnerMode": self.unknown_owner_mode,
+                            "videoUrlMode": self.video_url_mode,
                         }
                     ),
                     text=True,
@@ -2502,8 +2714,12 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
                     capture_output=True,
                     check=True,
                 )
-                return json.loads(proc.stdout)
+                parsed = json.loads(proc.stdout)
+                self.last_raw_eval = dict(parsed)
+                parsed.pop("__stream_stats__", None)
+                return parsed
 
+        byte_overflow_page = _SpckNodePage(byte_stream_overflow=True)
         with patch.dict(os.environ, {"ZALO_QUALITY_ISOLATED": "0"}):
             fetched_jsb15 = await fetch_lms_class_slots_via_page(
                 _SpckNodePage(), class_names=["VT-JSB15"]
@@ -2511,21 +2727,191 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
             fetched_overflow = await fetch_lms_class_slots_via_page(
                 _SpckNodePage(paginate_overflow=True), class_names=["VT-JSB15"]
             )
+            fetched_byte_overflow = await fetch_lms_class_slots_via_page(
+                byte_overflow_page, class_names=["VT-JSB15"]
+            )
             fetched_unknown_owner = await fetch_lms_class_slots_via_page(
                 _SpckNodePage(unknown_owner_mode=True), class_names=["VT-JSB15"]
             )
+            fetched_video_url = await fetch_lms_class_slots_via_page(
+                _SpckNodePage(video_url_mode=True), class_names=["VT-JSB15"]
+            )
         serialized_fetched = json.dumps(fetched_jsb15, ensure_ascii=False)
-        self.assertNotIn("Nguyễn Văn Minh Quân", serialized_fetched)
-        self.assertNotIn("Nguyen Van Minh Quan", serialized_fetched)
-        self.assertNotIn("Minh Quân", serialized_fetched)
-        self.assertNotIn("Minh Quan", serialized_fetched)
-        self.assertNotIn("Minh  Quan", serialized_fetched)
-        self.assertNotIn("stu_raw_id_99", serialized_fetched)
+        for forbidden_token in (
+            "Nguyễn",
+            "Nguyen",
+            "nguyen",
+            "Nguy%E1%BB%85n",
+            "nguy%e1%bb%85n",
+            "Nguye%CC%82%CC%83n",
+            "Minh Quân",
+            "Minh Quan",
+            "Minh  Quan",
+            "Minh-Quân",
+            "Minh_Qu%C3%A2n",
+            "Minh+Qu%C3%A2n",
+            "NGUYEN_VAN_MINH_QUAN",
+            "nguyen-van-minh-quan",
+            "minh-quan",
+            "Trần Hoàng Bách",
+            "Tran Hoang Bach",
+            "stu_raw_id_99",
+            "stu_dropped_88",
+        ):
+            self.assertNotIn(forbidden_token, serialized_fetched)
         slot_14 = fetched_jsb15["VT-JSB15"][0]
-        self.assertEqual(len(slot_14["studentWorks"]), 1)
+        self.assertEqual(len(slot_14["studentWorks"]), 2)
         self.assertTrue(slot_14["studentWorks"][0]["hasStudentInfoInTitle"])
         self.assertIn("[HS]", slot_14["studentWorks"][0]["title"])
         self.assertIn("[HS]", slot_14["studentWorks"][0]["relatedUrls"][0]["name"])
+        self.assertEqual(
+            slot_14["studentWorks"][0]["thumbnail"],
+            "https://static.mindx.edu.vn/thumb_HS.png",
+        )
+        self.assertEqual(
+            slot_14["studentWorks"][0]["attachmentUrls"][1],
+            "https://firebasestorage.googleapis.com/v0/b/app/o/spck%2FB%C3%A0i_t%E1%BA%ADp%2FHS.zip?alt=media",
+        )
+        self.assertEqual(
+            slot_14["studentWorks"][0]["relatedUrls"][0]["url"],
+            "https://github.com/example/VT-JSB15/HS/?author=HS",
+        )
+        self.assertEqual(
+            slot_14["studentWorks"][0]["relatedUrls"][1]["url"],
+            "https://hs.github.io/%F0%9F%9A%80-tet-project",
+        )
+        self.assertTrue(slot_14["studentWorks"][1].get("inactiveInClass", False))
+
+        # Verify videoUrls, multi-layer ASCII percent-encoding (%4D/%254D/%25254D/11-layer) & Punycode (xn--) scrubbing
+        serialized_video_url = json.dumps(fetched_video_url, ensure_ascii=False)
+        for forbidden_video_tok in (
+            "Nguy",
+            "%4Eguy",
+            "%254Eguy",
+            "Minh",
+            "minh",
+            "%4Dinh",
+            "%254Dinh",
+            "%25254Dinh",
+            "4Dinh",
+            "Qu%C3%A2n",
+            "Qu%25C3%25A2n",
+            "Qu%2525C3%2525A2n",
+            "xn--minh-qun-oza",
+            "xn--.example.com",
+            "tok=xn--",
+        ):
+            self.assertNotIn(forbidden_video_tok, serialized_video_url)
+        video_work = fetched_video_url["VT-JSB15"][0]["studentWorks"][0]
+        self.assertTrue(video_work["hasStudentInfoInTitle"])
+        self.assertEqual(
+            video_work["title"],
+            "SPCK [HS] / [HS] (//hs.github.io/app & hs.github.io/app)",
+        )
+        self.assertEqual(
+            video_work["thumbnail"],
+            "https://cdn.example/spck%2FHS.png",
+        )
+        self.assertEqual(
+            video_work["imageUrl"],
+            [
+                "https://static.mindx.edu.vn/clean-up.png",
+                "https://cdn.example/HS.png",
+                "https://cdn.example/HS.png",
+                "https://cdn.example/HS",
+                "https://hs.github.io/screen.png",
+                "https://hs.example.com/bad-host.png",
+            ],
+        )
+        self.assertEqual(
+            video_work["attachmentUrls"][1],
+            "https://xn--bcher-kva.example.com/archive.zip",
+        )
+        self.assertEqual(
+            video_work["relatedUrls"][0]["url"],
+            "https://hs.github.io/demo",
+        )
+        self.assertEqual(
+            video_work["relatedUrls"][1]["url"],
+            "hs.github.io/app",
+        )
+        self.assertEqual(
+            video_work["relatedUrls"][2]["name"],
+            "Malformed bare hs.example.com/demo link",
+        )
+        self.assertEqual(
+            video_work["relatedUrls"][2]["url"],
+            "hs.example.com/demo",
+        )
+        self.assertEqual(
+            video_work["relatedUrls"][3]["url"],
+            "https://example.com/?ref=hs.example.com&tok=hs",
+        )
+        self.assertEqual(
+            video_work["relatedUrls"][4]["name"],
+            "Demo //hs.github.io/app & //cdn.example/HS.png",
+        )
+        self.assertEqual(
+            video_work["relatedUrls"][4]["url"],
+            "//hs.github.io/app",
+        )
+        self.assertEqual(
+            video_work["relatedUrls"][5]["name"],
+            "Unicode & Pct [HS] | [HS] | [HS] | spck%2F[HS].png | //hs.github.io/app | hs.github.io/app",
+        )
+        self.assertEqual(
+            video_work["relatedUrls"][5]["url"],
+            "//hs.github.io/app",
+        )
+        self.assertEqual(
+            video_work["relatedUrls"][6]["url"],
+            "hs.github.io/app",
+        )
+        self.assertIn(
+            "Bố cục tốt của [HS] ([HS], file spck%2F[HS].png) tại https://hs.github.io/demo, //cdn.example/HS.png và hs.example.com/demo.",
+            video_work["comment"],
+        )
+        self.assertIn(
+            "//hs.github.io/app, //hs.github.io/app, hs.github.io/app và https://example.com/?ref=hs.example.com (//nhận xét rõ ràng),",
+            video_work["comment"],
+        )
+        rel_work = fetched_video_url["VT-JSB15"][0]["studentWorks"][1]
+        self.assertEqual(rel_work["title"], "spck%2F[HS].png")
+        self.assertEqual(rel_work["thumbnail"], "spck%2FHS.png")
+        self.assertEqual(rel_work["imageUrl"], ["spck%2FHS.png"])
+        self.assertEqual(rel_work["attachmentUrls"], ["spck%2FHS.pptx"])
+        self.assertEqual(rel_work["videoUrls"], ["spck%2FHS.mp4"])
+        self.assertEqual(
+            rel_work["relatedUrls"],
+            [{"name": "spck%2F[HS].png", "url": "spck%2FHS.png"}],
+        )
+        eval_video_slide_ok = evaluate_lms_spck_quality(
+            fetched_video_url["VT-JSB15"][0],
+            class_code="VT-JSB15",
+            khoi="Coding",
+            lesson=14,
+        )
+        self.assertEqual(eval_video_slide_ok["issues"], [])
+
+        # Verify streaming byte limit cancels reader mid-stream before JSON.parse without retrying
+        stream_stats = byte_overflow_page.last_raw_eval.get("__stream_stats__", {})
+        self.assertEqual(stream_stats.get("worksFetchCount"), 1)
+        self.assertEqual(stream_stats.get("streamChunksRead"), 6)
+        self.assertTrue(stream_stats.get("streamReaderCancelled"))
+        self.assertFalse(stream_stats.get("streamJsonCalled"))
+        self.assertTrue(
+            fetched_byte_overflow["VT-JSB15"][0].get("studentWorksFetchError", False)
+        )
+        eval_byte_overflow = evaluate_lms_slot_quality(
+            fetched_byte_overflow["VT-JSB15"][0],
+            class_code="VT-JSB15",
+            khoi="Coding",
+            lesson=14,
+        )
+        self.assertEqual(
+            [issue_code(x) for x in eval_byte_overflow["issues"]],
+            [ISSUE_CODE_LMS_MANUAL_CHECK],
+        )
         serialized_unknown_owner = json.dumps(
             fetched_unknown_owner, ensure_ascii=False
         )

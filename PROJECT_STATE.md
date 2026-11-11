@@ -1,9 +1,17 @@
 # PROJECT STATE — Zalo Automation
 
-> Snapshot hiện tại, cập nhật 2026-11-10. Source và kiểm tra runtime mới có độ
+> Snapshot hiện tại, cập nhật 2026-11-11. Source và kiểm tra runtime mới có độ
 > tin cậy cao hơn tài liệu. Không dùng file này làm quyền chạy thao tác thật.
 
 ## Trạng thái ngắn
+
+- 2026-11-11 (Hotfix truy vấn GraphQL `findAllStudentWorks` cho SPCK Buổi 12, 13, 14 trên `Job #465, #469` — source/local + xác minh chỉ đọc LMS, `DEC-036`, `DEC-040`, `DEC-042`):
+  - **Nguyên nhân gốc (`Job #465, #469`)**: `studentWorksQuery` trong `services/lms_quality_service.py` truyền `$classIds: [ID]` kèm `pageIndex`/`itemsPerPage` vào `StudentWorkQuery` (schema thật chỉ nhận `classId_in: [String]`, không có phân trang) và truy vấn trực tiếp `title`/`thumbnail`/`comment` trên `StudentWork` thay vì bên trong `latestData`/`publishedData` (`StudentWorkData`), làm GraphQL trả `GRAPHQL_VALIDATION_FAILED` $\rightarrow$ bật cờ `studentWorksFetchError = true` (`[LMS] Chưa kiểm tra được dữ liệu SPCK trên LMS, cần kiểm tra thủ công`).
+  - **Khắc phục (`services/lms_quality_service.py`, `tests/test_lms_quality_service.py`)**:
+    - Sửa `studentWorksQuery` sang `query findAllStudentWorks($classIds: [String]) { findAllStudentWorks(payload: { classId_in: $classIds }) { data { ... latestData { ... } publishedData { ... } } } }`, chia chunk `10` `classId`/request (kèm retry 1 lần, trần stream `5 MB` qua `readBoundedJson` hủy `resp.body.getReader()` trước `JSON.parse`, và trần `2000` bản ghi/chunk), trích xuất dữ liệu ưu tiên `latestData` rồi fallback `publishedData`.
+    - Bổ sung `students { activeInClass student { id fullName } }` trong `classesMissAttendOrComment`, bỏ qua bài nộp cũ của học viên đã nghỉ (`activeInClass = false`) không tham gia buổi học, và nâng cấp `buildFoldedWithMap` + `decodeUrlSafeChars` + `decodePunycode` + `isPlausibleBareHost` + `scrubStudentUrl` + `scrubStudentNames` khử triệt để tên học viên (có dấu/không dấu, NFC/NFD, ASCII & UTF-8 percent-encoded đơn/đa tầng, nối bằng khoảng trắng/`%20`/`%2B`/`-`/`_`/`+`/`.` hoặc viết liền, trên cả văn bản tự do, path/query, đường dẫn tương đối `%2F`, tên miền Unicode có dấu và IDNA Punycode `xn--`) ngay trong trình duyệt.
+    - Xác minh chỉ đọc trên LMS với `VT-JSB15`, `VT-JSA13-HB` và `VT-ROB-ARMI12`: chấm SPCK thành công (`fetchErr = None`, 0 rò rỉ PII). Bước an toàn tiếp theo: bấm `Quét lại` trên Dashboard cho các lớp Buổi 12, 13, 14 cần cập nhật.
+  - **Bằng chứng**: Unit test mục tiêu (`44/44 OK` trên `tests/test_lms_quality_service.py`, `tests/test_report_status.py`, `tests/test_bcnb_actions.py`), `node tests/check_template_js.js` pass (`scripts=7 handlers=37 behavior=13`), `.\CHECK_QUALITY.ps1 -Isolated` exit `0` (`QUALITY GATE PASSED`, `669/669` tests OK, Ruff 0, Mypy 0 trên 78 source files, coverage `78.3%`), `git diff --check` exit `0`; Independent Review `gpt-6.1-sol (high)` Round 7 `VERDICT: PASS` (session `01a1c85a-7d58-7b32-b183-825d52dd24cf`).
 
 - 2026-11-10 (Kiểm định nộp Sản Phẩm Cuối Khóa SPCK ở Buổi 12, 13, 14 trên MindX LMS theo Phương án A & Quy tắc Robotics `ROB` — source/local, `DEC-036`, `DEC-040`, `DEC-042`):
   - **Truy vấn `findAllStudentWorks` & khử PII học viên ngay trong trình duyệt (`services/lms_quality_service.py`)**:

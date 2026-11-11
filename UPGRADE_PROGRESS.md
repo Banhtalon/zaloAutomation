@@ -1,7 +1,7 @@
 # KẾ HOẠCH CHI TIẾT & TIẾN ĐỘ NÂNG CẤP DỰ ÁN (UPGRADE PLAN & PROGRESS)
 
-**Cập nhật lần cuối:** `2026-11-10 12:48 +07:00`
-**Trạng thái hiện tại:** Đã hoàn tất **Phase 0 → Phase 3.2 (`45/45` ✅)**, hoàn tất **Wave 4 (Phase 4.0 → Phase 4.4: `25/25` ✅ — Kiểm định chất lượng nội dung LMS/Zalo, Tự động ghi `Mô tả vấn đề` lên Teaching & Bảng Email Quản lý 9 cột)**, hoàn tất **Wave 5 (Phase 5.0 → 5.8: `59/59` ✅ — Hardening toàn diện luồng kiểm tra báo cáo)**, và hoàn tất **Phase 6.1 (`6/6` ✅ — Kiểm định Nộp Sản Phẩm Cuối Khóa SPCK Buổi 12, 13, 14 theo `DEC-042`)**.
+**Cập nhật lần cuối:** `2026-11-11 09:10 +07:00`
+**Trạng thái hiện tại:** Đã hoàn tất **Phase 0 → Phase 3.2 (`45/45` ✅)**, hoàn tất **Wave 4 (Phase 4.0 → Phase 4.4: `25/25` ✅ — Kiểm định chất lượng nội dung LMS/Zalo, Tự động ghi `Mô tả vấn đề` lên Teaching & Bảng Email Quản lý 9 cột)**, hoàn tất **Wave 5 (Phase 5.0 → 5.8: `59/59` ✅ — Hardening toàn diện luồng kiểm tra báo cáo)**, và hoàn tất **Phase 6.1 (`7/7` ✅ — Kiểm định Nộp Sản Phẩm Cuối Khóa SPCK Buổi 12, 13, 14 & Hotfix GraphQL/PII `DEC-042`)**.
 
 ---
 
@@ -31,7 +31,7 @@
 | **Phase 5.6** | **Không rơi dòng im lặng (Discovery/Plan/Preflight)** | P1 | ✅ Hoàn thành | `8/8` |
 | **Phase 5.7** | **Giao diện vận hành bám dữ liệu server** | P1 | ✅ Hoàn thành | `8/8` |
 | **Phase 5.8** | **Dọn dẹp, tài liệu & nghiệm thu Wave 5** | P2 | ✅ Hoàn thành | `7/7` |
-| **Phase 6.1** | **Kiểm định Nộp Sản Phẩm Cuối Khóa (SPCK) ở Buổi 12, 13, 14 (`DEC-042`)** | P1 (Cao) | ✅ Hoàn thành | `6/6` |
+| **Phase 6.1** | **Kiểm định Nộp Sản Phẩm Cuối Khóa (SPCK) ở Buổi 12, 13, 14 (`DEC-042`)** | P1 (Cao) | ✅ Hoàn thành | `7/7` |
 
 ---
 
@@ -544,7 +544,7 @@
 
 ## 🎯 WAVE 6: KIỂM ĐỊNH CHUYÊN SÂU HỌC VỤ LMS (`DEC-042`)
 
-### Hạng mục 6.1 — Kiểm Định Nộp Sản Phẩm Cuối Khóa (SPCK) ở Buổi 12, 13, 14 ✅ (`6/6`)
+### Hạng mục 6.1 — Kiểm Định Nộp Sản Phẩm Cuối Khóa (SPCK) ở Buổi 12, 13, 14 ✅ (`7/7`)
 - **Mục tiêu**: Kiểm soát tự động việc nộp Sản Phẩm Cuối Khóa (SPCK) của học viên đi học (`ATTENDED` / `LATE_ARRIVED`) ở **Buổi 12, 13 và 14** trên MindX LMS theo đúng 2 quyết định của Owner (`DEC-042`):
   1. **Phương án A (`DEC-041` & `DEC-042`)**: Nếu chưa nộp SPCK (`0/N` học viên) $\rightarrow$ **Lỗi (`LMS_SPCK_MISSING`, `SEVERITY_FAIL`, `is_failed = True`)**, báo đỏ trên Dashboard (`❌ Chưa nộp SPCK trên LMS`), đưa vào Email Quản lý / CSV và ghi lên cột `Mô tả vấn đề (TE/TF/QC)` của Teaching. Nếu đã nộp SPCK (`>0/N` học viên) nhưng thiếu số lượng học viên hoặc thiếu thành phần phụ (thông tin học viên trong tiêu đề, ảnh thumbnail + ảnh chụp, file đính kèm, nhận xét sản phẩm đủ ý, link YouTube/Slide ở Buổi 14) $\rightarrow$ **Nhắc nhở QC (`LMS_SPCK_NOTE`, `SEVERITY_NOTE`, `is_failed = False`)** và ghi tự động đầy đủ lên cột `Mô tả vấn đề (TE/TF/QC)` trên Teaching.
   2. **Quy tắc khối Robotics (`ROB`)**: Các lớp Robot không bắt lỗi thiếu file đính kèm (`attachmentUrls`), chỉ tạo nhắc nhở QC (`NOTE`: `[LMS] SPCK thiếu file đính kèm (x/y HS)`) ghi lên cột `Mô tả vấn đề (TE/TF/QC)`.
@@ -559,6 +559,7 @@
   - [x] **6.1.4.** Mở khóa kiểm định LMS SPCK và đồng bộ cột `Mô tả vấn đề (TE/TF/QC)` trên Teaching cho cả **Buổi 14** (`inspect_and_attach_quality_issues`, `_attach_bcnb_row_metadata`, `_maybe_update_row_checker_note`, `update_bcnb_reports`) trong khi vẫn giữ nguyên miễn trừ báo cáo Zalo (`CATEGORY_EXEMPT`) cho Buổi 14.
   - [x] **6.1.5.** Bổ sung unit test toàn diện (`tests/test_lms_quality_service.py`, `tests/test_report_status.py`, `tests/check_template_js.js`) kiểm tra `0/N` (`FAIL`), nộp thiếu học viên (`NOTE`), thiếu từng thành phần phụ Buổi 12/13/14, nhận xét 1–2 từ/chỉ chấm dấu, lớp Robotics (`ROB`), ghi chú QC trên Buổi 14 và khử PII trong `js_script`.
   - [x] **6.1.6.** Vượt qua đầy đủ cổng chất lượng (`unittest`: `44/44 OK`, `node tests/check_template_js.js` pass, `.\CHECK_QUALITY.ps1 -Isolated` exit `0` `QUALITY GATE PASSED`, coverage `78.0%`), đạt `VERDICT: PASS` từ Reviewer độc lập `gpt-6.1-sol (high)` (Round 3, session `01a1c424-8254-74a2-94a3-28b2ecaefafb`) và đồng bộ GitHub (`DEC-040`).
+  - [x] **6.1.7. (Hotfix 2026-11-11)** Chuẩn hóa `studentWorksQuery` theo đúng schema `StudentWorkQuery` (`classId_in: [String]`, chunk `10` lớp, trần stream `5 MB` qua `readBoundedJson` trước `JSON.parse` & trần `2000` works/chunk) và `StudentWorkData` (`latestData` / `publishedData`), bổ sung `students { activeInClass student { id fullName } }` + khử PII toàn diện (`buildFoldedWithMap`, `decodeUrlSafeChars`, `decodePunycode`, `isPlausibleBareHost`, `scrubStudentUrl`, `scrubStudentNames`) trên mọi trường URL và văn bản; vượt qua `.\CHECK_QUALITY.ps1 -Isolated` (`669/669` tests OK, coverage `78.3%`), đạt `VERDICT: PASS` từ Reviewer độc lập `gpt-6.1-sol (high)` (session `01a1c85a-7d58-7b32-b183-825d52dd24cf`) và kiểm chứng chỉ đọc thành công trên `VT-JSB15`, `VT-JSA13-HB`, `VT-ROB-ARMI12`.
 
 ---
 

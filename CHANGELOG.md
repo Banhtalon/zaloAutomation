@@ -4,6 +4,22 @@ Tài liệu này ghi lại toàn bộ quá trình hình thành, phát triển ki
 
 ---
 
+## [2026-11-11] — Hotfix Truy Vấn GraphQL `findAllStudentWorks` (`StudentWorkQuery` & `latestData`/`publishedData`), Khử PII URL & Giới Hạn Stream Byte Khi Kiểm Tra SPCK Trên MindX LMS (`DEC-036`, `DEC-040`, `DEC-042`)
+
+### 🛠️ Sửa lỗi & Củng cố khử PII URL + giới hạn bộ nhớ trên LMS
+- **Chuẩn hóa schema GraphQL `findAllStudentWorks` khớp 100% với MindX LMS (`services/lms_quality_service.py`)**:
+  - Khắc phục lỗi `GRAPHQL_VALIDATION_FAILED` khiến các lớp Buổi 12, 13, 14 trên `Job #465, #469` (`VT-JSA13-HB`, `VT-ROB-ARMI12`, ...) rơi vào `[LMS] Chưa kiểm tra được dữ liệu SPCK trên LMS, cần kiểm tra thủ công`: đổi biến `$classIds` sang `[String]`, bỏ `pageIndex`/`itemsPerPage` không tồn tại trong `StudentWorkQuery`, chia batch tối đa `10` `classId`/request (kèm retry 1 lần, trần stream `MAX_WORKS_RESPONSE_BYTES = 5 MB` qua `readBoundedJson` hủy `resp.body.getReader()` trước `JSON.parse`, và trần `2000` bản ghi/chunk), đọc chi tiết bài nộp từ đối tượng con `latestData` / `publishedData` (`StudentWorkData`).
+  - Mở rộng `classesMissAttendOrComment` lấy thêm `students { activeInClass student { id fullName } }` ở cấp lớp để ánh xạ đầy đủ học viên thuộc lớp, tự động bỏ qua bài nháp cũ của học viên đã nghỉ/bảo lưu (`activeInClass = false`) không có trong danh sách điểm danh buổi đó.
+  - Nâng cấp `buildFoldedWithMap`, `decodeUrlSafeChars`, `decodePunycode`, `isPlausibleBareHost`, `scrubStudentUrl` và `scrubStudentNames` khử triệt để tên học viên trên mọi trường URL (`thumbnail`, `imageUrl`, `attachmentUrls`, `videoUrls`, `relatedUrls[].url` kể cả tên miền Unicode có dấu, IDNA Punycode `xn--` hợp lệ/lỗi và đường dẫn tương đối mã hóa `%2F`) lẫn văn bản tự do (`title`, `comment`, `relatedUrls[].name`) ở cả dạng có dấu/không dấu, NFC/NFD, ASCII & UTF-8 percent-encoded đơn/đa tầng (`%4D`, `%254D`, `%4Dinh%20Qu%C3%A2n`, `>=10` tầng fail-closed) và nối bằng khoảng trắng/`-`/`_`/`+`/`.` hoặc viết liền, đồng thời bảo toàn `%2F`, chú thích `//nhận xét` và ký tự UTF-8 không phải tên học viên trước khi trả dữ liệu về Python.
+  - Kiểm chứng chỉ đọc trực tiếp trên LMS thật với `VT-JSB15` (B12/B13/B14), `VT-JSA13-HB` (B13) và `VT-ROB-ARMI12` (B12/B13): trả về đúng kết quả chấm SPCK chi tiết, `fetchErr = None`, không lộ bất kỳ tên học viên nào.
+- **Bằng chứng kiểm chứng**:
+  - Unit test mục tiêu (`tests/test_lms_quality_service.py`, `tests/test_report_status.py`, `tests/test_bcnb_actions.py`): `44/44 OK`.
+  - Kiểm tra hợp đồng JavaScript giao diện: `node tests/check_template_js.js` pass (`scripts=7 handlers=37 behavior=13`).
+  - Full isolated quality gate: `.\CHECK_QUALITY.ps1 -Isolated` exit `0` (`QUALITY GATE PASSED`, `669/669` tests OK, Ruff 0, Mypy 0 trên 78 source files, branch coverage `78.3%`).
+  - Independent Review: `gpt-6.1-sol (high)` Round 7 `VERDICT: PASS` (session `01a1c85a-7d58-7b32-b183-825d52dd24cf`).
+
+---
+
 ## [2026-11-10] — Kiểm Định Nộp Sản Phẩm Cuối Khóa (SPCK) Ở Buổi 12, 13, 14 Trên MindX LMS (`DEC-036`, `DEC-040`, `DEC-042`)
 
 ### ✨ Nâng cấp kiểm soát học vụ LMS & Tự động ghi chú QC lên Teaching
