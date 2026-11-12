@@ -13,10 +13,13 @@ Evaluates:
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from datetime import datetime
+import concurrent.futures
+import copy
+from datetime import date, datetime
 import asyncio
 import base64
 import contextlib
+import hashlib
 import html
 import inspect
 import json
@@ -27,13 +30,18 @@ import time
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
-from core.time_utils import BUSINESS_TIMEZONE
+from core.time_utils import BUSINESS_TIMEZONE, now_business
 from logger_utils import log_message
 from services.bcnb_safety import fold_text, normalize_auto_issue_text
 from services.report_status import (
+    ISSUE_CODE_LMS_ATTENDANCE_CONFLICT_NOTE,
+    ISSUE_CODE_LMS_COMMENT_NOTE,
     ISSUE_CODE_LMS_MANUAL_CHECK,
+    ISSUE_CODE_LMS_QUALITY_FAIL,
+    ISSUE_CODE_LMS_SPCK_COMMENT_MISSING,
     ISSUE_CODE_LMS_SPCK_MISSING,
     ISSUE_CODE_LMS_SPCK_NOTE,
+    ISSUE_CODE_LMS_SUMMARY_NOTE,
     ISSUE_CODE_ZALO_REPORT_NO_DATE,
     ISSUE_CODE_ZALO_REPORT_WRONG_DATE,
     SEVERITY_FAIL,
@@ -49,6 +57,12 @@ from services.report_status import (
     normalize_lesson_number,
 )
 from services.zalo_safety import parse_class_date
+from services.zalo_target_eligibility import (
+    DEFERRED_INVALID_TARGET,
+    READY_PREVIOUS_WEEK,
+    evaluate_scan_target,
+    parse_group_end_time,
+)
 
 MAX_LMS_QUALITY_CLASSES_PER_BATCH = 60
 MAX_LMS_SLOTS_PER_CLASS = 20
@@ -62,15 +76,17 @@ SPCK_SLIDE_YOUTUBE_LESSONS = frozenset({14})
 
 def _is_spck_exempt_course(class_code: str) -> bool:
     """PTB and CSB courses do not require SPCK in sessions 12–14."""
-    return bool(re.search(r"(?:^|-)(?:PTB|CSB)(?:[0-9]+)?(?:-|$)", normalize_class_code(class_code)))
+    return bool(
+        re.search(r"(?:^|-)(?:PTB|CSB)(?:[0-9]+)?(?:-|$)", normalize_class_code(class_code))
+    )
+
+
 LMS_GRAPHQL_ENDPOINT = "https://lms-api.mindx.edu.vn/"
 LMS_ALLOWED_HOSTNAME = "lms.mindx.edu.vn"
 LMS_ALLOWED_LOGIN_HOSTNAMES = frozenset(
     {"lms.mindx.edu.vn", "id.mindx.edu.vn", "base.mindx.edu.vn"}
 )
-ALLOWED_LMS_TOKEN_KEYS = frozenset(
-    {"id_token", "access_token", "lms_token", "auth_token", "token"}
-)
+ALLOWED_LMS_TOKEN_KEYS = frozenset({"id_token", "access_token", "lms_token", "auth_token", "token"})
 
 ATTENDED_STATUSES = frozenset({"ATTENDED", "LATE_ARRIVED"})
 ABSENT_STATUSES = frozenset({"ABSENT", "ABSENT_WITH_NOTICE"})
@@ -298,9 +314,7 @@ def _has_checkpoint_rubric_in_slot(slot_data: dict[str, Any] | None) -> bool:
         folded = fold_text(_strip_html(entry.get("comment")))
         if not folded:
             continue
-        pillar_hits = sum(
-            1 for p in ("kien thuc", "ky nang", "thai do") if p in folded
-        )
+        pillar_hits = sum(1 for p in ("kien thuc", "ky nang", "thai do") if p in folded)
         pillar_header_hits = sum(
             1
             for p in ("kien thuc", "ky nang", "thai do")
@@ -339,6 +353,11 @@ def is_checkpoint_session(
 
 def evaluate_lms_slot_summary(summary_raw: str | None) -> dict[str, Any]:
     """Check whether `slot.summary` contains substantive lesson content (Requirement #3)."""
+    summary_issue = make_structured_issue(
+        ISSUE_CODE_LMS_SUMMARY_NOTE,
+        "[LMS] Chưa ghi nội dung bài học",
+        severity=SEVERITY_NOTE,
+    )
     clean_text = _strip_html(summary_raw)
     single_line = " ".join(clean_text.split()).strip()
     folded_full = fold_text(single_line).strip(" -–—:.,;!?()[]{}\"'")
@@ -347,7 +366,7 @@ def evaluate_lms_slot_summary(summary_raw: str | None) -> dict[str, Any]:
             "has_valid_summary": False,
             "summary_clean": "",
             "substance_text": "",
-            "issue": "[LMS] Chưa ghi nội dung bài học",
+            "issue": summary_issue,
         }
     for pattern in SUMMARY_PLACEHOLDER_PATTERNS:
         if re.fullmatch(pattern, folded_full):
@@ -355,7 +374,7 @@ def evaluate_lms_slot_summary(summary_raw: str | None) -> dict[str, Any]:
                 "has_valid_summary": False,
                 "summary_clean": single_line,
                 "substance_text": "",
-                "issue": "[LMS] Chưa ghi nội dung bài học",
+                "issue": summary_issue,
             }
     substance = SUMMARY_PREFIX_STRIP_RE.sub("", single_line).strip(" -–—:.,;!?")
     folded_substance = SUMMARY_PREFIX_STRIP_RE.sub(
@@ -373,7 +392,7 @@ def evaluate_lms_slot_summary(summary_raw: str | None) -> dict[str, Any]:
             "has_valid_summary": False,
             "summary_clean": single_line,
             "substance_text": substance,
-            "issue": "[LMS] Chưa ghi nội dung bài học",
+            "issue": summary_issue,
         }
     return {
         "has_valid_summary": True,
@@ -402,66 +421,955 @@ def _strip_comment_header_and_student_name(
                 without_header,
                 flags=re.IGNORECASE,
             ).strip()
+    without_header = re.sub(
+        r"^\s*(?:\[hs\]\s*)+(?=\([A-Za-z0-9]+(?:-[A-Za-z0-9]+)+\))",
+        "",
+        without_header,
+        flags=re.IGNORECASE,
+    ).strip()
     return re.sub(r"^\s*\([A-Za-z0-9]+(?:-[A-Za-z0-9]+)+\)\s*", "", without_header).strip()
+
+
+_TRIVIAL_SINGLE_TOKEN_FILLERS = frozenset(
+    {"ok", "okay", "good", "none", "na", "n/a", "x", "test", "."}
+)
+
+_ABSENCE_STATEMENT_RE = re.compile(
+    r"(?<![a-z0-9])(?:"
+    r"(?:hom\s+nay|buoi\s+nay|buoi\s+hoc\s+hom\s+nay)\s+"
+    r"(?:ban\s+|hv\s+|hoc\s+vien\s+|con\s+|em\s+|be\s+|gia\s+dinh\s+|phu\s+huynh\s+)*"
+    r"(?:xin\s+phep\s+cho\s+(?:ban|con|em|be|hv)\s+|xin\s+phep\s+|bao\s+|xin\s+|co\s+|da\s+)*"
+    r"(?:nghi|vang)(?:\s+hoc|\s+om|\s+mat|\s+phep|\s+co\s+phep|\s+khong\s+phep)?"
+    r"|(?:ban|hv|hoc\s+vien|con|em|be|gia\s+dinh|phu\s+huynh)\s+"
+    r"(?:xin\s+phep\s+cho\s+(?:ban|con|em|be|hv)\s+|xin\s+phep\s+|bao\s+cho\s+(?:ban|con|em|be)\s+|bao\s+|xin\s+|co\s+|da\s+|hom\s+nay\s+|buoi\s+nay\s+)*"
+    r"(?:nghi|vang)(?:\s+hoc|\s+om|\s+mat|\s+phep|\s+co\s+phep|\s+khong\s+phep|\s+buoi\s+nay|\s+hom\s+nay)?"
+    r"|(?:nghi\s+hoc|nghi\s+om|nghi\s+co\s+phep|nghi\s+khong\s+phep|xin\s+phep\s+nghi|xin\s+nghi|"
+    r"vang\s+mat|vang\s+phep|vang\s+khong\s+phep|vang\s+hoc|hoc\s+vien\s+vang|ban\s+vang|bao\s+nghi|bao\s+vang)"
+    r"|^(?:nghi|vang)$"
+    r")(?![a-z0-9])",
+    flags=re.IGNORECASE,
+)
+
+_NEGATED_ABSENCE_RE = re.compile(
+    r"\b(?:khong|chua|chang|ko|k)\s+"
+    r"(?:tung\s+|bao\s+gio\s+|he\s+|co\s+|bi\s+|phai\s+|hay\s+|ngay\s+nao\s+|buoi\s+nao\s+|xin\s+)*"
+    r"(?:nghi(?:\s+hoc|\s+om|\s+buoi|\s+phep|\s+buoi\s+nao)?|vang(?:\s+mat|\s+hoc|\s+phep|\s+buoi\s+nao)?|bo\s+buoi)\b"
+    r"|\bdi\s+hoc\s+day\s+du\b",
+    flags=re.IGNORECASE,
+)
+
+_PAST_OR_FUTURE_ABSENCE_RE = re.compile(
+    r"\b(?:nghi|vang|xin\s+nghi|xin\s+phep\s+nghi)\s+(?:hoc\s+|om\s+)?(?:buoi\s+truoc|tuan\s+truoc|hom\s+truoc|bai\s+truoc|buoi\s+vua\s+roi|buoi\s+sau|tuan\s+sau|buoi\s+toi|buoi\s+tiep\s+theo|buoi\s+ke\s+tiep)\b"
+    r"|\b(?:buoi\s+truoc|tuan\s+truoc|hom\s+truoc|bai\s+truoc|buoi\s+vua\s+roi|buoi\s+sau|tuan\s+sau|buoi\s+toi)\s+(?:ban\s+|con\s+|em\s+|be\s+|hv\s+|hoc\s+vien\s+)?(?:da\s+|xin\s+|co\s+)*(?:nghi|vang)(?:\s+hoc|\s+om|\s+phep)?\b",
+    flags=re.IGNORECASE,
+)
+
+_OTHER_SESSION_ANCHOR_RE = re.compile(
+    r"\b(?:buoi\s+truoc|tuan\s+truoc|hom\s+truoc|bai\s+truoc|buoi\s+vua\s+roi|"
+    r"buoi\s+sau|tuan\s+sau|buoi\s+toi|buoi\s+tiep\s+theo|buoi\s+ke\s+tiep)\b",
+    flags=re.IGNORECASE,
+)
+
+_CURRENT_SESSION_ANCHOR_RE = re.compile(
+    r"\b(?:hom\s+nay|buoi\s+nay|buoi\s+hoc\s+hom\s+nay|buoi\s+hoc\s+nay)\b",
+    flags=re.IGNORECASE,
+)
+
+_IN_CLASS_PARTICIPATION_RE = re.compile(
+    r"\b(?:tren\s+lop\s+(?:con\s+|ban\s+|em\s+)?(?:hoan\s+thanh|lam\s+xong|thuc\s+hanh|nam\s+vung|hieu\s+bai)|"
+    r"trong\s+gio\s+hoc\s+(?:con\s+|ban\s+|em\s+)?(?:tap\s+trung|phat\s+bieu|hoan\s+thanh)|"
+    r"di\s+hoc\s+dung\s+gio)\b",
+    flags=re.IGNORECASE,
+)
+
+_VI_CAP_WORD = (
+    r"[A-ZĐÀÁẢÃẠĂẰẮẲẴẶÂẦẤẨẪẬÈÉẺẼẸÊỀẾỂỄỆÌÍỈĨỊÒÓỎÕỌÔỒỐỔỖỘƠỜỚỞỠỢÙÚỦŨỤƯỪỨỬỮỰỲÝỶỸỴ]"
+    r"[a-zđàáảãạăằắẳẵặâầấẩẫậèéẻẽẹêềếểễệìíỉĩịòóỏõọôồốổỗộơờớởỡợùúủũụưừứửữựỳýỷỹỵ]+"
+)
+_HONORIFIC_NAME_RE = re.compile(
+    rf"\b(?P<hon>(?i:bạn|bé|em|con|hv|học\s+viên))\s+(?P<words>{_VI_CAP_WORD}(?:\s+{_VI_CAP_WORD}){{0,3}})\b"
+)
+_FULL_VI_NAME_RE = re.compile(
+    rf"\b(?:Nguyễn|Trần|Lê|Phạm|Hoàng|Huỳnh|Phan|Vũ|Võ|Đặng|Bùi|Đỗ|Hồ|Ngô|Dương|Lý|Đinh|Đoàn|Trương|Lương|Mai|Tạ|Châu|Tô|Hà|Thái|Kiều|Cao|Lâm|Đào|Vương|Trịnh|Nghiêm|Tống|Quách|Từ|Phùng|Chu)"
+    rf"(?:\s+{_VI_CAP_WORD}){{1,3}}\b"
+)
+_UNPREFIXED_MULTIWORD_VI_NAME_RE = re.compile(rf"\b{_VI_CAP_WORD}(?:\s+{_VI_CAP_WORD}){{2,4}}\b")
+_VI_SURNAMES_FOLDED = frozenset(
+    {
+        "nguyen",
+        "tran",
+        "le",
+        "pham",
+        "hoang",
+        "huynh",
+        "phan",
+        "vu",
+        "vo",
+        "dang",
+        "bui",
+        "do",
+        "ho",
+        "ngo",
+        "duong",
+        "ly",
+        "dinh",
+        "doan",
+        "truong",
+        "luong",
+        "mai",
+        "ta",
+        "chau",
+        "to",
+        "ha",
+        "thai",
+        "kieu",
+        "cao",
+        "lam",
+        "dao",
+        "vuong",
+        "trinh",
+        "nghiem",
+        "tong",
+        "quach",
+        "tu",
+        "phung",
+        "chu",
+        "la",
+        "au",
+        "mac",
+        "khuc",
+        "luc",
+        "nguy",
+        "trieu",
+        "ton",
+        "luu",
+        "tang",
+        "dam",
+        "bach",
+        "khong",
+        "han",
+        "diep",
+    }
+)
+_NON_NAME_STOPWORDS_FOLDED = frozenset(
+    {
+        "bai",
+        "tap",
+        "buoi",
+        "hoc",
+        "vong",
+        "lap",
+        "ham",
+        "bien",
+        "mang",
+        "chuoi",
+        "lop",
+        "nhom",
+        "cau",
+        "hoi",
+        "tro",
+        "choi",
+        "vat",
+        "mo",
+        "hinh",
+        "mach",
+        "cu",
+        "xong",
+        "rap",
+        "robot",
+        "robotics",
+        "python",
+        "scratch",
+        "javascript",
+        "html",
+        "css",
+        "roblox",
+        "unity",
+        "arduino",
+        "microbit",
+        "canva",
+        "figma",
+        "slide",
+        "video",
+        "game",
+        "web",
+        "app",
+        "code",
+        "coding",
+        "mindx",
+        "checkpoint",
+        "muc",
+        "chuong",
+        "nhanh",
+        "cham",
+        "logic",
+        "spck",
+        "project",
+        "lesson",
+        "session",
+        "slot",
+        "node",
+        "next",
+        "react",
+        "vue",
+        "sql",
+    }
+)
+_NON_NAME_BIGRAMS_FOLDED = frozenset(
+    {
+        ("du", "an"),
+        ("cuoi", "khoa"),
+        ("hoan", "thanh"),
+        ("nam", "vung"),
+        ("nam", "bai"),
+        ("nam", "duoc"),
+        ("hieu", "bai"),
+        ("phat", "trien"),
+        ("phat", "bieu"),
+        ("san", "pham"),
+        ("bai", "tap"),
+        ("bai", "hoc"),
+        ("buoi", "hoc"),
+        ("vong", "lap"),
+        ("dieu", "kien"),
+        ("thuyet", "trinh"),
+        ("lap", "trinh"),
+        ("lap", "rap"),
+        ("kien", "thuc"),
+        ("ky", "nang"),
+        ("thai", "do"),
+        ("thai", "duong"),
+        ("tu", "duy"),
+        ("tich", "cuc"),
+        ("chu", "dong"),
+        ("thuat", "toan"),
+        ("danh", "sach"),
+        ("doi", "tuong"),
+        ("nhan", "vat"),
+        ("ung", "dung"),
+        ("thiet", "ke"),
+        ("giao", "dien"),
+        ("chuc", "nang"),
+        ("tinh", "nang"),
+        ("thao", "tac"),
+        ("diem", "manh"),
+        ("cai", "thien"),
+        ("bo", "sung"),
+        ("sang", "tao"),
+        ("chi", "tiet"),
+    }
+)
+_NON_NAME_CLAUSE_SUBJECTS_FOLDED = frozenset(
+    {
+        "con",
+        "em",
+        "ban",
+        "be",
+        "hv",
+        "hoc",
+        "lop",
+        "nhom",
+        "bai",
+        "buoi",
+        "thay",
+        "co",
+        "gia",
+        "phu",
+        "me",
+        "bo",
+        "ba",
+        "anh",
+        "chi",
+        "ca",
+        "phan",
+        "muc",
+        "chuong",
+        "san",
+        "du",
+        "kien",
+        "ky",
+    }
+    | _NON_NAME_STOPWORDS_FOLDED
+)
+_CLAUSE_SUBJECT_NAME_RE = re.compile(
+    rf"(?P<pre>(?:^|[.!?\n;,]+\s*)(?:(?i:riêng|còn|với|đối\s+với|như|về\s+phần)\s+)?)(?P<name>{_VI_CAP_WORD})(?=(?:,\s*(?i:con|em|bạn|bé|hv|học\s+viên)\b|(?:\s*,)?\s+(?i:nắm\s+vững|nắm\s+được|nắm\s+bài|hiểu\s+bài|hiểu\s+được|hoàn\s+thành|hoàn\s+thiện|làm\s+bài|làm\s+tốt|làm\s+xong|làm\s+rất|thực\s+hành|tiếp\s+thu|tập\s+trung|chú\s+ý|tham\s+gia|phát\s+biểu|lắp\s+ráp|lập\s+trình|thuyết\s+trình|trình\s+bày|vận\s+dụng|áp\s+dụng|biết\b|đã\b|cần\b|chưa\b|rất\b|có\s+thái\s+độ|có\s+ý\s+thức|đi\s+học|vào\s+lớp|ngồi\s+học|nghe\s+giảng|tương\s+tác|thao\s+tác)))"
+)
+_EMAIL_SCRUB_RE = re.compile(
+    r"\b[\w.+-]+@[\w-]+\.[\w.-]+\b",
+    flags=re.IGNORECASE,
+)
+_URL_SCRUB_RE = re.compile(
+    r"(?:https?://|//|www\.)[^\s\"'<>]+"
+    r"|\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,24}(?::\d+)?/[^\s\"'<>]*"
+    r"|\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:com\.vn|edu\.vn|gov\.vn|net\.vn|org\.vn|ac\.vn|info\.vn|pro\.vn|health\.vn|name\.vn|biz\.vn|int\.vn|com|vn|net|org|edu|gov|io|app|dev|me|info|co|ai|xyz|online|site|tech|cloud|page|gg|ly|invalid|local|test)\b(?::\d+)?(?:/[^\s\"'<>]*)?",
+    flags=re.IGNORECASE,
+)
+_PHONE_CANDIDATE_RE = re.compile(
+    r"(?<!\w)(?:\+?\d{1,3}[\s.-]*)?(?:\(\+?\d{1,4}\)[\s.-]*)?\d(?:[\d\s().-]{5,18}\d)(?!\w)"
+)
+
+_CONCRETE_LEARNING_SIGNALS = (
+    "kien thuc",
+    "ky nang",
+    "bai hoc",
+    "bai tap",
+    "thuc hanh",
+    "lap trinh",
+    "code",
+    "thuat toan",
+    "logic",
+    "bien",
+    "ham",
+    "vong lap",
+    "dieu kien",
+    "danh sach",
+    "list",
+    "array",
+    "object",
+    "class",
+    "function",
+    "python",
+    "scratch",
+    "javascript",
+    "html",
+    "css",
+    "web",
+    "trang web",
+    "game",
+    "tro choi",
+    "nhan vat",
+    "du an",
+    "san pham",
+    "spck",
+    "project",
+    "robot",
+    "mo hinh",
+    "lap rap",
+    "cam bien",
+    "dong co",
+    "mach",
+    "arduino",
+    "ung dung",
+    "giao dien",
+    "chuc nang",
+    "tinh nang",
+    "thao tac",
+    "cu phap",
+    "nam bai",
+    "nam vung",
+    "nam duoc",
+    "hieu bai",
+    "hieu duoc",
+    "van dung",
+    "ap dung",
+    "hoan thanh",
+    "hoan thien",
+    "thiet ke",
+    "trinh bay",
+    "thuyet trinh",
+    "slide",
+)
+
+_DEFAULT_AI_REVIEWER: Any = None
+
+
+def _is_placeholder_or_dot_bypass(text: str | None) -> bool:
+    """Return True when comment text is empty, punctuation/dot-only, or a single trivial filler token."""
+    body = _strip_comment_header_and_student_name(text)
+    if not body:
+        return True
+    no_hs = re.sub(r"\[hs\]", " ", body, flags=re.IGNORECASE).strip()
+    if not no_hs:
+        return True
+    folded = fold_text(no_hs).strip()
+    stripped_punct = folded.strip(" -–—:.,;!?()[]{}\"'/_*~`@#$%^&+=|\\<>")
+    if not stripped_punct or stripped_punct in _TRIVIAL_SINGLE_TOKEN_FILLERS:
+        return True
+    alnum_tokens = re.findall(r"[a-z0-9]+", folded)
+    if not alnum_tokens:
+        return True
+    if len(alnum_tokens) == 1 and (
+        alnum_tokens[0] in _TRIVIAL_SINGLE_TOKEN_FILLERS or len(alnum_tokens[0]) == 1
+    ):
+        return True
+    return False
+
+
+_CLAUSE_SPLIT_FOLDED_RE = re.compile(
+    r"[.!?\n;]+"
+    r"|,\s*(?=(?:nhung|tuy\s+nhien|con|rieng|hom\s+nay|buoi\s+nay|buoi\s+hoc\s+hom\s+nay|buoi\s+hoc\s+nay|buoi\s+hom\s+nay|hien\s+tai|toi\s+nay|sang\s+nay|chieu\s+nay|gia\s+dinh|phu\s+huynh|me|bo|ba|ban|be|em|buoi\s+truoc|tuan\s+truoc|hom\s+truoc|lan\s+truoc|buoi\s+sau|tuan\s+sau)\b)"
+    r"|\b(?:nhung|tuy\s+nhien)\s+(?=(?:hom\s+nay|buoi\s+nay|buoi\s+hoc|buoi\s+hom\s+nay|con|ban|em|be|buoi\s+truoc|tuan\s+truoc)\b)",
+    flags=re.IGNORECASE,
+)
+
+
+def _is_absence_statement_in_comment(body: str | None) -> bool:
+    """Return True when a comment explicitly states the student was absent in the current session."""
+    clean = _strip_comment_header_and_student_name(body)
+    if not clean:
+        return False
+    no_hs = re.sub(r"\[hs\]", " ", clean, flags=re.IGNORECASE).strip()
+    if not no_hs:
+        return False
+    folded_all = fold_text(no_hs)
+    clauses = _CLAUSE_SPLIT_FOLDED_RE.split(folded_all)
+    has_current_absence = False
+    has_current_in_class_participation = False
+    for raw_clause in clauses:
+        clause_folded = raw_clause.strip(" -–—:.,;!?()[]{}\"'")
+        if not clause_folded:
+            continue
+        if _OTHER_SESSION_ANCHOR_RE.search(clause_folded) and not _CURRENT_SESSION_ANCHOR_RE.search(
+            clause_folded
+        ):
+            continue
+        if _IN_CLASS_PARTICIPATION_RE.search(clause_folded):
+            has_current_in_class_participation = True
+        without_negated = _NEGATED_ABSENCE_RE.sub(" ", clause_folded)
+        without_other_sessions = _PAST_OR_FUTURE_ABSENCE_RE.sub(" ", without_negated).strip(
+            " -–—:.,;!?()[]{}\"'"
+        )
+        if without_other_sessions and _ABSENCE_STATEMENT_RE.search(without_other_sessions):
+            has_current_absence = True
+    return has_current_absence and not has_current_in_class_participation
+
+
+def _truncate_non_name_tokens(tokens: list[str]) -> list[str]:
+    kept: list[str] = []
+    folded_tokens = [fold_text(t).strip() for t in tokens]
+    i = 0
+    while i < len(tokens):
+        ft = folded_tokens[i]
+        if not ft or ft in _NON_NAME_STOPWORDS_FOLDED:
+            break
+        if i + 1 < len(tokens) and (ft, folded_tokens[i + 1]) in _NON_NAME_BIGRAMS_FOLDED:
+            break
+        kept.append(tokens[i])
+        i += 1
+    return kept
+
+
+def _scrub_comment_for_ai(
+    text: str | None,
+    *,
+    known_student_names: Sequence[str] | None = None,
+) -> str:
+    """Scrub URLs, emails, phone numbers, and Vietnamese proper names before sending to AI."""
+    clean = _strip_comment_header_and_student_name(text)
+    if not clean:
+        return ""
+    scrubbed = clean
+    if known_student_names:
+        given_tokens_set: set[str] = set()
+        for raw_name in known_student_names:
+            norm_name = " ".join(str(raw_name or "").split()).strip()
+            if len(norm_name) >= 3:
+                scrubbed = re.sub(
+                    re.escape(norm_name),
+                    "[HS]",
+                    scrubbed,
+                    flags=re.IGNORECASE,
+                )
+                tokens = norm_name.split()
+                if len(tokens) >= 2:
+                    tail_two = " ".join(tokens[-2:])
+                    if len(tail_two) >= 4:
+                        scrubbed = re.sub(
+                            rf"\b{re.escape(tail_two)}\b",
+                            "[HS]",
+                            scrubbed,
+                            flags=re.IGNORECASE,
+                        )
+                    given_tok = tokens[-1]
+                    given_folded = fold_text(given_tok).strip()
+                    if (
+                        len(given_tok) >= 2
+                        and given_folded
+                        and given_folded not in _NON_NAME_STOPWORDS_FOLDED
+                    ):
+                        scrubbed = re.sub(
+                            rf"\b((?:bạn|ban|bé|be|em|con|hv|học\s+viên|hoc\s+vien)\s+){re.escape(given_tok)}\b",
+                            r"\g<1>[HS]",
+                            scrubbed,
+                            flags=re.IGNORECASE,
+                        )
+                        given_tokens_set.add(given_folded)
+        if given_tokens_set:
+            spans = [
+                (m.start(), m.end(), m.group(0), fold_text(m.group(0)).strip())
+                for m in re.finditer(r"[^\W\d_]+", scrubbed, flags=re.UNICODE)
+            ]
+            parts: list[str] = []
+            cursor = 0
+            for idx, (s_start, s_end, _raw_w, folded_w) in enumerate(spans):
+                if folded_w not in given_tokens_set:
+                    continue
+                if (
+                    s_start > 0
+                    and s_end < len(scrubbed)
+                    and scrubbed[s_start - 1] == "["
+                    and scrubbed[s_end] == "]"
+                ):
+                    continue
+                prev_space_only = idx > 0 and scrubbed[spans[idx - 1][1] : s_start].isspace()
+                next_space_only = (
+                    idx + 1 < len(spans) and scrubbed[s_end : spans[idx + 1][0]].isspace()
+                )
+                if (
+                    prev_space_only and (spans[idx - 1][3], folded_w) in _NON_NAME_BIGRAMS_FOLDED
+                ) or (
+                    next_space_only and (folded_w, spans[idx + 1][3]) in _NON_NAME_BIGRAMS_FOLDED
+                ):
+                    continue
+                parts.append(scrubbed[cursor:s_start])
+                parts.append("[HS]")
+                cursor = s_end
+            if parts:
+                parts.append(scrubbed[cursor:])
+                scrubbed = "".join(parts)
+    scrubbed = _EMAIL_SCRUB_RE.sub("[EMAIL]", scrubbed)
+
+    def _replace_url_match(m: re.Match[str]) -> str:
+        raw_url = m.group(0)
+        stripped = raw_url.rstrip(".,;:!?)]}")
+        trail = raw_url[len(stripped) :]
+        return f"[URL]{trail}"
+
+    scrubbed = _URL_SCRUB_RE.sub(_replace_url_match, scrubbed)
+
+    def _replace_phone_match(m: re.Match[str]) -> str:
+        candidate = m.group(0)
+        digit_count = sum(1 for ch in candidate if ch.isdigit())
+        if 7 <= digit_count <= 15:
+            return "[PHONE]"
+        return candidate
+
+    scrubbed = _PHONE_CANDIDATE_RE.sub(_replace_phone_match, scrubbed)
+
+    def _replace_honorific_name(m: re.Match[str]) -> str:
+        hon = m.group("hon")
+        words = m.group("words").split()
+        kept_name = _truncate_non_name_tokens(words)
+        if not kept_name:
+            return m.group(0)
+        tail = words[len(kept_name) :]
+        if tail:
+            return f"{hon} [HS] {' '.join(tail)}"
+        return f"{hon} [HS]"
+
+    def _replace_full_vi_name(m: re.Match[str]) -> str:
+        words = m.group(0).split()
+        kept_name = _truncate_non_name_tokens(words)
+        if len(kept_name) < 2:
+            return m.group(0)
+        tail = words[len(kept_name) :]
+        if tail:
+            return f"[HS] {' '.join(tail)}"
+        return "[HS]"
+
+    def _replace_unprefixed_multiword_name(m: re.Match[str]) -> str:
+        words = m.group(0).split()
+        if not words or fold_text(words[0]).strip() not in _VI_SURNAMES_FOLDED:
+            return m.group(0)
+        kept_name = _truncate_non_name_tokens(words)
+        if len(kept_name) < 2:
+            return m.group(0)
+        tail = words[len(kept_name) :]
+        if tail:
+            return f"[HS] {' '.join(tail)}"
+        return "[HS]"
+
+    def _replace_clause_subject_name(m: re.Match[str]) -> str:
+        name_w = m.group("name")
+        folded_w = fold_text(name_w).strip()
+        if not folded_w or folded_w in _NON_NAME_CLAUSE_SUBJECTS_FOLDED:
+            return m.group(0)
+        return f"{m.group('pre')}[HS]"
+
+    scrubbed = _HONORIFIC_NAME_RE.sub(_replace_honorific_name, scrubbed)
+    scrubbed = _FULL_VI_NAME_RE.sub(_replace_full_vi_name, scrubbed)
+    scrubbed = _UNPREFIXED_MULTIWORD_VI_NAME_RE.sub(_replace_unprefixed_multiword_name, scrubbed)
+    scrubbed = _CLAUSE_SUBJECT_NAME_RE.sub(_replace_clause_subject_name, scrubbed)
+    scrubbed = re.sub(r"(?:\[HS\]\s*){2,}", "[HS] ", scrubbed, flags=re.IGNORECASE)
+    return " ".join(scrubbed.split())[:600]
+
+
+def _normalize_ai_verdict(raw_entry: Any) -> str:
+    if isinstance(raw_entry, str):
+        return raw_entry.strip().upper()
+    if isinstance(raw_entry, Mapping):
+        return (
+            str(
+                raw_entry.get("classification")
+                or raw_entry.get("label")
+                or raw_entry.get("verdict")
+                or ""
+            )
+            .strip()
+            .upper()
+        )
+    return ""
+
+
+def _sanitize_ai_comment_batch(
+    items: list[dict[str, Any]],
+    *,
+    lesson_summary: str = "",
+    comment_kind: str = "SESSION",
+    known_student_names: Sequence[str] | None = None,
+) -> tuple[str, list[dict[str, Any]]]:
+    clean_summary = _scrub_comment_for_ai(
+        _strip_html(lesson_summary),
+        known_student_names=known_student_names,
+    )[:240]
+    sanitized_payload: list[dict[str, Any]] = []
+    for entry in items:
+        item_id = str(entry.get("id") or "").strip()
+        scrubbed_text = _scrub_comment_for_ai(
+            str(entry.get("text") or ""),
+            known_student_names=known_student_names,
+        )
+        if not item_id or not scrubbed_text:
+            continue
+        sanitized_payload.append(
+            {
+                "id": item_id,
+                "type": str(entry.get("type") or f"{comment_kind}_COMMENT"),
+                "text": scrubbed_text,
+            }
+        )
+    return clean_summary, sanitized_payload
+
+
+def _resolve_reviewer_timeout(active_reviewer: Any) -> float:
+    for attr in ("timeout_seconds", "_timeout_seconds"):
+        val = getattr(active_reviewer, attr, None)
+        if isinstance(val, (int, float)) and not isinstance(val, bool) and val > 0:
+            return max(0.1, float(val))
+    with contextlib.suppress(Exception):
+        from googleform_autosubmit.config import Config
+
+        return max(0.1, float(getattr(Config, "LMS_AI_TIMEOUT_SECONDS", 8.0)))
+    return 8.0
+
+
+def _run_coro_sync(coro: Any, timeout_seconds: float) -> Any:
+    try:
+        asyncio.get_running_loop()
+        loop_running = True
+    except RuntimeError:
+        loop_running = False
+    if not loop_running:
+        return asyncio.run(asyncio.wait_for(coro, timeout=timeout_seconds))
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    try:
+        fut = executor.submit(lambda: asyncio.run(asyncio.wait_for(coro, timeout=timeout_seconds)))
+        return fut.result(timeout=timeout_seconds + 0.25)
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+
+
+class _BatchRecordingReviewer:
+    """Internal collector used by async fetch_and_evaluate_lms_quality to gather gray-zone batches."""
+
+    def __init__(self) -> None:
+        self.batches: list[tuple[list[dict[str, Any]], dict[str, Any]]] = []
+
+    def record(self, items: list[dict[str, Any]], **kwargs: Any) -> dict[str, str]:
+        self.batches.append((list(items), dict(kwargs)))
+        return {}
+
+
+class _PrecomputedBatchReviewer:
+    """Internal proxy returning pre-awaited async AI verdicts in batch order."""
+
+    def __init__(self, verdicts_by_batch: list[dict[str, str]]) -> None:
+        self._verdicts = list(verdicts_by_batch)
+        self._idx = 0
+
+    def next_verdicts(self) -> dict[str, str]:
+        if self._idx < len(self._verdicts):
+            res = self._verdicts[self._idx]
+            self._idx += 1
+            return res
+        return {}
+
+
+async def _invoke_ai_comment_reviewer_async(
+    active_reviewer: Any,
+    items: list[dict[str, Any]],
+    *,
+    class_code: str = "",
+    khoi: str = "",
+    lesson: str | int | None = "",
+    lesson_summary: str = "",
+    comment_kind: str = "SESSION",
+    known_student_names: Sequence[str] | None = None,
+) -> dict[str, str]:
+    if active_reviewer is None or not items:
+        return {}
+    clean_summary, sanitized_payload = _sanitize_ai_comment_batch(
+        items,
+        lesson_summary=lesson_summary,
+        comment_kind=comment_kind,
+        known_student_names=known_student_names,
+    )
+    if not sanitized_payload:
+        return {}
+    timeout_s = _resolve_reviewer_timeout(active_reviewer)
+    raw_verdicts: Any = None
+    with contextlib.suppress(Exception):
+        if hasattr(active_reviewer, "review_short_comments"):
+            fn = active_reviewer.review_short_comments
+            if inspect.iscoroutinefunction(fn):
+                try:
+                    coro = fn(
+                        sanitized_payload,
+                        class_code=class_code,
+                        khoi=khoi,
+                        lesson=lesson,
+                        lesson_summary=clean_summary,
+                        comment_kind=comment_kind,
+                        known_student_names=known_student_names,
+                    )
+                except TypeError:
+                    try:
+                        coro = fn(
+                            sanitized_payload,
+                            class_code=class_code,
+                            khoi=khoi,
+                            lesson=lesson,
+                            lesson_summary=clean_summary,
+                            comment_kind=comment_kind,
+                        )
+                    except TypeError:
+                        try:
+                            coro = fn(
+                                sanitized_payload,
+                                lesson_summary=clean_summary,
+                            )
+                        except TypeError:
+                            coro = fn(sanitized_payload)
+                raw_verdicts = await asyncio.wait_for(coro, timeout=timeout_s)
+            else:
+
+                def _call_short() -> Any:
+                    try:
+                        return fn(
+                            sanitized_payload,
+                            class_code=class_code,
+                            khoi=khoi,
+                            lesson=lesson,
+                            lesson_summary=clean_summary,
+                            comment_kind=comment_kind,
+                        )
+                    except TypeError:
+                        try:
+                            return fn(sanitized_payload, lesson_summary=clean_summary)
+                        except TypeError:
+                            return fn(sanitized_payload)
+
+                res = await asyncio.wait_for(asyncio.to_thread(_call_short), timeout=timeout_s)
+                raw_verdicts = (
+                    await asyncio.wait_for(res, timeout=timeout_s)
+                    if inspect.iscoroutine(res)
+                    else res
+                )
+        elif hasattr(active_reviewer, "review_comments"):
+            fn = active_reviewer.review_comments
+            if inspect.iscoroutinefunction(fn):
+                try:
+                    coro = fn(sanitized_payload, lesson_summary=clean_summary)
+                except TypeError:
+                    coro = fn(sanitized_payload)
+                raw_verdicts = await asyncio.wait_for(coro, timeout=timeout_s)
+            else:
+
+                def _call_rc() -> Any:
+                    try:
+                        return fn(sanitized_payload, lesson_summary=clean_summary)
+                    except TypeError:
+                        return fn(sanitized_payload)
+
+                res = await asyncio.wait_for(asyncio.to_thread(_call_rc), timeout=timeout_s)
+                raw_verdicts = (
+                    await asyncio.wait_for(res, timeout=timeout_s)
+                    if inspect.iscoroutine(res)
+                    else res
+                )
+        elif hasattr(active_reviewer, "review_short_comments_sync"):
+            fn_sync = active_reviewer.review_short_comments_sync
+            raw_verdicts = await asyncio.wait_for(
+                asyncio.to_thread(
+                    fn_sync,
+                    sanitized_payload,
+                    class_code=class_code,
+                    khoi=khoi,
+                    lesson=lesson,
+                    lesson_summary=clean_summary,
+                    comment_kind=comment_kind,
+                    known_student_names=known_student_names,
+                ),
+                timeout=timeout_s,
+            )
+
+    if not isinstance(raw_verdicts, Mapping):
+        return {}
+    return {
+        str(k): _normalize_ai_verdict(v)
+        for k, v in raw_verdicts.items()
+        if _normalize_ai_verdict(v)
+    }
+
+
+def _invoke_ai_comment_reviewer(
+    active_reviewer: Any,
+    items: list[dict[str, Any]],
+    *,
+    class_code: str = "",
+    khoi: str = "",
+    lesson: str | int | None = "",
+    lesson_summary: str = "",
+    comment_kind: str = "SESSION",
+    known_student_names: Sequence[str] | None = None,
+) -> dict[str, str]:
+    if active_reviewer is None or not items:
+        return {}
+    if isinstance(active_reviewer, _BatchRecordingReviewer):
+        return active_reviewer.record(
+            items,
+            class_code=class_code,
+            khoi=khoi,
+            lesson=lesson,
+            lesson_summary=lesson_summary,
+            comment_kind=comment_kind,
+            known_student_names=known_student_names,
+        )
+    if isinstance(active_reviewer, _PrecomputedBatchReviewer):
+        return active_reviewer.next_verdicts()
+
+    clean_summary, sanitized_payload = _sanitize_ai_comment_batch(
+        items,
+        lesson_summary=lesson_summary,
+        comment_kind=comment_kind,
+        known_student_names=known_student_names,
+    )
+    if not sanitized_payload:
+        return {}
+
+    timeout_s = _resolve_reviewer_timeout(active_reviewer)
+    raw_verdicts: Any = None
+    with contextlib.suppress(Exception):
+        if hasattr(active_reviewer, "review_short_comments_sync"):
+            raw_verdicts = active_reviewer.review_short_comments_sync(
+                sanitized_payload,
+                class_code=class_code,
+                khoi=khoi,
+                lesson=lesson,
+                lesson_summary=clean_summary,
+                comment_kind=comment_kind,
+            )
+        elif hasattr(active_reviewer, "review_short_comments"):
+            fn = active_reviewer.review_short_comments
+            try:
+                raw_verdicts = fn(
+                    sanitized_payload,
+                    class_code=class_code,
+                    khoi=khoi,
+                    lesson=lesson,
+                    lesson_summary=clean_summary,
+                    comment_kind=comment_kind,
+                )
+            except TypeError:
+                try:
+                    raw_verdicts = fn(
+                        sanitized_payload,
+                        lesson_summary=clean_summary,
+                    )
+                except TypeError:
+                    raw_verdicts = fn(sanitized_payload)
+            if inspect.iscoroutine(raw_verdicts):
+                raw_verdicts = _run_coro_sync(raw_verdicts, timeout_s)
+        elif hasattr(active_reviewer, "review_comments"):
+            fn = active_reviewer.review_comments
+            try:
+                raw_verdicts = fn(
+                    sanitized_payload,
+                    lesson_summary=clean_summary,
+                )
+            except TypeError:
+                raw_verdicts = fn(sanitized_payload)
+            if inspect.iscoroutine(raw_verdicts):
+                raw_verdicts = _run_coro_sync(raw_verdicts, timeout_s)
+
+    if not isinstance(raw_verdicts, Mapping):
+        return {}
+    return {
+        str(k): _normalize_ai_verdict(v)
+        for k, v in raw_verdicts.items()
+        if _normalize_ai_verdict(v)
+    }
+
+
+def _count_meaningful_words(text: str | None) -> tuple[int, int]:
+    """Return (meaningful_word_count, normalized_char_length) after stripping [HS] tokens."""
+    no_hs = re.sub(r"\[hs\]", " ", str(text or ""), flags=re.IGNORECASE).strip()
+    folded = fold_text(no_hs)
+    norm_text = " ".join(folded.split()).strip(" -–—:.,;!?()[]{}\"'")
+    words = re.findall(r"[a-z0-9]+", norm_text)
+    return len(words), len(norm_text)
+
+
+def _has_concrete_learning_signal(body_text: str) -> bool:
+    folded = fold_text(re.sub(r"\[hs\]", " ", str(body_text or ""), flags=re.IGNORECASE))
+    return any(
+        re.search(r"\b" + re.escape(sig) + r"\b", folded) for sig in _CONCRETE_LEARNING_SIGNALS
+    )
+
+
+def _resolve_active_lms_ai_reviewer(ai_reviewer: Any = None) -> Any:
+    """Return the active LmsAiCommentReviewerGateway or None when disabled/isolated."""
+    global _DEFAULT_AI_REVIEWER
+    if ai_reviewer is not None:
+        return ai_reviewer
+    if os.getenv("ZALO_QUALITY_ISOLATED") == "1":
+        return None
+    env_flag = os.getenv("LMS_AI_COMMENT_CHECK", "").strip().lower()
+    if env_flag in {"0", "false", "no", "off"}:
+        return None
+    with contextlib.suppress(Exception):
+        from googleform_autosubmit.config import Config
+
+        if not getattr(Config, "LMS_AI_COMMENT_CHECK", True):
+            return None
+    if not os.getenv("GEMINI_API_KEY", "").strip():
+        return None
+    if _DEFAULT_AI_REVIEWER is None:
+        with contextlib.suppress(Exception):
+            from services.external_gateways import GeminiLmsCommentReviewerGateway
+
+            _DEFAULT_AI_REVIEWER = GeminiLmsCommentReviewerGateway()
+    return _DEFAULT_AI_REVIEWER
 
 
 def _is_valid_checkpoint_student_comment(body_text: str) -> bool:
     folded = fold_text(body_text)
     if not folded or len(folded) < 60:
         return False
-    pillar_hits = sum(
-        1 for p in ("kien thuc", "ky nang", "thai do") if p in folded
-    )
+    pillar_hits = sum(1 for p in ("kien thuc", "ky nang", "thai do") if p in folded)
     return pillar_hits == 3
 
 
 def _regular_comment_review_reasons(body_text: str) -> list[str]:
-    """Check whether a regular session student comment covers all 3 required parts:
-    1. Điểm mạnh (Strengths)
-    2. Điểm cần cải thiện (Areas for improvement)
-    3. Lời khuyên / Giải pháp (Actionable advice)
-    """
-    folded = fold_text(body_text)
-
-    def has_signal(signals: tuple[str, ...]) -> bool:
-        return any(re.search(r"\b" + re.escape(s.strip()) + r"\b", folded) for s in signals)
-
-    reasons = []
-    if len(folded) < 80:
-        reasons.append("nhận xét ngắn")
-    if not has_signal(
-        STRENGTH_SIGNALS
-        + ("nam duoc", "hieu duoc", "biet cach", "biet su dung", "thuc hien tot", "su dung tot")
-    ):
-        reasons.append("chưa rõ điểm mạnh")
-    if not has_signal(
-        IMPROVEMENT_SIGNALS
-        + (
-            "chua nam",
-            "chua hieu",
-            "chua biet",
-            "con gap kho khan",
-            "con sai",
-            "can can than",
-            "can chu dong",
-        )
-    ):
-        reasons.append("chưa rõ điểm cần cải thiện")
-    if not has_signal(
-        ADVICE_SIGNALS
-        + (
-            "hay thu",
-            "hay luyen",
-            "hay on",
-            "can luyen tap",
-            "can on lai",
-            "on lai",
-            "luyen them",
-            "kiem tra lai",
-        )
-    ):
-        reasons.append("chưa rõ lời khuyên/giải pháp")
-    return reasons
+    """Deterministic Tier 1 / fallback check for regular session comments."""
+    if _is_placeholder_or_dot_bypass(body_text) or _is_absence_statement_in_comment(body_text):
+        return []
+    word_count, char_len = _count_meaningful_words(body_text)
+    if word_count >= 25 and char_len >= 80:
+        return []
+    if word_count < 12 or char_len < 45 or not _has_concrete_learning_signal(body_text):
+        return ["nhận xét sơ sài"]
+    return []
 
 
 def _is_valid_regular_student_comment(body_text: str) -> bool:
@@ -550,6 +1458,11 @@ def evaluate_lms_student_comments(
     is_checkpoint: bool,
     lesson: str | int | None = "",
     slot_data: Mapping[str, Any] | None = None,
+    ai_reviewer: Any = None,
+    lesson_summary: str = "",
+    class_code: str = "",
+    khoi: str = "",
+    verdict_cache: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Check only verified attendees; quality uncertainty is a quantified QC note."""
     attendance, attended_entries, attendance_issues = _evaluate_lms_attendance(
@@ -562,6 +1475,7 @@ def evaluate_lms_student_comments(
         "attended_count": attendance["attended_count"],
         "missing_count": 0,
         "shallow_count": 0,
+        "attendance_conflict_count": 0,
         "failed_count": 0,
         "duplicate_count": 0,
         "submitted_count": 0,
@@ -581,19 +1495,24 @@ def evaluate_lms_student_comments(
     attended_count = len(attended_entries)
     missing_count = 0
     shallow_count = 0
+    attendance_conflict_count = 0
     reasons_count: dict[str, int] = {}
     normalized_bodies: list[str] = []
+    gray_zone_items: list[tuple[str, str, int, int]] = []
     slot_has_rubric = is_checkpoint and _has_checkpoint_rubric_in_slot(
         {"studentAttendance": attended_entries}
     )
-    for entry in attended_entries:
+    for idx, entry in enumerate(attended_entries):
         student_obj = entry.get("student")
         full_name = str(student_obj.get("fullName") or "") if isinstance(student_obj, dict) else ""
         body = _strip_comment_header_and_student_name(
             entry.get("comment"), student_full_name=full_name
         )
-        if not body.strip():
+        if _is_placeholder_or_dot_bypass(body):
             missing_count += 1
+            continue
+        if _is_absence_statement_in_comment(body):
+            attendance_conflict_count += 1
             continue
         norm = _normalize_comment_for_dedup(body)
         if norm:
@@ -609,29 +1528,111 @@ def evaluate_lms_student_comments(
             )
             if not is_valid:
                 shallow_count += 1
+                reasons_count["thiếu cấu trúc Checkpoint"] = (
+                    reasons_count.get("thiếu cấu trúc Checkpoint", 0) + 1
+                )
         else:
-            reasons = _regular_comment_review_reasons(body)
-            if reasons:
+            word_count, char_len = _count_meaningful_words(body)
+            if word_count >= 25 and char_len >= 80:
+                continue
+            gray_zone_items.append((f"stu_c_{idx}", body, word_count, char_len))
+
+    if gray_zone_items and not is_checkpoint:
+        active_reviewer = _resolve_active_lms_ai_reviewer(ai_reviewer)
+        known_names = [
+            str(entry.get("student", {}).get("fullName") or "").strip()
+            for entry in (student_attendance or [])
+            if isinstance(entry, Mapping)
+            and isinstance(entry.get("student"), Mapping)
+            and str(entry.get("student", {}).get("fullName") or "").strip()
+        ]
+        resolved_summary = str(
+            lesson_summary
+            or (slot_data.get("summary") if isinstance(slot_data, Mapping) else "")
+            or ""
+        ).strip()
+        cache_key_by_id: dict[str, str] = {}
+        pending_ai_items: list[dict[str, str]] = []
+        for item_id, body_text, _, _ in gray_zone_items:
+            scrubbed_body = _scrub_comment_for_ai(body_text, known_student_names=known_names)
+            c_key = hashlib.sha256(f"SESSION:{scrubbed_body}".encode("utf-8")).hexdigest()
+            cache_key_by_id[item_id] = c_key
+            if verdict_cache is not None and c_key in verdict_cache:
+                continue
+            pending_ai_items.append(
+                {
+                    "id": item_id,
+                    "type": "SESSION_COMMENT",
+                    "text": body_text,
+                }
+            )
+        ai_verdicts: dict[str, str] = {}
+        if pending_ai_items and active_reviewer is not None:
+            ai_verdicts = _invoke_ai_comment_reviewer(
+                active_reviewer,
+                pending_ai_items,
+                class_code=class_code,
+                khoi=khoi,
+                lesson=lesson,
+                lesson_summary=resolved_summary,
+                comment_kind="SESSION",
+                known_student_names=known_names,
+            )
+            if verdict_cache is not None and not isinstance(
+                active_reviewer, _BatchRecordingReviewer
+            ):
+                for p_item in pending_ai_items:
+                    p_id = p_item["id"]
+                    verdict_cache[cache_key_by_id[p_id]] = ai_verdicts.get(p_id, "")
+        for item_id, body_text, word_count, char_len in gray_zone_items:
+            c_key = cache_key_by_id[item_id]
+            verdict = ai_verdicts.get(item_id) or (
+                verdict_cache.get(c_key, "") if verdict_cache is not None else ""
+            )
+            if verdict == "VALID_CONCISE":
+                continue
+            if verdict == "ATTENDANCE_CONFLICT":
+                attendance_conflict_count += 1
+                continue
+            if verdict in {"SHALLOW_GENERIC", "PLACEHOLDER_BYPASS"}:
                 shallow_count += 1
-                for reason in reasons:
-                    reasons_count[reason] = reasons_count.get(reason, 0) + 1
+                reasons_count["nhận xét sơ sài"] = reasons_count.get("nhận xét sơ sài", 0) + 1
+                continue
+            # Deterministic fallback when AI is disabled or did not return a verdict
+            if word_count < 12 or char_len < 45 or not _has_concrete_learning_signal(body_text):
+                shallow_count += 1
+                reasons_count["nhận xét sơ sài"] = reasons_count.get("nhận xét sơ sài", 0) + 1
 
     issues: list[Any] = []
-    if missing_count and (not is_checkpoint or missing_count == attended_count):
-        label = "HS buổi Checkpoint" if is_checkpoint else "học viên"
-        prefix = "Chưa nhận xét" if missing_count == attended_count else "Thiếu nhận xét"
-        issues.append(f"[LMS] {prefix} {label} ({missing_count}/{attended_count} HS)")
-    if is_checkpoint and 0 < missing_count + shallow_count and missing_count < attended_count:
-        issues.append("[LMS] Nhận xét Checkpoint chưa đủ cấu trúc năng lực")
-    elif shallow_count and not is_checkpoint:
-        submitted_count = attended_count - missing_count
-        details = ", ".join(
-            f"{reason}: {count}/{submitted_count}" for reason, count in reasons_count.items()
-        )
+    if missing_count > 0:
         issues.append(
             make_structured_issue(
-                "LMS_COMMENT_REVIEW",
-                f"[LMS] Nhận xét cần xem lại ({shallow_count}/{submitted_count} nhận xét - {details})",
+                ISSUE_CODE_LMS_QUALITY_FAIL,
+                f"[LMS] Chưa nhận xét học viên ({missing_count}/{attended_count} HS)",
+                severity=SEVERITY_FAIL,
+            )
+        )
+    if attendance_conflict_count > 0:
+        issues.append(
+            make_structured_issue(
+                ISSUE_CODE_LMS_ATTENDANCE_CONFLICT_NOTE,
+                f"[LMS] Lỗi điểm danh: tích Đi học/Đến muộn nhưng nhận xét ghi học viên nghỉ ({attendance_conflict_count} HS)",
+                severity=SEVERITY_NOTE,
+            )
+        )
+    if is_checkpoint and shallow_count > 0:
+        issues.append(
+            make_structured_issue(
+                ISSUE_CODE_LMS_COMMENT_NOTE,
+                "[LMS] Nhận xét Checkpoint chưa đủ cấu trúc năng lực",
+                severity=SEVERITY_NOTE,
+            )
+        )
+    elif shallow_count > 0 and not is_checkpoint:
+        issues.append(
+            make_structured_issue(
+                ISSUE_CODE_LMS_COMMENT_NOTE,
+                f"[LMS] Nhận xét sơ sài ({shallow_count}/{attended_count} HS)",
                 severity=SEVERITY_NOTE,
             )
         )
@@ -641,15 +1642,19 @@ def evaluate_lms_student_comments(
             counts_by_body[body] = counts_by_body.get(body, 0) + 1
     return {
         **base,
-        "status": "MISSING" if missing_count else ("REVIEW" if shallow_count else "COMPLETE"),
+        "status": "MISSING"
+        if missing_count
+        else ("REVIEW" if (shallow_count or attendance_conflict_count) else "COMPLETE"),
         "missing_count": missing_count,
         "submitted_count": attended_count - missing_count,
         "shallow_count": shallow_count,
+        "attendance_conflict_count": attendance_conflict_count,
         "failed_count": missing_count + shallow_count,
         "review_reasons": reasons_count,
         "duplicate_count": sum(count for count in counts_by_body.values() if count >= 2),
         "issues": issues,
     }
+
 
 SPCK_TITLE_PLACEHOLDER_PATTERNS = (
     r"^spck(?:\s*(?:buoi|b|lesson|slot)?\s*\d+)?$",
@@ -664,6 +1669,15 @@ SPCK_TITLE_PLACEHOLDER_PATTERNS = (
     r"^demo(?:\s*\d+)?$",
     r"^untitled$",
     r"^n/?a$",
+)
+
+SPCK_EMPTY_TITLE_PATTERNS = (
+    r"^test(?:\s*\d+)?$",
+    r"^demo(?:\s*\d+)?$",
+    r"^untitled$",
+    r"^n/?a$",
+    r"^none$",
+    r"^null$",
 )
 
 SPCK_COMMENT_PLACEHOLDER_PATTERNS = (
@@ -769,6 +1783,23 @@ _SLIDE_NAME_KEYWORDS = (
 )
 
 
+def _is_spck_title_empty_or_placeholder(work: Mapping[str, Any]) -> bool:
+    """Return True when StudentWork.title is empty, dot/punctuation-only, or a trivial placeholder."""
+    raw_title = _strip_html(str(work.get("title") or "")).strip()
+    if not raw_title:
+        return True
+    no_hs = re.sub(r"\[hs\]", " ", raw_title, flags=re.IGNORECASE).strip()
+    folded_full = fold_text(raw_title).strip(" -–—:.,;!?()[]{}\"'/_*")
+    if not folded_full or len(re.findall(r"[a-z0-9]", folded_full)) < 2:
+        return True
+    folded_no_hs = fold_text(no_hs).strip(" -–—:.,;!?()[]{}\"'/_*")
+    if folded_no_hs and any(re.fullmatch(pat, folded_no_hs) for pat in SPCK_EMPTY_TITLE_PATTERNS):
+        return True
+    if any(re.fullmatch(pat, folded_full) for pat in SPCK_EMPTY_TITLE_PATTERNS):
+        return True
+    return False
+
+
 def _has_spck_student_info_in_title(
     work: Mapping[str, Any],
     *,
@@ -799,11 +1830,7 @@ def _has_spck_student_info_in_title(
             if len(tail_two) >= 4 and tail_two in folded_title:
                 return True
         return False
-    parts = [
-        p.strip()
-        for p in re.split(r"\s*(?:[-–—|:]|_)\s*", raw_title)
-        if p.strip()
-    ]
+    parts = [p.strip() for p in re.split(r"\s*(?:[-–—|:]|_)\s*", raw_title) if p.strip()]
     if len(parts) >= 2:
         non_generic_parts = 0
         for part in parts:
@@ -818,33 +1845,33 @@ def _has_spck_student_info_in_title(
     return False
 
 
-def _has_spck_thumbnail_and_images(work: Mapping[str, Any]) -> bool:
-    """Return True when StudentWork has both a thumbnail URL and at least 1 screenshot in imageUrl."""
+def _has_spck_thumbnail(work: Mapping[str, Any]) -> bool:
     thumb = str(work.get("thumbnail") or "").strip()
-    if len(thumb) < 5:
-        return False
+    return len(thumb) >= 5
+
+
+def _has_spck_capture_images(work: Mapping[str, Any]) -> bool:
     raw_images = work.get("imageUrl")
     if not isinstance(raw_images, Sequence) or isinstance(raw_images, (str, bytes)):
         return False
     valid_images = [
-        str(u).strip()
-        for u in raw_images
-        if isinstance(u, str) and len(u.strip()) >= 5
+        str(u).strip() for u in raw_images if isinstance(u, str) and len(u.strip()) >= 5
     ]
     return len(valid_images) >= 1
+
+
+def _has_spck_thumbnail_and_images(work: Mapping[str, Any]) -> bool:
+    """Return True when StudentWork has both a thumbnail URL and at least 1 screenshot in imageUrl."""
+    return _has_spck_thumbnail(work) and _has_spck_capture_images(work)
 
 
 def _has_spck_attachment_file(work: Mapping[str, Any]) -> bool:
     """Return True when StudentWork has at least 1 attached file URL in attachmentUrls."""
     raw_attachments = work.get("attachmentUrls")
-    if not isinstance(raw_attachments, Sequence) or isinstance(
-        raw_attachments, (str, bytes)
-    ):
+    if not isinstance(raw_attachments, Sequence) or isinstance(raw_attachments, (str, bytes)):
         return False
     valid_files = [
-        str(u).strip()
-        for u in raw_attachments
-        if isinstance(u, str) and len(u.strip()) >= 5
+        str(u).strip() for u in raw_attachments if isinstance(u, str) and len(u.strip()) >= 5
     ]
     return len(valid_files) >= 1
 
@@ -854,36 +1881,27 @@ def _is_substantive_spck_comment(
     *,
     student_full_name: str = "",
 ) -> bool:
-    """Return True when a teacher's SPCK comment is substantive and product-specific (not 1-2 words or placeholder)."""
+    """Deterministic Tier 1 / fallback check for SPCK product comments."""
     body = _strip_comment_header_and_student_name(
         raw_comment,
         student_full_name=student_full_name,
     )
-    if not body:
+    if _is_placeholder_or_dot_bypass(body):
         return False
     body_no_hs = re.sub(r"\[hs\]", " ", body, flags=re.IGNORECASE).strip()
     folded = fold_text(body_no_hs).strip(" -–—:.,;!?()[]{}\"'")
-    if not folded or len(folded) < MIN_SPCK_COMMENT_CHARS:
+    if not folded:
         return False
     for pattern in SPCK_COMMENT_PLACEHOLDER_PATTERNS:
         if re.fullmatch(pattern, folded):
             return False
-    words = [w for w in re.findall(r"[a-z0-9]+", folded) if len(w) >= 2]
-    if len(words) < MIN_SPCK_COMMENT_WORDS or len(set(words)) < 6:
-        return False
-    if _is_valid_regular_student_comment(body) or _is_valid_checkpoint_student_comment(
-        body
-    ):
+    word_count, _ = _count_meaningful_words(body_no_hs)
+    if word_count >= 15:
         return True
-    clauses = [
-        seg.strip()
-        for seg in re.split(r"(?:[\n•\-*]+|[.!?;:]+(?:\s+|$))", body_no_hs)
-        if len(seg.strip()) >= 8
-    ]
-    if len(clauses) < 2:
+    if word_count < 8:
         return False
     domain_hits = sum(1 for kw in SPCK_COMMENT_DOMAIN_SIGNALS if kw in folded)
-    return domain_hits >= 2
+    return domain_hits >= 1
 
 
 def _has_spck_youtube_link(work: Mapping[str, Any]) -> bool:
@@ -932,9 +1950,7 @@ def _has_spck_slide_link_or_file(work: Mapping[str, Any]) -> bool:
                 return True
 
     raw_attachments = work.get("attachmentUrls")
-    if isinstance(raw_attachments, Sequence) and not isinstance(
-        raw_attachments, (str, bytes)
-    ):
+    if isinstance(raw_attachments, Sequence) and not isinstance(raw_attachments, (str, bytes)):
         for att in raw_attachments:
             if not isinstance(att, str):
                 continue
@@ -1012,8 +2028,10 @@ def evaluate_lms_spck_quality(
     class_code: str = "",
     khoi: str = "",
     lesson: str | int | None = "",
+    ai_reviewer: Any = None,
+    verdict_cache: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Evaluate final project (SPCK) submissions on LMS for Lessons 12, 13, and 14 (DEC-042)."""
+    """Evaluate final project (SPCK) submissions on LMS for Lessons 12, 13, and 14 (DEC-042 & Phase 6.5)."""
     lesson_num = _parse_lesson_number(lesson)
     is_robotics = _is_robotics_class(class_code, khoi)
     spck_required = lesson_num in SPCK_REQUIRED_LESSONS and not _is_spck_exempt_course(class_code)
@@ -1025,7 +2043,12 @@ def evaluate_lms_spck_quality(
         "exempt_count": 0,
         "submitted_count": 0,
         "missing_submission_count": 0,
+        "no_title_count": 0,
+        "missing_student_name_in_title_count": 0,
         "missing_student_info_count": 0,
+        "missing_both_image_count": 0,
+        "missing_capture_image_count": 0,
+        "missing_thumb_image_count": 0,
         "missing_image_count": 0,
         "missing_attachment_count": 0,
         "missing_comment_count": 0,
@@ -1183,69 +2206,173 @@ def evaluate_lms_spck_quality(
             )
         )
 
-    missing_student_info_count = 0
-    missing_image_count = 0
+    no_title_count = 0
+    missing_student_name_in_title = 0
+    missing_both_img = 0
+    missing_capture_img = 0
+    missing_thumb_img = 0
     missing_attachment_count = 0
     missing_comment_count = 0
     shallow_comment_count = 0
     missing_youtube_count = 0
     missing_slide_count = 0
+    spck_gray_zone_items: list[tuple[str, str, str, int]] = []
 
-    for work_item, stu_name in inspected_works:
-        if not _has_spck_student_info_in_title(work_item, student_full_name=stu_name):
-            missing_student_info_count += 1
-        if not _has_spck_thumbnail_and_images(work_item):
-            missing_image_count += 1
+    for idx, (work_item, stu_name) in enumerate(inspected_works):
+        if _is_spck_title_empty_or_placeholder(work_item):
+            no_title_count += 1
+        elif not _has_spck_student_info_in_title(work_item, student_full_name=stu_name):
+            missing_student_name_in_title += 1
+
+        has_thumb = _has_spck_thumbnail(work_item)
+        has_capture = _has_spck_capture_images(work_item)
+        if not has_thumb and not has_capture:
+            missing_both_img += 1
+        elif has_thumb and not has_capture:
+            missing_capture_img += 1
+        elif has_capture and not has_thumb:
+            missing_thumb_img += 1
+
         if not _has_spck_attachment_file(work_item):
             missing_attachment_count += 1
+
         raw_c = work_item.get("comment")
+        raw_c_str = raw_c if isinstance(raw_c, str) else ""
         clean_c = _strip_comment_header_and_student_name(
-            raw_c if isinstance(raw_c, str) else "",
+            raw_c_str,
             student_full_name=stu_name,
         )
-        if not clean_c.strip():
+        if _is_placeholder_or_dot_bypass(clean_c):
             missing_comment_count += 1
-        elif not _is_substantive_spck_comment(
-            raw_c if isinstance(raw_c, str) else "",
-            student_full_name=stu_name,
-        ):
-            shallow_comment_count += 1
+        else:
+            word_count, _ = _count_meaningful_words(clean_c)
+            if word_count < 15:
+                spck_gray_zone_items.append((f"spck_c_{idx}", raw_c_str, stu_name, word_count))
+
         if lesson_num in SPCK_SLIDE_YOUTUBE_LESSONS:
             if not _has_spck_youtube_link(work_item):
                 missing_youtube_count += 1
-            if not _has_spck_slide_link_or_file(work_item):
+            if not is_robotics and not _has_spck_slide_link_or_file(work_item):
                 missing_slide_count += 1
 
-    if missing_student_info_count > 0:
+    if spck_gray_zone_items:
+        active_reviewer = _resolve_active_lms_ai_reviewer(ai_reviewer)
+        spck_known_names = [
+            name
+            for name in (
+                *attended_by_key.values(),
+                *(stu_name for _, stu_name in inspected_works),
+            )
+            if isinstance(name, str) and name.strip()
+        ]
+        spck_cache_key_by_id: dict[str, str] = {}
+        pending_spck_items: list[dict[str, str]] = []
+        for item_id, raw_c_str, _, _ in spck_gray_zone_items:
+            scrubbed_spck = _scrub_comment_for_ai(raw_c_str, known_student_names=spck_known_names)
+            c_key = hashlib.sha256(f"SPCK:{scrubbed_spck}".encode("utf-8")).hexdigest()
+            spck_cache_key_by_id[item_id] = c_key
+            if verdict_cache is not None and c_key in verdict_cache:
+                continue
+            pending_spck_items.append(
+                {
+                    "id": item_id,
+                    "type": "SPCK_COMMENT",
+                    "text": raw_c_str,
+                }
+            )
+        ai_verdicts: dict[str, str] = {}
+        if pending_spck_items and active_reviewer is not None:
+            ai_verdicts = _invoke_ai_comment_reviewer(
+                active_reviewer,
+                pending_spck_items,
+                class_code=class_code,
+                khoi=khoi,
+                lesson=lesson,
+                lesson_summary=str(slot_data.get("summary") or ""),
+                comment_kind="SPCK",
+                known_student_names=spck_known_names,
+            )
+            if verdict_cache is not None and not isinstance(
+                active_reviewer, _BatchRecordingReviewer
+            ):
+                for p_item in pending_spck_items:
+                    p_id = p_item["id"]
+                    verdict_cache[spck_cache_key_by_id[p_id]] = ai_verdicts.get(p_id, "")
+        for item_id, raw_c_str, stu_name, _word_count in spck_gray_zone_items:
+            c_key = spck_cache_key_by_id[item_id]
+            verdict = ai_verdicts.get(item_id) or (
+                verdict_cache.get(c_key, "") if verdict_cache is not None else ""
+            )
+            if verdict == "VALID_CONCISE":
+                continue
+            if verdict in {"SHALLOW_GENERIC", "PLACEHOLDER_BYPASS", "ATTENDANCE_CONFLICT"}:
+                shallow_comment_count += 1
+                continue
+            if not _is_substantive_spck_comment(raw_c_str, student_full_name=stu_name):
+                shallow_comment_count += 1
+
+    missing_student_info_count = no_title_count + missing_student_name_in_title
+    missing_image_count = missing_both_img + missing_capture_img + missing_thumb_img
+
+    if no_title_count > 0:
         issues.append(
             make_structured_issue(
                 ISSUE_CODE_LMS_SPCK_NOTE,
-                f"[LMS] SPCK thiếu thông tin học viên ({missing_student_info_count}/{submitted_count} HS)",
+                f"[LMS] SPCK chưa đặt tên sản phẩm ({no_title_count}/{submitted_count} HS)",
                 severity=SEVERITY_NOTE,
             )
         )
-    if missing_image_count > 0:
+    if missing_student_name_in_title > 0:
         issues.append(
             make_structured_issue(
                 ISSUE_CODE_LMS_SPCK_NOTE,
-                f"[LMS] SPCK thiếu ảnh thumbnail/ảnh chụp ({missing_image_count}/{submitted_count} HS)",
+                f"[LMS] Tiêu đề SPCK chưa ghi kèm tên học viên ({missing_student_name_in_title}/{submitted_count} HS)",
+                severity=SEVERITY_NOTE,
+            )
+        )
+    if missing_both_img > 0:
+        issues.append(
+            make_structured_issue(
+                ISSUE_CODE_LMS_SPCK_NOTE,
+                f"[LMS] SPCK chưa có ảnh sản phẩm ({missing_both_img}/{submitted_count} HS)",
+                severity=SEVERITY_NOTE,
+            )
+        )
+    if missing_capture_img > 0:
+        issues.append(
+            make_structured_issue(
+                ISSUE_CODE_LMS_SPCK_NOTE,
+                f"[LMS] SPCK thiếu ảnh chụp bổ sung ({missing_capture_img}/{submitted_count} HS)",
+                severity=SEVERITY_NOTE,
+            )
+        )
+    if missing_thumb_img > 0:
+        issues.append(
+            make_structured_issue(
+                ISSUE_CODE_LMS_SPCK_NOTE,
+                f"[LMS] SPCK thiếu ảnh đại diện ({missing_thumb_img}/{submitted_count} HS)",
                 severity=SEVERITY_NOTE,
             )
         )
     if missing_attachment_count > 0:
+        attachment_msg = (
+            f"[LMS] SPCK chưa có file code đính kèm ({missing_attachment_count}/{submitted_count} HS)"
+            if is_robotics
+            else f"[LMS] SPCK thiếu file đính kèm ({missing_attachment_count}/{submitted_count} HS)"
+        )
         issues.append(
             make_structured_issue(
                 ISSUE_CODE_LMS_SPCK_NOTE,
-                f"[LMS] SPCK thiếu file đính kèm ({missing_attachment_count}/{submitted_count} HS)",
+                attachment_msg,
                 severity=SEVERITY_NOTE,
             )
         )
     if missing_comment_count > 0:
         issues.append(
             make_structured_issue(
-                ISSUE_CODE_LMS_SPCK_NOTE,
+                ISSUE_CODE_LMS_SPCK_COMMENT_MISSING,
                 f"[LMS] SPCK chưa có nhận xét ({missing_comment_count}/{submitted_count} HS)",
-                severity=SEVERITY_NOTE,
+                severity=SEVERITY_FAIL,
             )
         )
     if shallow_comment_count > 0:
@@ -1261,11 +2388,11 @@ def evaluate_lms_spck_quality(
             issues.append(
                 make_structured_issue(
                     ISSUE_CODE_LMS_SPCK_NOTE,
-                    f"[LMS] SPCK Buổi 14 thiếu link YouTube ({missing_youtube_count}/{submitted_count} HS)",
+                    f"[LMS] SPCK Buổi 14 thiếu link video YouTube ({missing_youtube_count}/{submitted_count} HS)",
                     severity=SEVERITY_NOTE,
                 )
             )
-        if missing_slide_count > 0:
+        if not is_robotics and missing_slide_count > 0:
             issues.append(
                 make_structured_issue(
                     ISSUE_CODE_LMS_SPCK_NOTE,
@@ -1282,7 +2409,12 @@ def evaluate_lms_spck_quality(
         "attended_count": attended_count,
         "submitted_count": submitted_count,
         "missing_submission_count": missing_submission_count,
+        "no_title_count": no_title_count,
+        "missing_student_name_in_title_count": missing_student_name_in_title,
         "missing_student_info_count": missing_student_info_count,
+        "missing_both_image_count": missing_both_img,
+        "missing_capture_image_count": missing_capture_img,
+        "missing_thumb_image_count": missing_thumb_img,
         "missing_image_count": missing_image_count,
         "missing_attachment_count": missing_attachment_count,
         "missing_comment_count": missing_comment_count,
@@ -1309,6 +2441,7 @@ def _lms_quality_metadata(
             "status": spck["status"],
             "submitted_count": spck.get("submitted_count", 0),
             "missing_count": spck.get("missing_submission_count", 0),
+            "missing_comment_count": spck.get("missing_comment_count", 0),
             "exempt_count": spck.get("exempt_count", 0),
             "attended_count": attendance.get("attended_count", 0),
         },
@@ -1321,6 +2454,8 @@ def evaluate_lms_slot_quality(
     class_code: str,
     khoi: str = "",
     lesson: str | int | None = "",
+    ai_reviewer: Any = None,
+    verdict_cache: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Evaluate one session with the same verified attendance for comments and SPCK."""
     lesson_14_flag = is_lesson_14(lesson)
@@ -1350,7 +2485,8 @@ def evaluate_lms_slot_quality(
                 {"status": "EXEMPT" if lesson_14_flag else "UNVERIFIED"},
                 {
                     "status": "UNVERIFIED"
-                    if _parse_lesson_number(lesson) in SPCK_REQUIRED_LESSONS and not _is_spck_exempt_course(class_code)
+                    if _parse_lesson_number(lesson) in SPCK_REQUIRED_LESSONS
+                    and not _is_spck_exempt_course(class_code)
                     else "NOT_REQUIRED"
                 },
             ),
@@ -1362,14 +2498,29 @@ def evaluate_lms_slot_quality(
             "failed_comment_count": 0,
             "issues": [make_structured_issue(ISSUE_CODE_LMS_MANUAL_CHECK, unavailable_issue)],
         }
-    comments_eval = evaluate_lms_student_comments(
-        data.get("studentAttendance"), is_checkpoint=checkpoint, lesson=lesson, slot_data=data
-    )
-    spck_eval = evaluate_lms_spck_quality(data, class_code=class_code, khoi=khoi, lesson=lesson)
     summary_eval = (
         {"has_valid_summary": True, "summary_clean": "", "issue": ""}
         if lesson_14_flag
         else evaluate_lms_slot_summary(data.get("summary"))
+    )
+    comments_eval = evaluate_lms_student_comments(
+        data.get("studentAttendance"),
+        is_checkpoint=checkpoint,
+        lesson=lesson,
+        slot_data=data,
+        ai_reviewer=ai_reviewer,
+        lesson_summary=str(summary_eval.get("summary_clean") or ""),
+        class_code=class_code,
+        khoi=khoi,
+        verdict_cache=verdict_cache,
+    )
+    spck_eval = evaluate_lms_spck_quality(
+        data,
+        class_code=class_code,
+        khoi=khoi,
+        lesson=lesson,
+        ai_reviewer=ai_reviewer,
+        verdict_cache=verdict_cache,
     )
     issues = [summary_eval["issue"]] if summary_eval["issue"] else []
     for item in [*comments_eval["issues"], *spck_eval["issues"]]:
@@ -1385,6 +2536,7 @@ def evaluate_lms_slot_quality(
         "failed_comment_count": int(comments_eval["failed_count"]),
         "issues": issues,
     }
+
 
 _NEXT_LESSON_SECTION_MARKERS = (
     "buoi hoc ke tiep",
@@ -1474,9 +2626,7 @@ def evaluate_zalo_content_issues(
         norm = fold_text(re.sub(r"^\[[^\]]+\]\s*", "", cleaned))
         if norm and norm not in seen:
             seen.add(norm)
-            issues.append(
-                StructuredIssueStr(cleaned, code=code, severity=severity)
-            )
+            issues.append(StructuredIssueStr(cleaned, code=code, severity=severity))
 
     raw_st = item.get("scan_target")
     st: dict[str, Any] = raw_st if isinstance(raw_st, dict) else {}
@@ -1503,21 +2653,13 @@ def evaluate_zalo_content_issues(
             break
     raw_tm = matched_cand.get("target_match")
     tm: dict[str, Any] = (
-        raw_tm
-        if isinstance(raw_tm, dict) and raw_tm.get("matches") is True
-        else {}
+        raw_tm if isinstance(raw_tm, dict) and raw_tm.get("matches") is True else {}
     )
 
-    target_match_decision = str(
-        ctx.get("target_match_decision")
-        or tm.get("decision")
-        or ""
-    ).strip().upper()
-    target_match_note = str(
-        ctx.get("target_match_note")
-        or tm.get("note")
-        or ""
-    ).strip()
+    target_match_decision = (
+        str(ctx.get("target_match_decision") or tm.get("decision") or "").strip().upper()
+    )
+    target_match_note = str(ctx.get("target_match_note") or tm.get("note") or "").strip()
     if target_match_note:
         note_code = ""
         note_sev = ""
@@ -1543,10 +2685,7 @@ def evaluate_zalo_content_issues(
         "sai buoi" in folded_match_note
         or "sai ngay/buoi" in folded_match_note
         or "ngay/buoi ghi trong noi dung khong khop" in folded_match_note
-        or (
-            content_lesson is not None
-            and f"bai so {content_lesson}" in folded_match_note
-        )
+        or (content_lesson is not None and f"bai so {content_lesson}" in folded_match_note)
     )
     if (
         expected_lesson is not None
@@ -1565,9 +2704,7 @@ def evaluate_zalo_content_issues(
         or extract_report_lesson_title(item.get("raw_content"))
         or ""
     ).strip()
-    clean_lms_summary = str(
-        lms_summary_text or item.get("lms_lesson_summary") or ""
-    ).strip()
+    clean_lms_summary = str(lms_summary_text or item.get("lms_lesson_summary") or "").strip()
 
     if reported_title and clean_lms_summary:
         summary_check = evaluate_lms_slot_summary(clean_lms_summary)
@@ -1611,7 +2748,7 @@ def _is_usable_lms_token(
                 exp_sec = exp_num / 1000.0 if exp_num > 1e11 else exp_num
                 if exp_sec <= now_sec + min_ttl_seconds:
                     return False
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             pass
     if clean.startswith("eyJ") and clean.count(".") == 2:
         parts = clean.split(".")
@@ -1630,7 +2767,7 @@ def _is_usable_lms_token(
         if raw_exp is not None and not isinstance(raw_exp, bool):
             try:
                 exp_val = float(raw_exp)
-            except (TypeError, ValueError):
+            except TypeError, ValueError:
                 return False
             if not math.isfinite(exp_val) or exp_val <= 0:
                 return False
@@ -1704,11 +2841,7 @@ async def fetch_lms_class_slots_via_page(
                                         if isinstance(sts, dict)
                                         else parsed_ls.get("expirationTime")
                                     )
-                                    acc = (
-                                        sts.get("accessToken")
-                                        if isinstance(sts, dict)
-                                        else None
-                                    )
+                                    acc = sts.get("accessToken") if isinstance(sts, dict) else None
                                     if isinstance(acc, str) and _is_usable_lms_token(
                                         acc, expiration_time=exp_time
                                     ):
@@ -1768,14 +2901,8 @@ async def fetch_lms_class_slots_via_page(
                 post_data = str(getattr(req, "post_data", "") or "")
                 if post_data.startswith("{"):
                     body_json = json.loads(post_data)
-                    req_vars = (
-                        body_json.get("variables")
-                        if isinstance(body_json, dict)
-                        else None
-                    )
-                    if isinstance(req_vars, dict) and isinstance(
-                        req_vars.get("centres"), list
-                    ):
+                    req_vars = body_json.get("variables") if isinstance(body_json, dict) else None
+                    if isinstance(req_vars, dict) and isinstance(req_vars.get("centres"), list):
                         for cid in req_vars["centres"]:
                             s_cid = str(cid or "").strip()
                             if s_cid and s_cid not in resolved_centres:
@@ -2216,6 +3343,70 @@ async def fetch_lms_class_slots_via_page(
             }
             return allGroups;
         };
+        const buildGivenTokens = (namesList) => {
+            const s = new Set();
+            for (const fullName of namesList) {
+                if (!fullName || fullName.length < 3) continue;
+                const ft = foldVi(fullName).split(' ').filter(Boolean);
+                if (ft.length >= 2) {
+                    const lastTok = ft[ft.length - 1];
+                    if (lastTok && lastTok.length >= 2) s.add(lastTok);
+                }
+            }
+            return s;
+        };
+        const PROTECTED_GIVEN_BIGRAMS = new Set([
+            'thai do', 'thai duong', 'hoan thanh', 'hoan thien', 'du an', 'san pham',
+            'bai tap', 'bai hoc', 'buoi hoc', 'vong lap', 'lap trinh', 'lap rap',
+            'kien thuc', 'ky nang', 'cuoi khoa', 'thuyet trinh', 'tu duy', 'chu dong',
+            'tich cuc', 'nam vung', 'nam bai', 'nam duoc', 'hieu bai', 'phat bieu',
+            'phat trien', 'thuc hanh', 'dieu kien', 'thuat toan', 'danh sach',
+            'doi tuong', 'nhan vat', 'ung dung', 'thiet ke', 'giao dien', 'chuc nang',
+            'tinh nang', 'thao tac', 'diem manh', 'cai thien', 'bo sung', 'sang tao',
+            'chi tiet'
+        ]);
+        const SINGLE_TECH_STOPWORDS = new Set([
+            'python', 'scratch', 'robot', 'robotics', 'code', 'coding',
+            'slide', 'video', 'game', 'web', 'app', 'html', 'css', 'hs'
+        ]);
+        const scrubHonorificGivenNames = (str, givenTokensSet) => {
+            if (!str || !givenTokensSet || givenTokensSet.size === 0) return str;
+            let out = str.replace(
+                /(\\b(?:bạn|ban|bé|be|em|con|hv|học\\s+viên|hoc\\s+vien)\\s+)([\\p{L}\\p{M}]+)(?![\\p{L}\\p{M}])/giu,
+                (full, honPrefix, word) => givenTokensSet.has(foldVi(word)) ? honPrefix + '[HS]' : full
+            );
+            const spans = [];
+            const wordRe = /[\\p{L}\\p{M}]+/gu;
+            let m;
+            while ((m = wordRe.exec(out)) !== null) {
+                spans.push({
+                    start: m.index,
+                    end: m.index + m[0].length,
+                    raw: m[0],
+                    folded: foldVi(m[0]),
+                });
+            }
+            if (spans.length === 0) return out;
+            let rebuilt = '';
+            let cursor = 0;
+            for (let i = 0; i < spans.length; i++) {
+                const sp = spans[i];
+                if (!givenTokensSet.has(sp.folded) || SINGLE_TECH_STOPWORDS.has(sp.folded)) continue;
+                if (sp.start > 0 && sp.end < out.length && out[sp.start - 1] === '[' && out[sp.end] === ']') continue;
+                const prevSpaceOnly = i > 0 && /^\\s+$/.test(out.slice(spans[i - 1].end, sp.start));
+                const nextSpaceOnly = i + 1 < spans.length && /^\\s+$/.test(out.slice(sp.end, spans[i + 1].start));
+                if (
+                    (prevSpaceOnly && PROTECTED_GIVEN_BIGRAMS.has(spans[i - 1].folded + ' ' + sp.folded)) ||
+                    (nextSpaceOnly && PROTECTED_GIVEN_BIGRAMS.has(sp.folded + ' ' + spans[i + 1].folded))
+                ) {
+                    continue;
+                }
+                rebuilt += out.slice(cursor, sp.start) + '[HS]';
+                cursor = sp.end;
+            }
+            if (cursor === 0) return out;
+            return rebuilt + out.slice(cursor);
+        };
         const scrubHostAuthority = (rawAuth, nameGroups) => {
             const atIdx = rawAuth.lastIndexOf('@');
             const hostPort = atIdx >= 0 ? rawAuth.slice(atIdx + 1) : rawAuth;
@@ -2320,7 +3511,7 @@ async def fetch_lms_class_slots_via_page(
             return finalUrl;
         };
         const URL_IN_TEXT_RE = /(?:https?:\\/\\/|\\/\\/(?:(?:[\\p{L}\\p{M}\\p{N}_%-]+\\.)+(?:xn--[^\\s/?#&='"<>.:]*|[a-z]{2,24})(?::\\d+)?|localhost(?::\\d+)?|xn--[^\\s/?#&='"<>.:]*|[a-z0-9._:-]+\\/))[^\\s"'<>]*|(?:[\\p{L}\\p{M}\\p{N}_-]+\\.)*xn--[^\\s/?#&='"<>.:]*(?:\\.(?:xn--[^\\s/?#&='"<>.:]*|[\\p{L}\\p{M}\\p{N}_-]+))*(?::\\d+)?(?:[/?#][^\\s"'<>]*)?|(?:[\\p{L}\\p{M}\\p{N}_%-]+\\.)+(?:xn--[^\\s/?#&='"<>.:]*|[a-z]{2,24})(?::\\d+)?[/?#][^\\s"'<>]*|(?:[\\p{L}\\p{M}\\p{N}_%-]+\\.){2,}(?:xn--[^\\s/?#&='"<>.:]*|[a-z]{2,24})(?::\\d+)?/giu;
-        const scrubFreeTextChunk = (chunk, nameGroups) => {
+        const scrubFreeTextChunk = (chunk, nameGroups, givenTokensSet) => {
             if (!chunk) return '';
             let outChunk = chunk;
             if (/%[0-9a-f]{2}/i.test(outChunk)) {
@@ -2333,6 +3524,7 @@ async def fetch_lms_class_slots_via_page(
                         tsc = replaceTokenGroup(tsc, grp, '[HS]', true);
                         if (grp.length === 1) tsc = replaceTokenGroup(tsc, grp, '[HS]', false);
                     }
+                    tsc = scrubHonorificGivenNames(tsc, givenTokensSet);
                     if (tsc !== td.text) return td.unsafe ? '[HS]' : tsc;
                     return tok;
                 });
@@ -2340,6 +3532,7 @@ async def fetch_lms_class_slots_via_page(
                 if (d.text) {
                     let sc = d.text;
                     for (const grp of nameGroups) sc = replaceTokenGroup(sc, grp, '[HS]', false);
+                    sc = scrubHonorificGivenNames(sc, givenTokensSet);
                     if (sc !== d.text) {
                         outChunk = d.unsafe
                             ? sc.replace(/[^\\s"'<>]*\\[HS\\][^\\s"'<>]*%[89a-f][0-9a-f][^\\s"'<>]*/gi, '[HS]')
@@ -2350,19 +3543,21 @@ async def fetch_lms_class_slots_via_page(
             for (const grp of nameGroups) {
                 outChunk = replaceTokenGroup(outChunk, grp, '[HS]', false);
             }
+            outChunk = scrubHonorificGivenNames(outChunk, givenTokensSet);
             return outChunk;
         };
         const scrubStudentNames = (rawText, namesList) => {
             const text = String(rawText || '');
             if (!text) return '';
             const nameGroups = buildNameGroups(namesList);
+            const givenTokensSet = buildGivenTokens(namesList);
             let res = '';
             let lastIdx = 0;
             URL_IN_TEXT_RE.lastIndex = 0;
             let mUrl;
             while ((mUrl = URL_IN_TEXT_RE.exec(text)) !== null) {
                 if (mUrl.index > lastIdx) {
-                    res += scrubFreeTextChunk(text.slice(lastIdx, mUrl.index), nameGroups);
+                    res += scrubFreeTextChunk(text.slice(lastIdx, mUrl.index), nameGroups, givenTokensSet);
                 }
                 const matchedUrl = mUrl[0];
                 const trailMatch = matchedUrl.match(/[.,;:!?)\\]}]+$/);
@@ -2371,7 +3566,7 @@ async def fetch_lms_class_slots_via_page(
                 const hasSchemeOrPunyPrefix = /^(?:https?:\\/\\/|\\/\\/|xn--)/i.test(coreUrl);
                 const bareCheck = !hasSchemeOrPunyPrefix ? coreUrl.match(/^([^/?#]+)([/?#][\\s\\S]*|$)/) : null;
                 if (!hasSchemeOrPunyPrefix && (!bareCheck || !isPlausibleBareHost(bareCheck[1], Boolean(bareCheck[2])))) {
-                    res += scrubFreeTextChunk(matchedUrl, nameGroups);
+                    res += scrubFreeTextChunk(matchedUrl, nameGroups, givenTokensSet);
                 } else {
                     res += scrubStudentUrl(coreUrl, namesList) + trail;
                 }
@@ -2379,7 +3574,7 @@ async def fetch_lms_class_slots_via_page(
                 if (matchedUrl.length === 0) URL_IN_TEXT_RE.lastIndex += 1;
             }
             if (lastIdx < text.length) {
-                res += scrubFreeTextChunk(text.slice(lastIdx), nameGroups);
+                res += scrubFreeTextChunk(text.slice(lastIdx), nameGroups, givenTokensSet);
             }
             return res;
         };
@@ -2457,6 +3652,7 @@ async def fetch_lms_class_slots_via_page(
                     }
                 }
             }
+            const classStudentNames = Array.from(studentNamesSet);
             const classIdStr = (item && item.id != null) ? String(item.id).trim() : '';
             if (codeKey) {
                 matchedClassMeta[codeKey] = {
@@ -2464,7 +3660,7 @@ async def fetch_lms_class_slots_via_page(
                     studentIdToKey,
                     studentIdToName,
                     inactiveStudentIds,
-                    studentNames: Array.from(studentNamesSet)
+                    studentNames: classStudentNames
                 };
             }
             const slotsTruncated = item.slots.length > maxSlots;
@@ -2482,7 +3678,7 @@ async def fetch_lms_class_slots_via_page(
                     ...(s && typeof s.status === 'string' ? { status: s.status.slice(0, 64) } : {}),
                     ...(s && typeof s.cancelled === 'boolean' ? { cancelled: s.cancelled } : {}),
                     ...(s && typeof s.isCancelled === 'boolean' ? { isCancelled: s.isCancelled } : {}),
-                    summary: (s && typeof s.summary === 'string') ? s.summary.slice(0, 6000) : '',
+                    summary: (s && typeof s.summary === 'string') ? scrubStudentNames(s.summary.slice(0, 6000), classStudentNames) : '',
                     truncated: Boolean(slotsTruncated || attTruncated || identityAmbiguous || rawClassStudents.length > maxStudents * 2 || (s && typeof s.summary === 'string' && s.summary.length > 6000) || (rawAtt && rawAtt.some((a) => a && typeof a.comment === 'string' && a.comment.length > 15000))),
                     attendanceAmbiguous,
                     studentAttendance: Array.isArray(rawAtt)
@@ -2492,8 +3688,11 @@ async def fetch_lms_class_slots_via_page(
                             const stuKey = stuId ? studentIdToKey.get(stuId) : '';
                             const fullName = String((stuObj && stuObj.fullName) || '').trim();
                             let cleanComment = (att && typeof att.comment === 'string') ? att.comment.slice(0, 15000) : '';
-                            if (fullName && fullName.length >= 3 && cleanComment) {
-                                cleanComment = cleanComment.split(fullName).join('');
+                            if (cleanComment) {
+                                const attNamesList = fullName && fullName.length >= 3
+                                    ? [fullName, ...classStudentNames]
+                                    : classStudentNames;
+                                cleanComment = scrubStudentNames(cleanComment, attNamesList);
                             }
                             return {
                                 status: String((att && att.status) || ''),
@@ -3002,9 +4201,7 @@ async def fetch_lms_class_slots_via_page(
         parsed_page_url = urlsplit(current_page_url)
         current_host = str(parsed_page_url.hostname or "").lower()
 
-        async def _navigate_and_authenticate_lms(
-            *, clear_stale_storage: bool = False
-        ) -> str:
+        async def _navigate_and_authenticate_lms(*, clear_stale_storage: bool = False) -> str:
             nonlocal eval_page, temp_page, listener_page, pre_resolved_token
             try:
                 from googleform_autosubmit.config import Config
@@ -3021,9 +4218,7 @@ async def fetch_lms_class_slots_via_page(
                         getattr(page, "goto", None)
                     ):
                         eval_page = page
-                    elif ctx_obj is not None and callable(
-                        getattr(ctx_obj, "new_page", None)
-                    ):
+                    elif ctx_obj is not None and callable(getattr(ctx_obj, "new_page", None)):
                         temp_page = await ctx_obj.new_page()
                         eval_page = temp_page
                 if eval_page is None or not callable(getattr(eval_page, "goto", None)):
@@ -3043,9 +4238,7 @@ async def fetch_lms_class_slots_via_page(
                         if callable(getattr(eval_page, "wait_for_load_state", None)):
                             with contextlib.suppress(Exception):
                                 await eval_page.wait_for_load_state("networkidle")
-                        eval_parsed = urlsplit(
-                            str(getattr(eval_page, "url", "") or "").strip()
-                        )
+                        eval_parsed = urlsplit(str(getattr(eval_page, "url", "") or "").strip())
                         eval_scheme = str(eval_parsed.scheme or "").lower()
                         eval_host = str(eval_parsed.hostname or "").lower()
                     if (
@@ -3095,9 +4288,7 @@ async def fetch_lms_class_slots_via_page(
                     if callable(getattr(eval_page, "wait_for_load_state", None)):
                         with contextlib.suppress(Exception):
                             await eval_page.wait_for_load_state("networkidle")
-                    after_login = urlsplit(
-                        str(getattr(eval_page, "url", "") or "").strip()
-                    )
+                    after_login = urlsplit(str(getattr(eval_page, "url", "") or "").strip())
                     if (
                         str(after_login.scheme or "").lower() != "https"
                         or str(after_login.hostname or "").lower() != LMS_ALLOWED_HOSTNAME
@@ -3124,9 +4315,7 @@ async def fetch_lms_class_slots_via_page(
                 return "nav_exception"
 
         if not pre_resolved_token and not page_mod.startswith("unittest.mock"):
-            nav_status = await _navigate_and_authenticate_lms(
-                clear_stale_storage=False
-            )
+            nav_status = await _navigate_and_authenticate_lms(clear_stale_storage=False)
             if nav_status == "untrusted_redirect":
                 with contextlib.suppress(Exception):
                     log_message(
@@ -3137,10 +4326,7 @@ async def fetch_lms_class_slots_via_page(
                         class_count=len(all_codes),
                     )
                 return {
-                    code: [
-                        {"fetch_error": True}
-                        for _ in range(MAX_LMS_SLOTS_PER_CLASS)
-                    ]
+                    code: [{"fetch_error": True} for _ in range(MAX_LMS_SLOTS_PER_CLASS)]
                     for code in all_codes
                 }
 
@@ -3152,7 +4338,9 @@ async def fetch_lms_class_slots_via_page(
             "maxStudents": MAX_LMS_STUDENTS_PER_SLOT,
             "timeoutMs": int(timeout_ms),
             "targetLessons": target_lessons_by_class,
-            "spckExemptClasses": [code for code in normalized_codes if _is_spck_exempt_course(code)],
+            "spckExemptClasses": [
+                code for code in normalized_codes if _is_spck_exempt_course(code)
+            ],
             "preResolvedToken": pre_resolved_token,
             "allowedHostname": LMS_ALLOWED_HOSTNAME,
             "allowedTokenKeys": sorted(ALLOWED_LMS_TOKEN_KEYS),
@@ -3163,19 +4351,14 @@ async def fetch_lms_class_slots_via_page(
             and bool(raw_res.get("__auth_error__"))
             and not page_mod.startswith("unittest.mock")
         ):
-            retry_nav = await _navigate_and_authenticate_lms(
-                clear_stale_storage=True
-            )
+            retry_nav = await _navigate_and_authenticate_lms(clear_stale_storage=True)
             if retry_nav == "ok":
                 eval_args["preResolvedToken"] = pre_resolved_token
                 eval_args["centres"] = resolved_centres
                 raw_res = await eval_page.evaluate(js_script, eval_args)
             elif retry_nav == "untrusted_redirect":
                 return {
-                    code: [
-                        {"fetch_error": True}
-                        for _ in range(MAX_LMS_SLOTS_PER_CLASS)
-                    ]
+                    code: [{"fetch_error": True} for _ in range(MAX_LMS_SLOTS_PER_CLASS)]
                     for code in all_codes
                 }
 
@@ -3324,9 +4507,7 @@ def _resolve_target_class_date_iso(
         if iso_val is not None:
             return iso_val
     raw_year = (
-        (st_dict.get("year") if st_dict else None)
-        or ctx.get("target_year")
-        or result.get("year")
+        (st_dict.get("year") if st_dict else None) or ctx.get("target_year") or result.get("year")
     )
     default_year: int | None = None
     with contextlib.suppress(TypeError, ValueError):
@@ -3347,11 +4528,13 @@ def _resolve_target_class_date_iso(
         if iso_direct is not None:
             return iso_direct
         if default_year is not None or re.search(r"\b\d{4}\b", text):
-            parsed = parse_class_date(
-                text,
-                default_year=default_year or 2026,
-                timezone_info=BUSINESS_TIMEZONE,
-            )
+            parsed = None
+            with contextlib.suppress(ValueError):
+                parsed = parse_class_date(
+                    text,
+                    default_year=default_year or 2026,
+                    timezone_info=BUSINESS_TIMEZONE,
+                )
             if parsed is not None:
                 return parsed.date().isoformat()
     return None
@@ -3484,16 +4667,77 @@ def select_matching_lms_slot(
     )
 
 
+def _clear_scan_results_ai_cache(scan_results: Sequence[Any]) -> None:
+    for r_item in scan_results:
+        if isinstance(r_item, dict):
+            r_item.pop("_ai_comment_verdicts", None)
+            r_item.pop("_ai_reviewer_id", None)
+            raw_st = r_item.get("scan_target")
+            if isinstance(raw_st, dict):
+                raw_st.pop("_ai_comment_verdicts", None)
+                raw_st.pop("_ai_reviewer_id", None)
+
+
+def _reset_reviewer_batch_counter(active_reviewer: Any) -> None:
+    reset_fn = (
+        getattr(active_reviewer, "reset_batch_counter", None)
+        if active_reviewer is not None
+        else None
+    )
+    if callable(reset_fn) and not inspect.iscoroutinefunction(reset_fn):
+        with contextlib.suppress(Exception):
+            res_reset = reset_fn()
+            if inspect.iscoroutine(res_reset):
+                res_reset.close()
+
+
 def inspect_and_attach_quality_issues(
     scan_results: list[dict[str, Any]],
     *,
     lms_slots_by_class: dict[str, list[dict[str, Any]]] | None = None,
+    now: datetime | None = None,
+    ai_reviewer: Any = None,
+    latest_week: Mapping[str, Any] | tuple[int, int] | None = None,
+    reset_ai_batch_counter: bool = False,
 ) -> None:
     """Evaluate and attach LMS & Zalo quality issues onto each scan result in place."""
+    is_internal_proxy = isinstance(
+        ai_reviewer, (_BatchRecordingReviewer, _PrecomputedBatchReviewer)
+    )
+    active_rev = None if is_internal_proxy else _resolve_active_lms_ai_reviewer(ai_reviewer)
+    if reset_ai_batch_counter and not is_internal_proxy:
+        _reset_reviewer_batch_counter(active_rev)
+        _clear_scan_results_ai_cache(scan_results)
     has_lms_map = isinstance(lms_slots_by_class, dict)
     slots_map: dict[str, list[dict[str, Any]]] = (
         lms_slots_by_class if isinstance(lms_slots_by_class, dict) else {}
     )
+    effective_now = now or now_business()
+    current_business = (
+        effective_now.astimezone(BUSINESS_TIMEZONE)
+        if effective_now.tzinfo is not None
+        else effective_now.replace(tzinfo=BUSINESS_TIMEZONE)
+    )
+    current_business_date = current_business.date()
+    iso_cal = current_business.isocalendar()
+    inferred_latest_period: tuple[int, int] = (int(iso_cal[0]), int(iso_cal[1]))
+    for r_item in scan_results:
+        if not isinstance(r_item, Mapping):
+            continue
+        raw_r_st = r_item.get("scan_target")
+        r_st: Mapping[str, Any] = raw_r_st if isinstance(raw_r_st, Mapping) else {}
+        raw_r_ev = r_item.get("evidence")
+        r_ev: Mapping[str, Any] = raw_r_ev if isinstance(raw_r_ev, Mapping) else {}
+        raw_r_ctx = r_ev.get("date_context")
+        r_ctx: Mapping[str, Any] = raw_r_ctx if isinstance(raw_r_ctx, Mapping) else {}
+        raw_w = r_st.get("week") or r_ctx.get("target_week") or r_item.get("week")
+        raw_y = r_st.get("year") or r_ctx.get("target_year") or r_item.get("year")
+        with contextlib.suppress(TypeError, ValueError):
+            w_int = int(str(raw_w).strip())
+            y_int = int(str(raw_y).strip())
+            if 2000 <= y_int <= 2100 and 1 <= w_int <= 53:
+                if (y_int, w_int) > inferred_latest_period:
+                    inferred_latest_period = (y_int, w_int)
     for result in scan_results:
         if not isinstance(result, dict):
             continue
@@ -3503,6 +4747,89 @@ def inspect_and_attach_quality_issues(
         ev_dict: dict[str, Any] = ev if isinstance(ev, dict) else {}
         raw_ctx = ev_dict.get("date_context")
         ctx: dict[str, Any] = raw_ctx if isinstance(raw_ctx, dict) else {}
+        early_target_date_iso = _resolve_target_class_date_iso(result, st_dict, ctx)
+        group_name_val = str(
+            (st_dict.get("group_name") if st_dict else "")
+            or result.get("group_name")
+            or result.get("group")
+            or ""
+        ).strip()
+        ready_prev_week = False
+        should_defer_target = False
+        if latest_week is not None:
+            candidate_target = {
+                **(st_dict or {}),
+                "class_code": (st_dict.get("class_code") if st_dict else None)
+                or ctx.get("target_class_code")
+                or result.get("class_code"),
+                "lesson": (st_dict.get("lesson") if st_dict else None)
+                or ctx.get("target_lesson")
+                or result.get("lesson"),
+                "week": (st_dict.get("week") if st_dict else None)
+                or ctx.get("target_week")
+                or result.get("week"),
+                "year": (st_dict.get("year") if st_dict else None)
+                or ctx.get("target_year")
+                or result.get("year"),
+                "class_date_iso": early_target_date_iso
+                or (st_dict.get("class_date_iso") if st_dict else None)
+                or result.get("class_date_iso"),
+                "class_date": (st_dict.get("class_date") if st_dict else None)
+                or result.get("class_date"),
+                "group_name": group_name_val,
+            }
+            elig = evaluate_scan_target(
+                candidate_target,
+                latest_week=latest_week,
+                now=current_business,
+            )
+            if elig.reason == READY_PREVIOUS_WEEK:
+                ready_prev_week = True
+            elif not elig.eligible and elig.reason != DEFERRED_INVALID_TARGET:
+                should_defer_target = True
+        else:
+            raw_tw = (
+                (st_dict.get("week") if st_dict else None)
+                or ctx.get("target_week")
+                or result.get("week")
+            )
+            raw_ty = (
+                (st_dict.get("year") if st_dict else None)
+                or ctx.get("target_year")
+                or result.get("year")
+            )
+            with contextlib.suppress(TypeError, ValueError):
+                tw_int = int(str(raw_tw).strip())
+                ty_int = int(str(raw_ty).strip())
+                if 2000 <= ty_int <= 2100 and 1 <= tw_int <= 53:
+                    if (ty_int, tw_int) < inferred_latest_period:
+                        ready_prev_week = True
+        if not ready_prev_week and early_target_date_iso:
+            if early_target_date_iso > current_business_date.isoformat():
+                should_defer_target = True
+            elif early_target_date_iso == current_business_date.isoformat():
+                end_time = parse_group_end_time(group_name_val)
+                target_day = date.fromisoformat(early_target_date_iso)
+                if end_time is None or current_business < datetime.combine(
+                    target_day, end_time, tzinfo=BUSINESS_TIMEZONE
+                ):
+                    should_defer_target = True
+        if should_defer_target:
+            result["session_deferred"] = True
+            result["lms_quality_issues"] = []
+            result["zalo_content_issues"] = []
+            result["quality_issues"] = []
+            result["is_failed"] = False
+            if st_dict is not None:
+                st_dict["session_deferred"] = True
+                st_dict["lms_quality_issues"] = []
+                st_dict["zalo_content_issues"] = []
+                st_dict["quality_issues"] = []
+                st_dict["is_failed"] = False
+            continue
+        result.pop("session_deferred", None)
+        if st_dict is not None:
+            st_dict.pop("session_deferred", None)
         class_code = normalize_class_code(
             (st_dict.get("class_code") if st_dict else "")
             or ctx.get("target_class_code")
@@ -3515,11 +4842,7 @@ def inspect_and_attach_quality_issues(
             or result.get("lesson")
             or ""
         ).strip()
-        khoi_str = str(
-            result.get("khoi")
-            or (st_dict.get("khoi") if st_dict else "")
-            or ""
-        ).strip()
+        khoi_str = str(result.get("khoi") or (st_dict.get("khoi") if st_dict else "") or "").strip()
         lesson_num = _parse_lesson_number(lesson_str)
         if is_lesson_14(result, st_dict):
             has_l14_lms_data = (
@@ -3541,6 +4864,20 @@ def inspect_and_attach_quality_issues(
                 for x in existing_lms_issues
                 if issue_text(x)
             )
+
+        if not is_internal_proxy and active_rev is not None:
+            rev_id = id(active_rev)
+            if result.get("_ai_reviewer_id") not in (None, rev_id):
+                result.pop("_ai_comment_verdicts", None)
+                if st_dict is not None:
+                    st_dict.pop("_ai_comment_verdicts", None)
+            result["_ai_reviewer_id"] = rev_id
+        raw_row_cache = result.get("_ai_comment_verdicts")
+        if not isinstance(raw_row_cache, dict) and st_dict is not None:
+            raw_row_cache = st_dict.get("_ai_comment_verdicts")
+        row_verdict_cache: dict[str, str] = (
+            dict(raw_row_cache) if isinstance(raw_row_cache, dict) else {}
+        )
 
         slot_evaluated = False
         slot_eval: dict[str, Any] | None = None
@@ -3585,12 +4922,12 @@ def inspect_and_attach_quality_issues(
                             class_code=class_code,
                             khoi=khoi_str,
                             lesson=lesson_num,
+                            ai_reviewer=ai_reviewer,
+                            verdict_cache=row_verdict_cache,
                         )
                         lms_issues = list(slot_eval.get("issues") or [])
                     else:
-                        target_date_iso = _resolve_target_class_date_iso(
-                            result, st_dict, ctx
-                        )
+                        target_date_iso = _resolve_target_class_date_iso(result, st_dict, ctx)
                         matched_slot, slot_issue = select_matching_lms_slot(
                             class_slots,
                             target_date_iso=target_date_iso,
@@ -3602,23 +4939,30 @@ def inspect_and_attach_quality_issues(
                                 class_code=class_code,
                                 khoi=khoi_str,
                                 lesson=lesson_num,
+                                ai_reviewer=ai_reviewer,
+                                verdict_cache=row_verdict_cache,
                             )
-                            lms_summary_clean = str(
-                                slot_eval.get("summary_clean") or ""
-                            ).strip()
+                            lms_summary_clean = str(slot_eval.get("summary_clean") or "").strip()
                             lms_issues = list(slot_eval.get("issues") or [])
-                            result["lms_is_checkpoint"] = bool(
-                                slot_eval.get("is_checkpoint")
-                            )
+                            result["lms_is_checkpoint"] = bool(slot_eval.get("is_checkpoint"))
                             if st_dict is not None:
-                                st_dict["lms_is_checkpoint"] = bool(
-                                    slot_eval.get("is_checkpoint")
-                                )
+                                st_dict["lms_is_checkpoint"] = bool(slot_eval.get("is_checkpoint"))
                         else:
                             lms_issues = [slot_issue] if slot_issue else []
 
+        if row_verdict_cache:
+            result["_ai_comment_verdicts"] = dict(row_verdict_cache)
+            if st_dict is not None:
+                st_dict["_ai_comment_verdicts"] = dict(row_verdict_cache)
+
         if slot_evaluated:
-            metadata_eval = slot_eval or evaluate_lms_slot_quality(None, class_code=class_code, khoi=khoi_str, lesson=lesson_str)
+            metadata_eval = slot_eval or evaluate_lms_slot_quality(
+                None,
+                class_code=class_code,
+                khoi=khoi_str,
+                lesson=lesson_str,
+                ai_reviewer=ai_reviewer,
+            )
             for metadata_key in ("lms_attendance", "lms_comments", "lms_spck"):
                 result[metadata_key] = dict(metadata_eval[metadata_key])
                 if st_dict is not None:
@@ -3661,16 +5005,62 @@ def inspect_and_attach_quality_issues(
                         seen_prior_lms.add(txt)
                         prior_lms_issues.append(item)
 
-        lms_eval_indeterminate = (not slot_evaluated) or any(
-            issue_code(x) == ISSUE_CODE_LMS_MANUAL_CHECK
-            for x in lms_issues
+        comments_meta = result.get("lms_comments")
+        comments_verified = (
+            slot_evaluated
+            and isinstance(comments_meta, Mapping)
+            and str(comments_meta.get("status") or "").strip().upper()
+            in {"COMPLETE", "REVIEW", "MISSING", "EXEMPT"}
+        )
+        spck_meta = result.get("lms_spck")
+        spck_status = (
+            str(spck_meta.get("status") or "").strip().upper()
+            if isinstance(spck_meta, Mapping)
+            else ""
+        )
+        spck_reason = (
+            str(spck_meta.get("reason") or "").strip().lower()
+            if isinstance(spck_meta, Mapping)
+            else ""
+        )
+        att_meta = result.get("lms_attendance")
+        spck_att = spck_meta.get("attendance") if isinstance(spck_meta, Mapping) else None
+        spck_attendance_unverified = spck_status == "UNVERIFIED" and (
+            spck_reason == "attendance_unverified"
+            or (
+                isinstance(att_meta, Mapping)
+                and str(att_meta.get("status") or "").strip().upper() == "UNVERIFIED"
+            )
+            or (
+                isinstance(spck_att, Mapping)
+                and str(spck_att.get("status") or "").strip().upper() == "UNVERIFIED"
+            )
+        )
+        spck_superseded = slot_evaluated and (
+            spck_status in {"NOT_REQUIRED", "COMPLETE", "PARTIAL", "MISSING", "EXEMPT"}
+            or spck_attendance_unverified
+        )
+        lms_eval_indeterminate = (
+            (not slot_evaluated)
+            or any(issue_code(x) == ISSUE_CODE_LMS_MANUAL_CHECK for x in lms_issues)
+            or not comments_verified
+            or not spck_superseded
         )
         if lms_eval_indeterminate and prior_lms_issues:
             seen_lms = {issue_text(x) for x in lms_issues if issue_text(x)}
+            spck_codes = {
+                ISSUE_CODE_LMS_SPCK_MISSING,
+                ISSUE_CODE_LMS_SPCK_COMMENT_MISSING,
+                ISSUE_CODE_LMS_SPCK_NOTE,
+            }
             for prior_l in prior_lms_issues:
                 pt = issue_text(prior_l)
                 if pt and pt not in seen_lms:
-                    if slot_evaluated and issue_code(prior_l) in {ISSUE_CODE_LMS_SPCK_MISSING, ISSUE_CODE_LMS_SPCK_NOTE}:
+                    is_prior_spck = issue_code(prior_l) in spck_codes or "spck" in fold_text(pt)
+                    if slot_evaluated and (
+                        (is_prior_spck and spck_superseded)
+                        or (not is_prior_spck and comments_verified)
+                    ):
                         previous = list(result.get("lms_previous_quality_issues") or [])
                         if pt not in {issue_text(item) for item in previous}:
                             previous.append(prior_l)
@@ -3696,9 +5086,7 @@ def inspect_and_attach_quality_issues(
         ev = result.get("evidence")
         clf = ev.get("classifier_result") if isinstance(ev, Mapping) else None
         decision = (
-            str((clf.get("decision") if isinstance(clf, Mapping) else "") or "")
-            .strip()
-            .upper()
+            str((clf.get("decision") if isinstance(clf, Mapping) else "") or "").strip().upper()
         )
         zalo_eval_indeterminate = (
             bool(str(result.get("error_code") or "").strip())
@@ -3725,8 +5113,10 @@ def inspect_and_attach_quality_issues(
                     seen_zalo.add(pt)
                     zalo_issues.append(prior_z)
 
-        if zalo_issues or "zalo_content_issues" in result or (
-            st_dict is not None and "zalo_content_issues" in st_dict
+        if (
+            zalo_issues
+            or "zalo_content_issues" in result
+            or (st_dict is not None and "zalo_content_issues" in st_dict)
         ):
             result["zalo_content_issues"] = list(zalo_issues)
             if st_dict is not None:
@@ -3768,26 +5158,16 @@ def is_lms_fetch_unavailable(
         if requested_classes is not None
         else [k for k in lms_slots_by_class.keys() if not str(k).startswith("__")]
     )
-    class_keys = [
-        normalize_class_code(k)
-        for k in raw_keys
-        if normalize_class_code(k)
-    ]
+    class_keys = [normalize_class_code(k) for k in raw_keys if normalize_class_code(k)]
     if not class_keys:
         return False
     inspected = 0
     for code in class_keys:
         slots = lms_slots_by_class.get(code)
-        if (
-            not isinstance(slots, Sequence)
-            or isinstance(slots, (str, bytes))
-            or len(slots) == 0
-        ):
+        if not isinstance(slots, Sequence) or isinstance(slots, (str, bytes)) or len(slots) == 0:
             return False
         inspected += 1
-        if not all(
-            isinstance(s, Mapping) and bool(s.get("fetch_error")) for s in slots
-        ):
+        if not all(isinstance(s, Mapping) and bool(s.get("fetch_error")) for s in slots):
             return False
     return inspected > 0
 
@@ -3804,10 +5184,17 @@ def lms_target_lessons_by_class(scan_results: list[dict[str, Any]]) -> dict[str,
         evidence = evidence if isinstance(evidence, dict) else {}
         context = evidence.get("date_context")
         context = context if isinstance(context, dict) else {}
-        code = normalize_class_code(target.get("class_code") or context.get("target_class_code") or row.get("class_code") or "")
+        code = normalize_class_code(
+            target.get("class_code")
+            or context.get("target_class_code")
+            or row.get("class_code")
+            or ""
+        )
         if not code:
             continue
-        lesson = _parse_lesson_number(target.get("lesson") or context.get("target_lesson") or row.get("lesson"))
+        lesson = _parse_lesson_number(
+            target.get("lesson") or context.get("target_lesson") or row.get("lesson")
+        )
         lessons = targets.setdefault(code, [])
         if lesson is not None and lesson not in lessons:
             lessons.append(lesson)
@@ -3831,6 +5218,65 @@ async def fetch_lms_slots_for_targets(
     return await operation(page, class_codes)
 
 
+async def inspect_and_attach_quality_issues_async(
+    scan_results: list[dict[str, Any]],
+    *,
+    lms_slots_by_class: dict[str, list[dict[str, Any]]] | None = None,
+    now: datetime | None = None,
+    ai_reviewer: Any = None,
+    latest_week: Mapping[str, Any] | tuple[int, int] | None = None,
+    reset_ai_batch_counter: bool = False,
+) -> None:
+    """Async non-blocking wrapper around inspect_and_attach_quality_issues."""
+    active_reviewer = _resolve_active_lms_ai_reviewer(ai_reviewer)
+    if reset_ai_batch_counter:
+        _reset_reviewer_batch_counter(active_reviewer)
+        _clear_scan_results_ai_cache(scan_results)
+    elif active_reviewer is not None:
+        rev_id = id(active_reviewer)
+        for r_item in scan_results:
+            if isinstance(r_item, dict):
+                if r_item.get("_ai_reviewer_id") not in (None, rev_id):
+                    r_item.pop("_ai_comment_verdicts", None)
+                    raw_st = r_item.get("scan_target")
+                    if isinstance(raw_st, dict):
+                        raw_st.pop("_ai_comment_verdicts", None)
+                r_item["_ai_reviewer_id"] = rev_id
+
+    effective_ai_reviewer: Any = active_reviewer
+    if active_reviewer is not None and isinstance(lms_slots_by_class, dict) and lms_slots_by_class:
+        collector = _BatchRecordingReviewer()
+        inspect_and_attach_quality_issues(
+            copy.deepcopy(scan_results),
+            lms_slots_by_class=lms_slots_by_class,
+            now=now,
+            ai_reviewer=collector,
+            latest_week=latest_week,
+            reset_ai_batch_counter=False,
+        )
+        if collector.batches:
+            precomputed_verdicts: list[dict[str, str]] = []
+            for batch_items, batch_kwargs in collector.batches:
+                verdict_map = await _invoke_ai_comment_reviewer_async(
+                    active_reviewer,
+                    batch_items,
+                    **batch_kwargs,
+                )
+                precomputed_verdicts.append(verdict_map)
+            effective_ai_reviewer = _PrecomputedBatchReviewer(precomputed_verdicts)
+        else:
+            effective_ai_reviewer = _PrecomputedBatchReviewer([])
+
+    inspect_and_attach_quality_issues(
+        scan_results,
+        lms_slots_by_class=lms_slots_by_class,
+        now=now,
+        ai_reviewer=effective_ai_reviewer,
+        latest_week=latest_week,
+        reset_ai_batch_counter=False,
+    )
+
+
 async def fetch_and_evaluate_lms_quality(
     page: Any,
     scan_results: list[dict[str, Any]],
@@ -3839,12 +5285,20 @@ async def fetch_and_evaluate_lms_quality(
     lms_quality_gateway: Any = None,
     allow_page_fallback: bool = False,
     target_lessons_by_class: dict[str, list[int]] | None = None,
+    ai_reviewer: Any = None,
+    latest_week: Mapping[str, Any] | tuple[int, int] | None = None,
+    now: datetime | None = None,
+    reset_ai_batch_counter: bool = True,
 ) -> dict[str, list[dict[str, Any]]] | None:
     """Shared helper to fetch LMS class slots (if needed) and attach quality issues onto scan_results."""
     resolved_lms_slots: dict[str, list[dict[str, Any]]] | None = (
         dict(lms_slots_by_class) if isinstance(lms_slots_by_class, dict) else None
     )
-    requested_lessons = target_lessons_by_class if target_lessons_by_class is not None else lms_target_lessons_by_class(scan_results)
+    requested_lessons = (
+        target_lessons_by_class
+        if target_lessons_by_class is not None
+        else lms_target_lessons_by_class(scan_results)
+    )
     active_gateway = lms_quality_gateway
     if (
         os.getenv("ZALO_QUALITY_ISOLATED") == "1"
@@ -3863,9 +5317,7 @@ async def fetch_and_evaluate_lms_quality(
         try:
             from services.external_gateways import ExternalGateways
 
-            active_gateway = getattr(
-                ExternalGateways.production(), "lms_quality", None
-            )
+            active_gateway = getattr(ExternalGateways.production(), "lms_quality", None)
         except Exception:
             active_gateway = None
 
@@ -3892,13 +5344,10 @@ async def fetch_and_evaluate_lms_quality(
                         resolved_lms_slots = fetched
                     else:
                         resolved_lms_slots = {
-                            code: [{"fetch_error": True}]
-                            for code in candidate_codes
+                            code: [{"fetch_error": True}] for code in candidate_codes
                         }
                 except Exception:
-                    resolved_lms_slots = {
-                        code: [{"fetch_error": True}] for code in candidate_codes
-                    }
+                    resolved_lms_slots = {code: [{"fetch_error": True}] for code in candidate_codes}
             else:
                 resolved_lms_slots = {}
         elif (
@@ -3915,13 +5364,21 @@ async def fetch_and_evaluate_lms_quality(
                 if isinstance(fetched_slots, dict) and fetched_slots:
                     resolved_lms_slots = fetched_slots
             except Exception:
-                resolved_lms_slots = {
-                    code: [{"fetch_error": True}] for code in candidate_codes
-                }
+                resolved_lms_slots = {code: [{"fetch_error": True}] for code in candidate_codes}
 
-    inspect_and_attach_quality_issues(
+    resolved_ai_reviewer = ai_reviewer or (
+        getattr(lms_quality_gateway, "ai_reviewer", None)
+        if lms_quality_gateway is not None
+        and "ai_reviewer" in getattr(lms_quality_gateway, "__dict__", {})
+        else None
+    )
+    await inspect_and_attach_quality_issues_async(
         scan_results,
         lms_slots_by_class=resolved_lms_slots,
+        now=now,
+        ai_reviewer=resolved_ai_reviewer,
+        latest_week=latest_week,
+        reset_ai_batch_counter=reset_ai_batch_counter,
     )
     if is_lms_fetch_unavailable(resolved_lms_slots):
         for r in scan_results:

@@ -1,7 +1,7 @@
 # KẾ HOẠCH CHI TIẾT & TIẾN ĐỘ NÂNG CẤP DỰ ÁN (UPGRADE PLAN & PROGRESS)
 
-**Cập nhật lần cuối:** `2026-11-11 19:48 +07:00`
-**Trạng thái hiện tại:** Đã hoàn tất **Phase 0 → Phase 3.2 (`45/45` ✅)**, hoàn tất **Wave 4 (Phase 4.0 → Phase 4.4: `25/25` ✅ — Kiểm định chất lượng nội dung LMS/Zalo, Tự động ghi `Mô tả vấn đề` lên Teaching & Bảng Email Quản lý 9 cột)**, hoàn tất **Wave 5 (Phase 5.0 → 5.8: `59/59` ✅ — Hardening toàn diện luồng kiểm tra báo cáo)**, và hoàn tất **Phase 6.1 (`7/7` ✅ — Kiểm định Nộp Sản Phẩm Cuối Khóa SPCK Buổi 12, 13, 14 & Hotfix GraphQL/PII `DEC-042`)**. Phase 6.2 đã hoàn tất source/local (`6/6`), có bản đối chiếu cảnh báo lịch sử chờ duyệt trước thao tác ghi thật.
+**Cập nhật lần cuối:** `2026-11-12 21:55 +07:00`
+**Trạng thái hiện tại:** Đã hoàn tất **Phase 0 → Phase 3.2 (`45/45` ✅)**, hoàn tất **Wave 4 (Phase 4.0 → Phase 4.4: `25/25` ✅ — Kiểm định chất lượng nội dung LMS/Zalo, Tự động ghi `Mô tả vấn đề` lên Teaching & Bảng Email Quản lý 9 cột)**, hoàn tất **Wave 5 (Phase 5.0 → 5.8: `59/59` ✅ — Hardening toàn diện luồng kiểm tra báo cáo)**, hoàn tất **Phase 6.1 (`7/7` ✅ — Kiểm định Nộp Sản Phẩm Cuối Khóa SPCK Buổi 12, 13, 14 & Hotfix GraphQL/PII `DEC-042`)**, hoàn tất **Phase 6.2 → 6.4 (`14/14` ✅ Source/local đạt kiểm chứng)**, và hoàn tất **Phase 6.5 (`6/6` ✅ Source/local đạt kiểm chứng — Chuẩn hóa quy tắc QC `FAIL` vs `NOTE`, Phễu 2 tầng AI nhận xét LMS khử PII, làm rõ SPCK/Robotics & hoãn buổi học chưa kết thúc `DEC-045`)**.
 
 ---
 
@@ -35,6 +35,23 @@
 | **Phase 6.2** | **Sửa kết quả SPCK, kiểm tra nhận xét theo điểm danh và đối chiếu cảnh báo cũ** | P0 | ✅ Source/local đạt kiểm chứng | `6/6` |
 | **Phase 6.3** | **Miễn SPCK khóa PTB/CSB buổi 12–14, DEC-044** | P1 | ✅ Source/local đạt kiểm chứng | `4/4` |
 | **Phase 6.4** | **Loại cảnh báo lặp và làm gọn mô tả vấn đề trong email/báo cáo** | P1 | ✅ Source/local đạt kiểm chứng | `4/4` |
+| **Phase 6.5** | **Chuẩn hóa quy tắc QC (`FAIL` vs `NOTE`), Phễu 2 tầng AI nhận xét LMS, làm rõ SPCK & hoãn buổi học tương lai** | P0 | ✅ Source/local đạt kiểm chứng | `6/6` |
+
+### Kế hoạch & Tiến độ 6.5 (AI tự động tích `[x]` khi xong từng phần)
+
+- [x] **6.5.1.** Vá lỗi lấy nhầm số buổi ở mục "Buổi học kế tiếp / Bài tập về nhà" trên Zalo (`services/zalo_safety.py` + unit tests ca `GB42-HB` B13 nhắc B14).
+- [x] **6.5.2.** Hoãn tuyệt đối mọi buổi học chưa diễn ra kể cả Buổi 14 tuần hiện tại (`services/zalo_discovery_plan.py`, `services/report_status.py`, `services/zalo_bcnb_service.py`, `services/lms_quality_service.py`), không tích BCNB và không ghi chú QC sớm.
+- [x] **6.5.3.** Chuẩn hóa mức lỗi (`FAIL` vs `NOTE` trên Teaching): gõ dấu `"."` hoặc bỏ trống ở nhận xét buổi học LMS & nhận xét SPCK tính thẳng lỗi `FAIL` (`is_failed = True`, `LMS_SPCK_COMMENT_MISSING`); giữ note QC cho nội dung bài học (`LMS_SUMMARY_NOTE`); bắt mâu thuẫn điểm danh Đi học/Muộn nhưng ghi nghỉ (`LMS_ATTENDANCE_CONFLICT_NOTE`); đổi câu chữ tiêu đề SPCK chưa kèm tên HV, tách rõ phần ảnh thiếu, và chuẩn hóa quy tắc Robotics (note thiếu file code + B14 cần YouTube/ảnh, bỏ Slide).
+- [x] **6.5.4.** Xây dựng Phễu 2 Tầng (Rule + Gemini AI `LmsAiCommentReviewerGateway`) kiểm tra nhận xét ngắn 1–2 dòng sơ sài (gỡ bỏ bộ đếm từ khóa 3 ý cứng nhắc, khử PII tên học viên 2 lớp ngay từ trình duyệt + Python, cô lập hoàn toàn trong `-Isolated`).
+- [x] **6.5.5.** Hoàn tất unit tests + `node tests/check_template_js.js` + `.\CHECK_QUALITY.ps1 -Isolated` (exit `0`) và đạt `VERDICT: PASS` từ Reviewer độc lập `gpt-6.1-sol (xhigh)`.
+- [x] **6.5.6.** Cập nhật tài liệu tiến độ (`UPGRADE_PROGRESS.md`, `PROJECT_STATE.md`, `PROJECT_DECISIONS.md` `DEC-045`, `CHANGELOG.md`), kiểm tra manifest sạch và đồng bộ GitHub (`git commit` + `git push origin main`).
+
+### Tiến độ 6.5
+
+1. **Nhóm 1 — Trích xuất số buổi Zalo & Hoãn buổi học chưa kết thúc**: Cắt bỏ phần giới thiệu buổi học kế tiếp/bài tập về nhà (`Buổi học kế tiếp`, `Bài tập về nhà`, ...) trên Zalo trong khi giữ nguyên đoạn nối tiếp của buổi hiện tại; hoãn tuyệt đối các buổi trong tương lai hoặc cùng ngày chưa hết giờ học (kể cả Buổi 14 tuần hiện tại) với trạng thái `⏳ Chưa tới giờ kiểm tra` (`session_deferred=True`, `is_failed=False`), bỏ qua tích BCNB và cảnh báo QC sớm theo quy tắc ưu tiên bản ghi mới nhất giữa snapshot và job.
+2. **Nhóm 2 — Chuẩn hóa mức lỗi `FAIL` vs `NOTE` trên LMS**: Bỏ trống hoặc chỉ gõ dấu `"."` ở nhận xét buổi học LMS hoặc nhận xét SPCK tính thẳng lỗi `FAIL` (`ISSUE_CODE_LMS_SPCK_COMMENT_MISSING`, tô đỏ trong email quản lý); nội dung tóm tắt buổi học trống/`"."`/chỉ ghi `"Bài X"` giữ mức `NOTE` (`ISSUE_CODE_LMS_SUMMARY_NOTE`); điểm danh `ATTENDED`/`LATE_ARRIVED` nhưng nhận xét ghi nghỉ học (không có từ phủ định) gắn `NOTE` (`ISSUE_CODE_LMS_ATTENDANCE_CONFLICT_NOTE`).
+3. **Nhóm 3 — Quy tắc SPCK & Robotics (`ROB`)**: Không bắt buộc tên học viên trong tiêu đề SPCK (chỉ nhắc `NOTE` `[LMS] Tiêu đề SPCK chưa ghi kèm tên học viên`); có ảnh bìa hoặc ảnh chụp đều thỏa điều kiện hình ảnh kèm `NOTE` tách riêng phần thiếu; khóa Robotics (`ROB`) bỏ bắt buộc file code đính kèm (chuyển thành `NOTE` `[LMS] SPCK Robotics chưa có file code đính kèm`) và ở Buổi 14 kiểm tra link YouTube + hình ảnh (bỏ bắt buộc Slide).
+4. **Nhóm 4 — Phễu 2 tầng AI nhận xét LMS (`LMS_AI_COMMENT_CHECK` + `GeminiLmsCommentReviewerGateway`) & Kiểm chứng**: Gỡ bộ đếm từ khóa 3 ý cứng nhắc, khử PII tên học viên không chồng lấp token ở cả trình duyệt và Python (`[HS]`, `[URL]`, `[EMAIL]`, `[PHONE]`), khóa cache SHA-256, gọi Gemini bất đồng bộ không chặn event loop kèm giới hạn batch mỗi lượt quét và fallback tất định (`ISSUE_CODE_LMS_COMMENT_NOTE`, AI không tự sinh `FAIL`). Kiểm thử mục tiêu `111/111 PASS` (7 module), `node tests/check_template_js.js` PASS (`scripts=7 handlers=37 behavior=13`), `.\CHECK_QUALITY.ps1 -Isolated` exit `0` (`QUALITY GATE PASSED`, Ruff `0`, Mypy `0` trên 78 file, `715+` regression tests `OK`, branch coverage `78.9%`, `secrets=0`), và Independent Review `gpt-6.1-sol (xhigh)` đạt `VERDICT: PASS` (session `01a1d035-ec02-7183-a03e-013fb069b571`). Chưa chạy quét ghi thật trên trình duyệt/Teaching production.
 
 ### Tiến độ 6.4
 

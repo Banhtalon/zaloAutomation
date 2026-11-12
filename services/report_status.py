@@ -114,7 +114,11 @@ SEVERITY_NOTE = "NOTE"
 
 ISSUE_CODE_LMS_MANUAL_CHECK = "LMS_MANUAL_CHECK"
 ISSUE_CODE_LMS_SPCK_MISSING = "LMS_SPCK_MISSING"
+ISSUE_CODE_LMS_SPCK_COMMENT_MISSING = "LMS_SPCK_COMMENT_MISSING"
 ISSUE_CODE_LMS_SPCK_NOTE = "LMS_SPCK_NOTE"
+ISSUE_CODE_LMS_SUMMARY_NOTE = "LMS_SUMMARY_NOTE"
+ISSUE_CODE_LMS_COMMENT_NOTE = "LMS_COMMENT_NOTE"
+ISSUE_CODE_LMS_ATTENDANCE_CONFLICT_NOTE = "LMS_ATTENDANCE_CONFLICT_NOTE"
 ISSUE_CODE_ZALO_MISSING_OR_WRONG_DATE_SAME_DAY = (
     "ZALO_MISSING_OR_WRONG_DATE_SAME_DAY"
 )
@@ -128,6 +132,9 @@ NOTE_ISSUE_CODES = frozenset(
     {
         ISSUE_CODE_LMS_MANUAL_CHECK,
         ISSUE_CODE_LMS_SPCK_NOTE,
+        ISSUE_CODE_LMS_SUMMARY_NOTE,
+        ISSUE_CODE_LMS_COMMENT_NOTE,
+        ISSUE_CODE_LMS_ATTENDANCE_CONFLICT_NOTE,
         ISSUE_CODE_ZALO_MISSING_OR_WRONG_DATE_SAME_DAY,
         ISSUE_CODE_ZALO_REPORT_NO_DATE,
         ISSUE_CODE_ZALO_REPORT_WRONG_DATE,
@@ -151,8 +158,24 @@ _LMS_SPCK_MISSING_RE = re.compile(
     r"^\[LMS\]\s*Chưa\s+nộp\s+SPCK\b",
     flags=re.IGNORECASE,
 )
+_LMS_SPCK_COMMENT_MISSING_RE = re.compile(
+    r"^\[LMS\]\s*SPCK\s+chưa\s+có\s+nhận\s+xét\b",
+    flags=re.IGNORECASE,
+)
 _LMS_SPCK_NOTE_RE = re.compile(
-    r"^\[LMS\]\s*(?:Thiếu\s+nộp\s+SPCK\b|SPCK\b|(?:Nhận|Nhan)\s+x[eé]t\s+SPCK\b)",
+    r"^\[LMS\]\s*(?:Thiếu\s+nộp\s+SPCK\b|Tiêu\s+đề\s+SPCK\b|SPCK\b|(?:Nhận|Nhan)\s+x[eé]t\s+SPCK\b)",
+    flags=re.IGNORECASE,
+)
+_LMS_SUMMARY_NOTE_RE = re.compile(
+    r"^\[LMS\]\s*Chưa\s+ghi\s+nội\s+dung\s+bài\s+học\b",
+    flags=re.IGNORECASE,
+)
+_LMS_ATTENDANCE_CONFLICT_NOTE_RE = re.compile(
+    r"^\[LMS\]\s*Lỗi\s+điểm\s+danh\b",
+    flags=re.IGNORECASE,
+)
+_LMS_COMMENT_NOTE_RE = re.compile(
+    r"^\[LMS\]\s*Nhận\s+xét\s+(?:sơ\s+sài|học\s+viên\s+trùng\s+lặp|Checkpoint\s+thiếu|Checkpoint\s+chưa\s+đủ|buổi\s+học\s+cần\s+xem\s+lại|cần\s+xem\s+lại)\b",
     flags=re.IGNORECASE,
 )
 _D2_NO_DATE_RE = re.compile(
@@ -399,9 +422,33 @@ def _adapt_legacy_issue(issue: Any) -> dict[str, str]:
             "severity": SEVERITY_FAIL,
             "text": text,
         }
+    if _LMS_SPCK_COMMENT_MISSING_RE.match(text):
+        return {
+            "code": ISSUE_CODE_LMS_SPCK_COMMENT_MISSING,
+            "severity": SEVERITY_FAIL,
+            "text": text,
+        }
     if _LMS_SPCK_NOTE_RE.match(text):
         return {
             "code": ISSUE_CODE_LMS_SPCK_NOTE,
+            "severity": SEVERITY_NOTE,
+            "text": text,
+        }
+    if _LMS_SUMMARY_NOTE_RE.match(text):
+        return {
+            "code": ISSUE_CODE_LMS_SUMMARY_NOTE,
+            "severity": SEVERITY_NOTE,
+            "text": text,
+        }
+    if _LMS_ATTENDANCE_CONFLICT_NOTE_RE.match(text):
+        return {
+            "code": ISSUE_CODE_LMS_ATTENDANCE_CONFLICT_NOTE,
+            "severity": SEVERITY_NOTE,
+            "text": text,
+        }
+    if _LMS_COMMENT_NOTE_RE.match(text):
+        return {
+            "code": ISSUE_CODE_LMS_COMMENT_NOTE,
             "severity": SEVERITY_NOTE,
             "text": text,
         }
@@ -710,8 +757,55 @@ def has_spck_missing_fail(row: Any) -> bool:
     return False
 
 
+def has_spck_comment_missing_fail(row: Any) -> bool:
+    """Return True when a submitted SPCK row has empty/dot-bypassed product comments (``LMS_SPCK_COMMENT_MISSING``)."""
+    if not isinstance(row, Mapping):
+        return False
+    raw_st = row.get("scan_target")
+    st: Mapping[str, Any] = raw_st if isinstance(raw_st, Mapping) else {}
+    spck = row.get("lms_spck", st.get("lms_spck"))
+    if isinstance(spck, Mapping):
+        if spck.get("status") in {"NOT_REQUIRED", "EXEMPT", "UNVERIFIED", "MISSING"}:
+            return False
+        if "missing_comment_count" in spck:
+            mc = spck.get("missing_comment_count")
+            if isinstance(mc, int) and not isinstance(mc, bool):
+                return mc > 0
+    for source in (row, st):
+        for list_key in ("lms_quality_issues", "quality_issues"):
+            items = source.get(list_key)
+            if isinstance(items, (list, tuple)):
+                for item in items:
+                    if issue_severity(item) == SEVERITY_NOTE:
+                        continue
+                    if issue_code(item) == ISSUE_CODE_LMS_SPCK_COMMENT_MISSING:
+                        return True
+                    txt = issue_text(item)
+                    if txt and _LMS_SPCK_COMMENT_MISSING_RE.match(txt):
+                        return True
+    return False
+
+
+def is_session_deferred(row: Any) -> bool:
+    """Return True when a session row or its scan_target is deferred (future date / before class end time)."""
+    if not isinstance(row, Mapping):
+        return False
+    raw_st = row.get("scan_target")
+    st: Mapping[str, Any] = raw_st if isinstance(raw_st, Mapping) else {}
+    for src in (row, st):
+        if src.get("session_deferred") is True:
+            return True
+        for reason_key in ("deferred_reason", "eligibility_reason"):
+            reason_val = str(src.get(reason_key) or "").strip().upper()
+            if reason_val.startswith("DEFERRED_"):
+                return True
+    return False
+
+
 def resolve_lms_status(row: Mapping[str, Any], fallback: str = "") -> str:
     """Display only counts actually verified by the current LMS inspection."""
+    if is_session_deferred(row):
+        return "⏳ Chưa tới giờ kiểm tra"
     raw_st = row.get("scan_target")
     st = raw_st if isinstance(raw_st, Mapping) else {}
     comments = row.get("lms_comments", st.get("lms_comments"))
@@ -781,6 +875,8 @@ def is_failed(row: Any) -> bool:
     """
     if not isinstance(row, Mapping):
         return False
+    if is_session_deferred(row):
+        return False
 
     category = categorize_row(row)
     zalo_failed = category in {
@@ -799,7 +895,7 @@ def is_failed(row: Any) -> bool:
     lms_status = resolve_lms_status(row, lms_status)
 
     lms_failed = lms_status.startswith(("❌", "⚠️"))
-    spck_failed = has_spck_missing_fail(row)
+    spck_failed = has_spck_missing_fail(row) or has_spck_comment_missing_fail(row)
     return zalo_failed or lms_failed or spck_failed
 
 
@@ -933,7 +1029,7 @@ def validate_two_week_plan(
         else:
             candidate_targets.append(item)
 
-    exempt_targets: list[dict[str, Any]] = []
+    all_exempt_candidates: list[dict[str, Any]] = []
     seen_exempt_keys: set[str] = set()
     invalid_exempt_target = False
     for item in raw_exempts:
@@ -965,7 +1061,7 @@ def validate_two_week_plan(
             dropped_groups["deduped"].append(dup)
             continue
         seen_exempt_keys.add(ex_key)
-        exempt_targets.append(entry)
+        all_exempt_candidates.append(entry)
 
     periods: set[tuple[int, int]] = set()
     for item in selected_weeks:
@@ -1007,6 +1103,18 @@ def validate_two_week_plan(
         )
     except Exception:
         scan_targets, deferred_targets = [], []
+
+    try:
+        exempt_targets, deferred_exempt_targets, _ = (
+            split_scan_targets_with_deduped(
+                all_exempt_candidates,
+                latest_week=week_plan.get("latest_week"),
+                now=effective_business_now,
+            )
+        )
+    except Exception:
+        exempt_targets, deferred_exempt_targets = list(all_exempt_candidates), []
+    deferred_targets = [*deferred_targets, *deferred_exempt_targets]
 
     dropped_rows = build_dropped_rows_summary(**dropped_groups)
     observed_at_dt = parse_timestamp(snapshot.get("observed_at"))
@@ -1062,7 +1170,7 @@ def validate_two_week_plan(
             "remediation": "Bấm Dò tìm lại.",
         }
 
-    if not candidate_targets and not exempt_targets:
+    if not candidate_targets and not all_exempt_candidates:
         if separated_invalid_date_count > 0:
             return {
                 **base_info,
@@ -1088,7 +1196,7 @@ def validate_two_week_plan(
             "remediation": "Kiểm tra lớp mơ hồ rồi Dò tìm lại.",
         }
 
-    exempt_keys = [canonical_target_key(item) for item in exempt_targets]
+    exempt_keys = [canonical_target_key(item) for item in all_exempt_candidates]
     target_keys = [*candidate_keys, *exempt_keys]
     base_info["target_keys"] = target_keys
     if has_duplicate_candidate or len(target_keys) != len(set(target_keys)):
@@ -1148,10 +1256,14 @@ __all__ = [
     "INSUFFICIENT_EVIDENCE",
     "INSUFFICIENT_EVIDENCE_STATUS",
     "ISSUE_CODE_LEGACY_UNCLASSIFIED_FAIL",
+    "ISSUE_CODE_LMS_ATTENDANCE_CONFLICT_NOTE",
+    "ISSUE_CODE_LMS_COMMENT_NOTE",
     "ISSUE_CODE_LMS_MANUAL_CHECK",
     "ISSUE_CODE_LMS_QUALITY_FAIL",
+    "ISSUE_CODE_LMS_SPCK_COMMENT_MISSING",
     "ISSUE_CODE_LMS_SPCK_MISSING",
     "ISSUE_CODE_LMS_SPCK_NOTE",
+    "ISSUE_CODE_LMS_SUMMARY_NOTE",
     "ISSUE_CODE_ZALO_CONTENT_FAIL",
     "ISSUE_CODE_ZALO_REPORT_NO_DATE",
     "ISSUE_CODE_ZALO_REPORT_WRONG_DATE",
@@ -1177,10 +1289,12 @@ __all__ = [
     "VERIFIED_EVIDENCE_STATES",
     "categorize_row",
     "coerce_structured_issue",
+    "has_spck_comment_missing_fail",
     "has_spck_missing_fail",
     "identity_tokens",
     "is_failed",
     "is_lesson_14",
+    "is_session_deferred",
     "issue_code",
     "issue_severity",
     "issue_text",

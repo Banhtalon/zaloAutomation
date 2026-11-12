@@ -336,16 +336,16 @@ def build_discovery_plan(
     dropped_accumulator: dict[str, list[dict]] = {
         key: [] for key in DROPPED_ROW_GROUP_KEYS
     }
-    exempt_targets: list[dict] = []
+    raw_exempt_targets: list[dict] = []
     candidate_targets = _build_scan_targets(
         group_names,
         bcnb_week_plan,
         match_group=match_group,
         coverage=bcnb_zalo_coverage,
         dropped_accumulator=dropped_accumulator,
-        exempt_accumulator=exempt_targets,
+        exempt_accumulator=raw_exempt_targets,
     )
-    exempt_only = bool(exempt_targets) and not candidate_targets
+    exempt_only = bool(raw_exempt_targets) and not candidate_targets
     group_reliable = bool(
         bcnb_data
         and source_group_names
@@ -362,7 +362,16 @@ def build_discovery_plan(
         latest_week=(bcnb_week_plan or {}).get("latest_week"),
         now=now,
     )
+    exempt_targets, deferred_exempt_targets, deduped_exempt_targets = (
+        split_scan_targets_with_deduped(
+            raw_exempt_targets,
+            latest_week=(bcnb_week_plan or {}).get("latest_week"),
+            now=now,
+        )
+    )
+    deferred_targets.extend(deferred_exempt_targets)
     dropped_accumulator["deduped"].extend(deduped_targets)
+    dropped_accumulator["deduped"].extend(deduped_exempt_targets)
     if not isinstance(bcnb_week_plan, dict) or not (bcnb_week_plan.get("selected_weeks") or []):
         _populate_fallback_dropped_rows(
             bcnb_zalo_coverage,

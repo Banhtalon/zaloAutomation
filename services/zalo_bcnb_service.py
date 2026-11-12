@@ -38,7 +38,7 @@ from services.browser_job_guard import exclusive_browser_job
 from services.external_gateways import ExternalGateways
 from services.lms_quality_service import (
     fetch_and_evaluate_lms_quality,
-    inspect_and_attach_quality_issues,
+    inspect_and_attach_quality_issues_async,
     is_lms_fetch_unavailable,
 )
 from services.report_status import (
@@ -48,6 +48,7 @@ from services.report_status import (
     CATEGORY_LATE,
     ISSUE_CODE_LEGACY_UNCLASSIFIED_FAIL,
     ISSUE_CODE_LMS_MANUAL_CHECK,
+    ISSUE_CODE_LMS_SPCK_COMMENT_MISSING,
     ISSUE_CODE_LMS_SPCK_MISSING,
     ISSUE_CODE_LMS_SPCK_NOTE,
     SUBMITTED_EVIDENCE_STATES,
@@ -58,6 +59,7 @@ from services.report_status import (
     issue_code,
     issue_text,
     normalize_class_code,
+    normalize_lesson_number,
 )
 from services.zalo_discovery_matching import find_bcnb_match
 from services.zalo_evidence import (
@@ -613,30 +615,121 @@ def _collect_row_verifiable_auto_issues(
     has_lms_manual_check = any(
         issue_code(x) == ISSUE_CODE_LMS_MANUAL_CHECK for x in raw_lms
     )
-    lms_indeterminate = (
-        (lms_slots_by_class is None) or lms_unavailable or has_lms_manual_check
-    )
+    target = result.get("scan_target")
+    target = target if isinstance(target, dict) else {}
+    spck = result.get("lms_spck", target.get("lms_spck"))
+    comments_meta = result.get("lms_comments", target.get("lms_comments"))
+    spck_codes = {
+        ISSUE_CODE_LMS_SPCK_MISSING,
+        ISSUE_CODE_LMS_SPCK_COMMENT_MISSING,
+        ISSUE_CODE_LMS_SPCK_NOTE,
+    }
+
+    def _is_spck_issue_item(item: Any) -> bool:
+        return issue_code(item) in spck_codes or "spck" in issue_text(item).lower()
+
     existing_lms_auto: list[Any] = [
         x
         for x in existing_auto
         if issue_text(x).upper().startswith("[LMS]")
     ]
-    target = result.get("scan_target")
-    target = target if isinstance(target, dict) else {}
-    spck = result.get("lms_spck", target.get("lms_spck"))
-    if isinstance(spck, Mapping) and spck.get("status") in {"UNVERIFIED", "NOT_REQUIRED"}:
-        prior_spck = [
-            item for item in existing_lms_auto
-            if issue_code(item) in {ISSUE_CODE_LMS_SPCK_MISSING, ISSUE_CODE_LMS_SPCK_NOTE}
-        ]
+    comments_status = (
+        str(comments_meta.get("status") or "").strip().upper()
+        if isinstance(comments_meta, Mapping)
+        else ""
+    )
+    comments_verified = comments_status in {"COMPLETE", "REVIEW", "MISSING", "EXEMPT"}
+    spck_status = (
+        str(spck.get("status") or "").strip().upper()
+        if isinstance(spck, Mapping)
+        else ""
+    )
+    spck_reason = (
+        str(spck.get("reason") or "").strip().lower()
+        if isinstance(spck, Mapping)
+        else ""
+    )
+    att_meta = result.get("lms_attendance", target.get("lms_attendance"))
+    spck_att = spck.get("attendance") if isinstance(spck, Mapping) else None
+    spck_attendance_unverified = spck_status == "UNVERIFIED" and (
+        spck_reason == "attendance_unverified"
+        or (
+            isinstance(att_meta, Mapping)
+            and str(att_meta.get("status") or "").strip().upper() == "UNVERIFIED"
+        )
+        or (
+            isinstance(spck_att, Mapping)
+            and str(spck_att.get("status") or "").strip().upper() == "UNVERIFIED"
+        )
+    )
+    spck_superseded = (
+        spck_status
+        in {
+            "NOT_REQUIRED",
+            "COMPLETE",
+            "PARTIAL",
+            "MISSING",
+            "EXEMPT",
+        }
+        or spck_attendance_unverified
+    )
+
+    lesson_norm = normalize_lesson_number(
+        target.get("lesson") or result.get("lesson")
+    )
+    comments_unverified = (
+        comments_status == "UNVERIFIED"
+        or (
+            not comments_verified
+            and any(not _is_spck_issue_item(x) for x in existing_lms_auto)
+            and bool(spck_status)
+        )
+    )
+    spck_unverified = (
+        (spck_status == "UNVERIFIED" and not spck_superseded)
+        or (
+            not spck_superseded
+            and any(_is_spck_issue_item(x) for x in existing_lms_auto)
+            and (
+                bool(comments_status)
+                or lesson_norm in {"12", "13", "14"}
+            )
+        )
+    )
+    lms_indeterminate = (
+        (lms_slots_by_class is None)
+        or lms_unavailable
+        or has_lms_manual_check
+        or comments_unverified
+        or spck_unverified
+    )
+
+    current_raw_texts = {issue_text(item) for item in raw_lms if issue_text(item)}
+    superseded_items: list[Any] = []
+    if spck_superseded:
+        superseded_items.extend(
+            item for item in existing_lms_auto if _is_spck_issue_item(item)
+        )
+    if comments_verified:
+        superseded_items.extend(
+            item for item in existing_lms_auto if not _is_spck_issue_item(item)
+        )
+    if superseded_items:
         history = list(result.get("lms_previous_quality_issues") or [])
         history_texts = {issue_text(item) for item in history}
-        history.extend(item for item in prior_spck if issue_text(item) not in history_texts)
+        for item in superseded_items:
+            t_txt = issue_text(item)
+            if t_txt and t_txt not in history_texts and t_txt not in current_raw_texts:
+                history_texts.add(t_txt)
+                history.append(item)
         if history:
             result["lms_previous_quality_issues"] = history
             if isinstance(result.get("scan_target"), dict):
                 result["scan_target"]["lms_previous_quality_issues"] = list(history)
-        existing_lms_auto = [item for item in existing_lms_auto if item not in prior_spck]
+        superseded_set = {id(item) for item in superseded_items}
+        existing_lms_auto = [
+            item for item in existing_lms_auto if id(item) not in superseded_set
+        ]
     if lms_slots_by_class is None or lms_unavailable:
         lms_auto = list(existing_lms_auto)
     elif has_lms_manual_check and all_slots_empty_stub:
@@ -645,7 +738,7 @@ def _collect_row_verifiable_auto_issues(
             for x in existing_lms_auto
             if issue_code(x) != ISSUE_CODE_LMS_MANUAL_CHECK
         ]
-    elif has_lms_manual_check:
+    elif has_lms_manual_check or comments_unverified or spck_unverified:
         # Preserve prior verified [LMS] FAIL issues while also writing the
         # single-class/slot LMS_MANUAL_CHECK NOTE issue to Mô tả vấn đề (D4).
         lms_auto = [
@@ -740,6 +833,8 @@ async def update_bcnb_reports(
     lms_quality_gateway: Any = None,
     lms_slots_by_class: dict[str, list[dict[str, Any]]] | None = None,
     notes_only: bool | None = False,
+    lms_ai_reviewer: Any = None,
+    reset_ai_batch_counter: bool = True,
 ) -> dict[str, Any]:
     """Update both bounded weeks with exact-row matching and server read-back."""
     await job_repo.ensure_not_cancelled(job_id)
@@ -774,6 +869,7 @@ async def update_bcnb_reports(
     target_by_identity: dict[tuple[int, int, str, str, str], dict[str, Any]] = {}
     for source in (
         *(scan_plan.get("targets") or []),
+        *(scan_plan.get("exempt_targets") or []),
         *(scan_plan.get("deferred_targets") or []),
     ):
         if not isinstance(source, dict):
@@ -840,6 +936,10 @@ async def update_bcnb_reports(
         scoped_results,
         lms_slots_by_class=lms_slots_by_class,
         lms_quality_gateway=lms_quality_gateway,
+        ai_reviewer=lms_ai_reviewer,
+        latest_week=latest_pair,
+        now=current_time,
+        reset_ai_batch_counter=reset_ai_batch_counter,
     )
 
     async def _maybe_update_row_checker_note(
@@ -875,15 +975,23 @@ async def update_bcnb_reports(
                 [target_result],
                 lms_slots_by_class=None,
                 lms_quality_gateway=lms_quality_gateway,
+                ai_reviewer=lms_ai_reviewer,
+                latest_week=latest_pair,
+                now=current_time,
+                reset_ai_batch_counter=False,
             )
             if isinstance(extra_lms_slots, dict):
                 if isinstance(resolved_lms_slots, dict):
                     resolved_lms_slots.update(extra_lms_slots)
                 else:
                     resolved_lms_slots = dict(extra_lms_slots)
-        inspect_and_attach_quality_issues(
+        await inspect_and_attach_quality_issues_async(
             [target_result],
             lms_slots_by_class=resolved_lms_slots,
+            now=current_time,
+            ai_reviewer=lms_ai_reviewer,
+            latest_week=latest_pair,
+            reset_ai_batch_counter=False,
         )
         has_readable_note = (
             isinstance(bcnb_row.get("qc_issue_note"), str)
@@ -1114,7 +1222,7 @@ async def update_bcnb_reports(
                     continue
                 if row_canonical_key not in selected_target_key_set:
                     continue
-            if is_current_week and not is_lesson_14(bcnb_row.get("buoi_so")):
+            if is_current_week:
                 row_identity = scan_target_identity(
                     {
                         "week": selected_week,
@@ -1470,9 +1578,13 @@ async def update_bcnb_reports(
                 selected_year=selected_year,
             )
 
-    inspect_and_attach_quality_issues(
+    await inspect_and_attach_quality_issues_async(
         scoped_results,
         lms_slots_by_class=resolved_lms_slots,
+        now=current_time,
+        ai_reviewer=lms_ai_reviewer,
+        latest_week=latest_pair,
+        reset_ai_batch_counter=False,
     )
 
     if failures:

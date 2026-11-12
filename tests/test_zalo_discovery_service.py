@@ -989,7 +989,7 @@ class ZaloDiscoveryServiceTests(unittest.IsolatedAsyncioTestCase):
                 {"ma_lop": "VT-C4K-GA02", "giao_vien": "B", "ngay_hoc": "14/08/2026", "ngay_hoc_iso": "2026-08-14", "buoi_so": "8"},
                 {"ma_lop": "VT-C4K-PTI09", "giao_vien": "C", "ngay_hoc": "15/08/2026", "ngay_hoc_iso": "2026-08-15", "buoi_so": "8"},
                 {"ma_lop": "VT-C4K-SA03", "giao_vien": "E", "ngay_hoc": "16/08/2026", "ngay_hoc_iso": "2026-08-16", "buoi_so": "8"},
-                {"ma_lop": "VT-C4K-L14NOZALO", "giao_vien": "F", "ngay_hoc": "30/08/2026", "ngay_hoc_iso": "2026-08-30", "buoi_so": "14"},
+                {"ma_lop": "VT-C4K-L14NOZALO", "giao_vien": "F", "ngay_hoc": "16/08/2026", "ngay_hoc_iso": "2026-08-16", "buoi_so": "14"},
             ],
             "required_data": [
                 {"ma_lop": "VT-C4K-GA01", "giao_vien": "A", "ngay_hoc": "07/08/2026", "ngay_hoc_iso": "2026-08-07", "buoi_so": "7"},
@@ -1056,8 +1056,8 @@ class ZaloDiscoveryServiceTests(unittest.IsolatedAsyncioTestCase):
                 {
                     "ma_lop": "VT-C4K-L14NOZALO",
                     "giao_vien": "F",
-                    "ngay_hoc": "30/08/2026",
-                    "ngay_hoc_iso": "2026-08-30",
+                    "ngay_hoc": "16/08/2026",
+                    "ngay_hoc_iso": "2026-08-16",
                     "buoi_so": "14",
                 }
             ],
@@ -1240,6 +1240,106 @@ class ZaloDiscoveryServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(same_day_13_14_plan["exempt_targets"]), 1)
         self.assertTrue(same_day_13_14_plan["scan_targets"][0].get("same_day_target_ambiguous"))
         self.assertEqual(same_day_13_14_plan["scan_targets"][0].get("same_day_target_count"), 2)
+
+    def test_6_5_2_week_45_and_week_46_lesson_14_deferral_of_future_sessions(self):
+        week_plan = {
+            "latest_week": {"week": 46, "year": 2026},
+            "required_week": {"week": 45, "year": 2026},
+            "selected_weeks": [
+                {"week": 45, "year": 2026},
+                {"week": 46, "year": 2026},
+            ],
+            "required_data": [
+                {
+                    "ma_lop": "VT-ROB-ARMB19",
+                    "giao_vien": "GV A",
+                    "ngay_hoc": "07/11/2026",
+                    "ngay_hoc_iso": "2026-11-07",
+                    "buoi_so": "14",
+                },
+                {
+                    "ma_lop": "VT-C4K-CSI02",
+                    "giao_vien": "GV B",
+                    "ngay_hoc": "09/11/2026",
+                    "ngay_hoc_iso": "2026-11-09",
+                    "buoi_so": "14",
+                },
+            ],
+            "latest_data": [
+                {
+                    "ma_lop": "VT-C4K-GB42-HB",
+                    "giao_vien": "GV C",
+                    "ngay_hoc": "11/11/2026",
+                    "ngay_hoc_iso": "2026-11-11",
+                    "buoi_so": "14",
+                },
+                {
+                    "ma_lop": "VT-C4K-GI32",
+                    "giao_vien": "GV D",
+                    "ngay_hoc": "13/11/2026",
+                    "ngay_hoc_iso": "2026-11-13",
+                    "buoi_so": "14",
+                },
+                {
+                    "ma_lop": "VT-ROB-ARMI12",
+                    "giao_vien": "GV E",
+                    "ngay_hoc": "13/11/2026",
+                    "ngay_hoc_iso": "2026-11-13",
+                    "buoi_so": "14",
+                },
+                {
+                    "ma_lop": "VT-ROB-PREI15",
+                    "giao_vien": "GV F",
+                    "ngay_hoc": "15/11/2026",
+                    "ngay_hoc_iso": "2026-11-15",
+                    "buoi_so": "14",
+                },
+                {
+                    "ma_lop": "VT-ROB-SEMI10",
+                    "giao_vien": "GV G",
+                    "ngay_hoc": "15/11/2026",
+                    "ngay_hoc_iso": "2026-11-15",
+                    "buoi_so": "14",
+                },
+                {
+                    "ma_lop": "VT-C4K-GB37",
+                    "giao_vien": "GV H",
+                    "ngay_hoc": "15/11/2026",
+                    "ngay_hoc_iso": "2026-11-15",
+                    "buoi_so": "14",
+                },
+            ],
+        }
+        plan = service._build_discovery_plan(
+            group_names=["MindX - VT-C4K-GB42-HB"],
+            bcnb_data=week_plan["latest_data"],
+            ignored_groups=[],
+            existing_groups=[],
+            bcnb_week_plan=week_plan,
+            now=datetime(2026, 11, 12, 10, 0, tzinfo=BUSINESS_TIMEZONE),
+        )
+        exempt_codes = [item["class_code"] for item in plan["exempt_targets"]]
+        deferred_codes = [item["class_code"] for item in plan["deferred_targets"]]
+        self.assertEqual(
+            set(exempt_codes),
+            {"VT-ROB-ARMB19", "VT-C4K-CSI02", "VT-C4K-GB42-HB"},
+        )
+        self.assertEqual(
+            set(deferred_codes),
+            {
+                "VT-C4K-GI32",
+                "VT-ROB-ARMI12",
+                "VT-ROB-PREI15",
+                "VT-ROB-SEMI10",
+                "VT-C4K-GB37",
+            },
+        )
+        for item in plan["deferred_targets"]:
+            self.assertEqual(item.get("target_kind"), "EXEMPTION")
+            self.assertEqual(
+                item.get("deferred_reason"),
+                "DEFERRED_FUTURE_CLASS_DATE",
+            )
 
 
 if __name__ == "__main__":

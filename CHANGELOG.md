@@ -4,6 +4,23 @@ Tài liệu này ghi lại toàn bộ quá trình hình thành, phát triển ki
 
 ---
 
+## [2026-11-12] — Phase 6.5: Chuẩn hóa quy tắc QC, Phễu 2 tầng AI nhận xét LMS, quy tắc SPCK/Robotics & hoãn buổi học chưa kết thúc (DEC-045)
+
+- **Trích xuất buổi học Zalo & Hoãn buổi học chưa kết thúc**:
+  - `services/zalo_safety.py` loại bỏ phần giới thiệu buổi kế tiếp / bài tập về nhà (`Buổi học kế tiếp`, `Bài tập về nhà`, ...) khi nhận diện số buổi báo cáo Zalo nhưng vẫn giữ các đoạn nội dung nối tiếp của buổi hiện tại.
+  - `services/zalo_discovery_plan.py`, `services/report_status.py`, `services/zalo_bcnb_service.py`, `services/lms_quality_service.py`, `services/zalo_parallel_service.py`, `repositories/report_repository.py`, `static/js/jobs.js` hoãn kiểm tra đối với buổi học ở tương lai hoặc cùng ngày nhưng chưa hết giờ học (bao gồm Buổi 14 của tuần hiện tại) với trạng thái `⏳ Chưa tới giờ kiểm tra` (`session_deferred=True`, `is_failed=False`), không tích BCNB và không ghi chú QC sớm, bảo đảm thứ tự ưu tiên kết quả mới nhất (`newest-wins`) giữa snapshot và job.
+- **Chuẩn hóa phân loại `FAIL` vs `NOTE` và quy tắc SPCK / Robotics (`ROB`)**:
+  - Nhận xét buổi học LMS hoặc nhận xét SPCK bỏ trống hay chỉ gõ `"."` được tính thẳng là lỗi `FAIL` (`ISSUE_CODE_LMS_SPCK_COMMENT_MISSING`, tô đỏ trong email quản lý); nội dung tóm tắt buổi học trống/`"."`/chỉ ghi `"Bài X"` giữ mức `NOTE` (`ISSUE_CODE_LMS_SUMMARY_NOTE`); học viên `ATTENDED`/`LATE_ARRIVED` nhưng nhận xét ghi nghỉ học (không có từ phủ định) tạo `NOTE` (`ISSUE_CODE_LMS_ATTENDANCE_CONFLICT_NOTE`).
+  - Tiêu đề SPCK chưa kèm tên học viên chuyển sang `NOTE` (`[LMS] Tiêu đề SPCK chưa ghi kèm tên học viên`); có thumbnail hoặc ảnh chụp màn hình đều thỏa điều kiện hình ảnh kèm `NOTE` tách riêng thành phần thiếu; khóa Robotics (`ROB`) chuyển thiếu file code thành `NOTE` (`[LMS] SPCK Robotics chưa có file code đính kèm`) và tại Buổi 14 kiểm tra link YouTube + hình ảnh (bỏ bắt buộc Slide).
+- **Phễu 2 tầng AI đánh giá nhận xét LMS khử PII (`LMS_AI_COMMENT_CHECK` + `GeminiLmsCommentReviewerGateway`)**:
+  - Gỡ bỏ bộ đếm từ khóa 3 ý cứng nhắc; bổ sung cổng kiểm tra nhận xét 2 tầng kết hợp quy tắc và Gemini AI bất đồng bộ không chặn vòng lặp sự kiện, giới hạn batch mỗi lượt quét, khóa cache SHA-256, khử PII tên học viên theo token-span không chồng lấp ở cả trình duyệt và Python (`[HS]`, `[URL]`, `[EMAIL]`, `[PHONE]`), và fallback tất định (`ISSUE_CODE_LMS_COMMENT_NOTE`, không tự sinh `FAIL`).
+- **Tệp thay đổi (27 files)**: `.env.example`, `CHECK_QUALITY.ps1`, `CHANGELOG.md`, `PROJECT_DECISIONS.md`, `PROJECT_STATE.md`, `UPGRADE_PROGRESS.md`, `googleform_autosubmit/config.py`, `repositories/report_repository.py`, `services/external_gateways.py`, `services/lms_quality_service.py`, `services/report_email_service.py`, `services/report_status.py`, `services/zalo_bcnb_service.py`, `services/zalo_discovery_plan.py`, `services/zalo_parallel_service.py`, `services/zalo_safety.py`, `static/js/jobs.js`, `tests/check_template_js.js`, `tests/test_bcnb_actions.py`, `tests/test_lms_attendance_quality.py`, `tests/test_lms_quality_service.py`, `tests/test_quality_isolation.py`, `tests/test_report_status.py`, `tests/test_rule_classifier_dates.py`, `tests/test_zalo_discovery_service.py`, `tests/test_zalo_parallel_service.py`, `tests/test_zalo_safety.py`.
+- **Bằng chứng kiểm chứng (`DEC-040`)**:
+  - Unit tests mục tiêu (7 module, 111 tests): `111/111 PASS` (exit `0`).
+  - Frontend JS contract (`node tests/check_template_js.js`): `template-js-contract-ok scripts=7 handlers=37 behavior=13` (exit `0`).
+  - Full isolated gate (`powershell -ExecutionPolicy Bypass -File .\CHECK_QUALITY.ps1 -Isolated`): `QUALITY GATE PASSED` (exit `0`, Ruff `0`, Mypy `0` trên 78 files, `715+` regression tests `OK`, branch coverage `78.9%`, `secrets=0`).
+  - Independent Review (`codex exec -m gpt-6.1-sol -c model_reasoning_effort="xhigh" -s read-only -`): **`VERDICT: PASS`** (session `01a1d035-ec02-7183-a03e-013fb069b571`). Chưa thực hiện quét trình duyệt live hoặc ghi Teaching production.
+
 ## [2026-11-11] — Loại cảnh báo lặp và làm gọn cột mô tả vấn đề
 
 - `repositories/report_repository.py` tách nhóm mô tả có nhãn LMS/Zalo trước khi khử trùng giữa ghi chú Teaching và danh sách vấn đề. Giữ nguyên lý do, số lượng và các nội dung khác nhau. Chuỗi mô tả cũ cũng được xử lý khi tạo email/CSV mới.

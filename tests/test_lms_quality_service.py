@@ -42,7 +42,8 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
         ):
             res = evaluate_lms_slot_summary(bad_summary)
             self.assertFalse(res["has_valid_summary"], msg=f"Should fail: {bad_summary}")
-            self.assertEqual(res["issue"], "[LMS] Chưa ghi nội dung bài học")
+            self.assertEqual(issue_text(res["issue"]), "[LMS] Chưa ghi nội dung bài học")
+            self.assertEqual(issue_severity(res["issue"]), SEVERITY_NOTE)
 
         for good_summary in (
             "<p>Học viên làm quen với khái niệm biến, kiểu dữ liệu và vòng lặp trong Python.</p>",
@@ -84,18 +85,13 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
                 }
             ]
         }
-        self.assertTrue(
-            is_checkpoint_session("VT-UNKNOWN-01", "", 6, slot_data=rubric_slot)
-        )
+        self.assertTrue(is_checkpoint_session("VT-UNKNOWN-01", "", 6, slot_data=rubric_slot))
 
     def test_regular_session_comments_catch_shallow_and_copy_paste_without_pii(
         self,
     ) -> None:
-        # Synthetic fixture modeled on VT-C4K-PTB16 Lesson 1 (shallow 2-sentence generic comment + copy-paste)
-        shallow_body = (
-            "Con đi học đúng giờ, có thái độ học tập nghiêm túc và tập trung lắng nghe giáo viên giảng bài. "
-            "Con cần tiếp tục duy trì tinh thần học tập tích cực để tiếp thu kiến thức tốt hơn trong các buổi học tiếp theo."
-        )
+        # Synthetic fixture modeled on VT-C4K-PTB16 Lesson 1 (shallow 1-line generic comment + copy-paste)
+        shallow_body = "Con đi học đúng giờ, chú ý lắng nghe giáo viên giảng bài."
         attendance = [
             {
                 "status": "ATTENDED",
@@ -113,9 +109,10 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(res["shallow_count"], 6)
         self.assertEqual(res["duplicate_count"], 6)
         self.assertEqual(res["status"], "REVIEW")
-        self.assertEqual(res["review_reasons"], {"chưa rõ điểm cần cải thiện": 6})
+        self.assertEqual(res["review_reasons"], {"nhận xét sơ sài": 6})
         self.assertEqual(issue_severity(res["issues"][0]), SEVERITY_NOTE)
         joined_issues = " ; ".join(issue_text(item) for item in res["issues"])
+        self.assertIn("[LMS] Nhận xét sơ sài (6/6 HS)", joined_issues)
         self.assertNotIn("Học Viên Ẩn Danh", joined_issues)
 
     def test_regular_session_comments_accept_3_part_structure(self) -> None:
@@ -196,15 +193,14 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
                 ),
             },
         ]
-        cp_bad = evaluate_lms_student_comments(
-            incomplete_cp, is_checkpoint=True, lesson=8
-        )
+        cp_bad = evaluate_lms_student_comments(incomplete_cp, is_checkpoint=True, lesson=8)
         self.assertEqual(cp_bad["attended_count"], 3)
         self.assertEqual(cp_bad["failed_count"], 3)
         self.assertEqual(
-            cp_bad["issues"],
+            [issue_text(x) for x in cp_bad["issues"]],
             ["[LMS] Nhận xét Checkpoint chưa đủ cấu trúc năng lực"],
         )
+        self.assertEqual(issue_severity(cp_bad["issues"][0]), SEVERITY_NOTE)
 
     def test_evaluate_zalo_content_issues_detects_wrong_date_lesson_and_title(
         self,
@@ -332,9 +328,19 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
             scan_results,
             lms_slots_by_class=slots_by_class,
         )
-        self.assertEqual(scan_results[0]["lms_quality_issues"][0], "[LMS] Chưa ghi nội dung bài học")
+        self.assertEqual(
+            issue_text(scan_results[0]["lms_quality_issues"][0]),
+            "[LMS] Chưa ghi nội dung bài học",
+        )
+        self.assertEqual(
+            issue_severity(scan_results[0]["lms_quality_issues"][0]),
+            SEVERITY_NOTE,
+        )
         self.assertEqual(issue_severity(scan_results[0]["lms_quality_issues"][1]), SEVERITY_NOTE)
-        self.assertIn("1/1 nhận xét", issue_text(scan_results[0]["lms_quality_issues"][1]))
+        self.assertIn(
+            "[LMS] Nhận xét sơ sài (1/1 HS)",
+            issue_text(scan_results[0]["lms_quality_issues"][1]),
+        )
 
         # Re-evaluating after teacher fixes LMS content must clear stale issues
         fixed_slots_by_class = {
@@ -386,9 +392,7 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
             {"status": "ATTENDED", "comment": dup_comment},
             {"status": "ATTENDED", "comment": unique_comment},
         ]
-        res_dup = evaluate_lms_student_comments(
-            three_students, is_checkpoint=False, lesson=2
-        )
+        res_dup = evaluate_lms_student_comments(three_students, is_checkpoint=False, lesson=2)
         self.assertEqual(res_dup["duplicate_count"], 2)
         self.assertEqual(res_dup["issues"], [])
 
@@ -448,13 +452,19 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
                     {
                         "origin": "https://teaching.mindx.edu.vn",
                         "localStorage": [
-                            {"name": "csrf_token", "value": "teaching_token_should_be_ignored_1234567890"}
+                            {
+                                "name": "csrf_token",
+                                "value": "teaching_token_should_be_ignored_1234567890",
+                            }
                         ],
                     },
                     {
                         "origin": "https://lms.mindx.edu.vn",
                         "localStorage": [
-                            {"name": "id_token", "value": "valid_lms_jwt_token_12345678901234567890"}
+                            {
+                                "name": "id_token",
+                                "value": "valid_lms_jwt_token_12345678901234567890",
+                            }
                         ],
                     },
                 ]
@@ -498,9 +508,7 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
             "",
         )
         attendance_between_header_and_title = (
-            "📘 NỘI DUNG BUỔI HỌC:\n"
-            "👥 ĐIỂM DANH: 6/6\n"
-            "📌 Tên bài học: Camera thông minh"
+            "📘 NỘI DUNG BUỔI HỌC:\n👥 ĐIỂM DANH: 6/6\n📌 Tên bài học: Camera thông minh"
         )
         self.assertEqual(
             extract_report_lesson_title(attendance_between_header_and_title),
@@ -521,9 +529,7 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         # 1. Missing studentAttendance list or empty attendance list flags manual check
-        res_none_att = evaluate_lms_student_comments(
-            None, is_checkpoint=False, lesson=1
-        )
+        res_none_att = evaluate_lms_student_comments(None, is_checkpoint=False, lesson=1)
         self.assertEqual(len(res_none_att["issues"]), 1)
         self.assertEqual(issue_code(res_none_att["issues"][0]), ISSUE_CODE_LMS_MANUAL_CHECK)
         self.assertIn(
@@ -531,9 +537,7 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
             issue_text(res_none_att["issues"][0]),
         )
 
-        res_empty_att = evaluate_lms_student_comments(
-            [], is_checkpoint=False, lesson=1
-        )
+        res_empty_att = evaluate_lms_student_comments([], is_checkpoint=False, lesson=1)
         self.assertEqual(len(res_empty_att["issues"]), 1)
         self.assertEqual(issue_code(res_empty_att["issues"][0]), ISSUE_CODE_LMS_MANUAL_CHECK)
         self.assertIn(
@@ -563,9 +567,7 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
             for c in codes[:60]
         }
         with patch.dict(os.environ, {"ZALO_QUALITY_ISOLATED": "0"}):
-            slots = await fetch_lms_class_slots_via_page(
-                fake_page, class_names=codes
-            )
+            slots = await fetch_lms_class_slots_via_page(fake_page, class_names=codes)
         item_61 = {"scan_target": {"class_code": codes[60], "lesson": "1"}}
         inspect_and_attach_quality_issues([item_61], lms_slots_by_class=slots)
         self.assertTrue(item_61.get("lms_quality_issues"))
@@ -705,10 +707,7 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
         ]
         gateway = SimpleNamespace(
             fetch_class_slots=AsyncMock(
-                return_value={
-                    f"SYNTH-JSB{week}": [{"fetch_error": True}]
-                    for week in (43, 44)
-                }
+                return_value={f"SYNTH-JSB{week}": [{"fetch_error": True}] for week in (43, 44)}
             )
         )
         with (
@@ -766,9 +765,7 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
                             "date": "2026-08-20T17:00:00.000Z",
                             "startTime": "2026-08-21T01:00:00.000Z",
                             "summary": "",
-                            "studentAttendance": [
-                                {"status": "ATTENDED", "comment": ""}
-                            ],
+                            "studentAttendance": [{"status": "ATTENDED", "comment": ""}],
                         }
                     ]
                 }
@@ -819,19 +816,13 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
                 evidence_root="unused-evidence-root",
                 screenshots_dir="unused-screenshots-dir",
                 runtime=runtime,
-                job_repo=SimpleNamespace(
-                    ensure_not_cancelled=AsyncMock(), update_job=AsyncMock()
-                ),
+                job_repo=SimpleNamespace(ensure_not_cancelled=AsyncMock(), update_job=AsyncMock()),
                 audit_repo=object(),
                 evidence_repo=SimpleNamespace(register_scan_results=AsyncMock()),
             )
         self.assertEqual(batch_gw.fetch_class_slots.await_count, 1)
-        self.assertEqual(
-            len(batch_res["scan_results"][0].get("lms_quality_issues", [])), 2
-        )
-        self.assertEqual(
-            len(repo.snapshots[1].get("lms_quality_issues", [])), 2
-        )
+        self.assertEqual(len(batch_res["scan_results"][0].get("lms_quality_issues", [])), 2)
+        self.assertEqual(len(repo.snapshots[1].get("lms_quality_issues", [])), 2)
 
     def test_stage4_4_email_table_alignment_truncation_and_csv_contract(self) -> None:
         import csv
@@ -847,6 +838,7 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
             _short_url_status,
             build_failed_classes_email_package,
         )
+
         self.assertEqual(_short_url_status("🟡 Đã nộp trễ – Có minh chứng"), "Trễ")
         self.assertEqual(_short_url_status("⚠️ AI gợi ý – Cần kiểm tra"), "Trễ")
         self.assertEqual(_short_url_status("✅ Đã nộp – Có minh chứng"), "OK")
@@ -857,7 +849,9 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
                 "teacher": f"Giảng viên {idx}",
                 "lesson": str((idx % 9) + 1),
                 "class_date": "24/10/2026",
-                "zalo_status": "✅ Đã nộp – Có minh chứng" if idx % 2 == 0 else "❌ Chưa tìm thấy báo cáo",
+                "zalo_status": "✅ Đã nộp – Có minh chứng"
+                if idx % 2 == 0
+                else "❌ Chưa tìm thấy báo cáo",
                 "lms_status": "❌ Chưa nhận xét (Buổi 2)" if idx % 2 == 0 else "✅ Đã nộp LMS",
                 "evaluation_status": (
                     "⏳ Đã hoàn tất nhận xét Zalo, chưa nhận xét LMS"
@@ -952,14 +946,17 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(len(pkg_large["gmail_compose_url"]), MAX_GMAIL_COMPOSE_URL_LEN)
         self.assertIn("Ctrl+V", unquote(pkg_large["gmail_compose_url"]))
 
-    async def test_hotfix_hostname_validation_temp_page_cleanup_and_rubric_regressions(self) -> None:
+    async def test_hotfix_hostname_validation_temp_page_cleanup_and_rubric_regressions(
+        self,
+    ) -> None:
         import asyncio
         from types import SimpleNamespace
         from unittest.mock import patch
         from googleform_autosubmit.config import Config
 
-        # 1. Positive-only comment with "cần tiếp tục duy trì / phát huy" (no improvement) must be flagged as shallow
-        positive_only = (
+        # 1. Under Phase 6.5 2-tier funnel: substantive >= 25-word comment passes Tier 1 without 3-part keywords,
+        # while a short 1-line generic comment is flagged as REVIEW ("Nhận xét sơ sài").
+        positive_substantive = (
             "NHẬN XÉT BUỔI HỌC SỐ 1: Học viên A (VT-C4K-PTB16)\n"
             "Con đi học đúng giờ, có thái độ học tập nghiêm túc và tập trung lắng nghe giáo viên giảng bài. "
             "Con cần tiếp tục duy trì và phát huy tinh thần học tập tích cực để tiếp thu kiến thức tốt hơn. "
@@ -967,13 +964,28 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         pos_slot = {
             "summary": "Tìm hiểu khái niệm biến và vòng lặp trong Python",
-            "studentAttendance": [{"status": "ATTENDED", "comment": positive_only}],
+            "studentAttendance": [{"status": "ATTENDED", "comment": positive_substantive}],
         }
         pos_res = evaluate_lms_slot_quality(
             pos_slot, class_code="VT-C4K-PTB16", khoi="Coding", lesson=1
         )
-        self.assertEqual(pos_res["lms_comments"]["status"], "REVIEW")
-        self.assertIn("chưa rõ điểm cần cải thiện", issue_text(pos_res["issues"][0]))
+        self.assertEqual(pos_res["lms_comments"]["status"], "COMPLETE")
+        self.assertEqual(pos_res["issues"], [])
+
+        short_generic_slot = {
+            "summary": "Tìm hiểu khái niệm biến và vòng lặp trong Python",
+            "studentAttendance": [
+                {
+                    "status": "ATTENDED",
+                    "comment": "NHẬN XÉT BUỔI HỌC SỐ 1: Học viên A (VT-C4K-PTB16)\nCon học ngoan, cần phát huy.",
+                }
+            ],
+        }
+        short_res = evaluate_lms_slot_quality(
+            short_generic_slot, class_code="VT-C4K-PTB16", khoi="Coding", lesson=1
+        )
+        self.assertEqual(short_res["lms_comments"]["status"], "REVIEW")
+        self.assertEqual(issue_text(short_res["issues"][0]), "[LMS] Nhận xét sơ sài (1/1 HS)")
 
         # 2. Numbered Checkpoint rubric without "Điểm năng lực" on non-default session (B6) is recognized as Checkpoint
         numbered_rubric = (
@@ -1017,7 +1029,10 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
                 return None
 
             async def evaluate(self, script: str, arg: dict) -> dict:
-                return {c: [{"summary": "Bài học hợp lệ đầy đủ nội dung", "studentAttendance": []}] for c in arg["classCodes"]}
+                return {
+                    c: [{"summary": "Bài học hợp lệ đầy đủ nội dung", "studentAttendance": []}]
+                    for c in arg["classCodes"]
+                }
 
             async def close(self) -> None:
                 self.closed = True
@@ -1040,7 +1055,9 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch.dict(os.environ, {"ZALO_QUALITY_ISOLATED": "0"}),
             patch.object(Config, "LMS_URL", "https://lms.mindx.edu.vn.attacker.invalid/admin"),
-            patch("services.lms_service._login_lms_if_needed", new_callable=AsyncMock) as login_mock,
+            patch(
+                "services.lms_service._login_lms_if_needed", new_callable=AsyncMock
+            ) as login_mock,
         ):
             await fetch_lms_class_slots_via_page(main_spoof, class_names=["VT-C4K-PTB16"])
             self.assertEqual(login_mock.await_count, 0)
@@ -1052,7 +1069,9 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch.dict(os.environ, {"ZALO_QUALITY_ISOLATED": "0"}),
             patch.object(Config, "LMS_URL", "https://lms.mindx.edu.vn/admin/class-sessions"),
-            patch("services.lms_service._login_lms_if_needed", new_callable=AsyncMock) as login_mock,
+            patch(
+                "services.lms_service._login_lms_if_needed", new_callable=AsyncMock
+            ) as login_mock,
         ):
             await fetch_lms_class_slots_via_page(main_redirect, class_names=["VT-C4K-PTB16"])
             self.assertEqual(login_mock.await_count, 0)
@@ -1137,9 +1156,7 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
                 "khoi": "Coding",
             }
         }
-        inspect_and_attach_quality_issues(
-            [row_buoi2_shifted], lms_slots_by_class=makeup_slots
-        )
+        inspect_and_attach_quality_issues([row_buoi2_shifted], lms_slots_by_class=makeup_slots)
         self.assertEqual(len(row_buoi2_shifted["lms_quality_issues"]), 1)
         self.assertEqual(
             issue_code(row_buoi2_shifted["lms_quality_issues"][0]),
@@ -1168,9 +1185,7 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
                 "class_date_iso": "2026-10-24",
             }
         }
-        inspect_and_attach_quality_issues(
-            [row_cancelled], lms_slots_by_class=cancelled_slots
-        )
+        inspect_and_attach_quality_issues([row_cancelled], lms_slots_by_class=cancelled_slots)
         self.assertEqual(len(row_cancelled["lms_quality_issues"]), 1)
         self.assertIn("đã bị huỷ", issue_text(row_cancelled["lms_quality_issues"][0]))
         self.assertIn("cần kiểm tra thủ công", issue_text(row_cancelled["lms_quality_issues"][0]))
@@ -1197,9 +1212,7 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
                 "class_date_iso": "2026-10-24",
             }
         }
-        inspect_and_attach_quality_issues(
-            [row_dup_date], lms_slots_by_class=dup_date_slots
-        )
+        inspect_and_attach_quality_issues([row_dup_date], lms_slots_by_class=dup_date_slots)
         self.assertEqual(len(row_dup_date["lms_quality_issues"]), 1)
         self.assertIn("trùng ngày", issue_text(row_dup_date["lms_quality_issues"][0]))
         self.assertIn("cần kiểm tra thủ công", issue_text(row_dup_date["lms_quality_issues"][0]))
@@ -1221,12 +1234,12 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
                 "class_date_iso": "2026-10-24",
             }
         }
-        inspect_and_attach_quality_issues(
-            [row_wrong_lesson], lms_slots_by_class=wrong_lesson_slots
-        )
+        inspect_and_attach_quality_issues([row_wrong_lesson], lms_slots_by_class=wrong_lesson_slots)
         self.assertEqual(len(row_wrong_lesson["lms_quality_issues"]), 1)
         self.assertIn("lệch số buổi", issue_text(row_wrong_lesson["lms_quality_issues"][0]))
-        self.assertIn("cần kiểm tra thủ công", issue_text(row_wrong_lesson["lms_quality_issues"][0]))
+        self.assertIn(
+            "cần kiểm tra thủ công", issue_text(row_wrong_lesson["lms_quality_issues"][0])
+        )
 
         # 5. Missing date metadata on slot -> manual check (no positional fallback!)
         no_date_slots = {"VT-C4K-PTB16": [{**valid_slot_base, "index": 0}]}
@@ -1237,9 +1250,7 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
                 "class_date_iso": "2026-10-24",
             }
         }
-        inspect_and_attach_quality_issues(
-            [row_no_date], lms_slots_by_class=no_date_slots
-        )
+        inspect_and_attach_quality_issues([row_no_date], lms_slots_by_class=no_date_slots)
         self.assertEqual(len(row_no_date["lms_quality_issues"]), 1)
         self.assertIn("Thiếu thông tin ngày học", issue_text(row_no_date["lms_quality_issues"][0]))
         self.assertIn("cần kiểm tra thủ công", issue_text(row_no_date["lms_quality_issues"][0]))
@@ -1260,9 +1271,7 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
                 "class_date_iso": "2026-10-24",
             }
         }
-        inspect_and_attach_quality_issues(
-            [row_no_lesson], lms_slots_by_class=no_lesson_slots
-        )
+        inspect_and_attach_quality_issues([row_no_lesson], lms_slots_by_class=no_lesson_slots)
         self.assertEqual(len(row_no_lesson["lms_quality_issues"]), 1)
         self.assertIn("Thiếu thông tin số buổi", issue_text(row_no_lesson["lms_quality_issues"][0]))
         self.assertIn("cần kiểm tra thủ công", issue_text(row_no_lesson["lms_quality_issues"][0]))
@@ -1285,14 +1294,16 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
                 "class_date_iso": "2026-10-24",
             }
         }
-        inspect_and_attach_quality_issues(
-            [row_tz_prev], lms_slots_by_class=tz_prev_day_slots
-        )
+        inspect_and_attach_quality_issues([row_tz_prev], lms_slots_by_class=tz_prev_day_slots)
         self.assertEqual(len(row_tz_prev["lms_quality_issues"]), 1)
-        self.assertIn("Không tìm thấy slot khớp ngày", issue_text(row_tz_prev["lms_quality_issues"][0]))
+        self.assertIn(
+            "Không tìm thấy slot khớp ngày", issue_text(row_tz_prev["lms_quality_issues"][0])
+        )
 
         # 7. 5.3.4: Indeterminate Zalo scan (INSUFFICIENT_EVIDENCE or scan error) preserves existing [Zalo] issues on BCNB
-        existing_bcnb_note = "Ghi chú tay | [Zalo] Báo cáo ghi sai buổi; [LMS] Chưa ghi nội dung bài học"
+        existing_bcnb_note = (
+            "Ghi chú tay | [Zalo] Báo cáo ghi sai buổi; [LMS] Chưa ghi nội dung bài học"
+        )
         proven_issues = [
             "[Zalo] Báo cáo ghi sai buổi",
             "[LMS] Chưa ghi nội dung bài học",
@@ -1490,9 +1501,7 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
 
         def _make_jwt(exp_epoch: int) -> str:
             hdr = (
-                base64.urlsafe_b64encode(
-                    json.dumps({"alg": "RS256", "typ": "JWT"}).encode("utf-8")
-                )
+                base64.urlsafe_b64encode(json.dumps({"alg": "RS256", "typ": "JWT"}).encode("utf-8"))
                 .decode("ascii")
                 .rstrip("=")
             )
@@ -1533,9 +1542,7 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
                             "origins": [
                                 {
                                     "origin": "https://lms.mindx.edu.vn",
-                                    "localStorage": [
-                                        {"name": "id_token", "value": expired_jwt}
-                                    ],
+                                    "localStorage": [{"name": "id_token", "value": expired_jwt}],
                                 }
                             ]
                         }
@@ -1609,9 +1616,7 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch.dict(os.environ, {"ZALO_QUALITY_ISOLATED": "0"}),
-            patch.object(
-                Config, "LMS_URL", "https://lms.mindx.edu.vn/admin/class-sessions"
-            ),
+            patch.object(Config, "LMS_URL", "https://lms.mindx.edu.vn/admin/class-sessions"),
             patch(
                 "services.lms_service._login_lms_if_needed",
                 side_effect=_fake_sso_login,
@@ -1626,9 +1631,7 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
                 sso_page.eval_calls[0]["preResolvedToken"],
                 f"Bearer {valid_jwt}",
             )
-            self.assertFalse(
-                fetched_sso["VT-ROB-ARMB20"][0].get("fetch_error", False)
-            )
+            self.assertFalse(fetched_sso["VT-ROB-ARMB20"][0].get("fetch_error", False))
 
         # 1b. Redirect to https://base.mindx.edu.vn/login?callbackUrl=... is also trusted
         class _BaseSsoLoginPage(_SsoLoginPage):
@@ -1645,9 +1648,7 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
         base_sso_page = _BaseSsoLoginPage()
         with (
             patch.dict(os.environ, {"ZALO_QUALITY_ISOLATED": "0"}),
-            patch.object(
-                Config, "LMS_URL", "https://lms.mindx.edu.vn/admin/class-sessions"
-            ),
+            patch.object(Config, "LMS_URL", "https://lms.mindx.edu.vn/admin/class-sessions"),
             patch(
                 "services.lms_service._login_lms_if_needed",
                 side_effect=_fake_sso_login,
@@ -1658,9 +1659,7 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(base_sso_login_mock.await_count, 1)
             self.assertEqual(len(base_sso_page.eval_calls), 1)
-            self.assertFalse(
-                fetched_base_sso["VT-ROB-ARMB20"][0].get("fetch_error", False)
-            )
+            self.assertFalse(fetched_base_sso["VT-ROB-ARMB20"][0].get("fetch_error", False))
 
         # 2. JS findToken() ignores expired JWT in localStorage and picks valid JWT;
         #    and when 401/UNAUTHENTICATED occurs, JS short-circuits with __auth_error__=True.
@@ -1813,9 +1812,7 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch.dict(os.environ, {"ZALO_QUALITY_ISOLATED": "0"}),
-            patch.object(
-                Config, "LMS_URL", "https://lms.mindx.edu.vn/admin/class-sessions"
-            ),
+            patch.object(Config, "LMS_URL", "https://lms.mindx.edu.vn/admin/class-sessions"),
             patch(
                 "services.lms_service._login_lms_if_needed",
                 side_effect=_fake_http_downgrade_login,
@@ -1884,9 +1881,7 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
         blank_rec_page = _BlankRecoveryPage()
         with (
             patch.dict(os.environ, {"ZALO_QUALITY_ISOLATED": "0"}),
-            patch.object(
-                Config, "LMS_URL", "https://lms.mindx.edu.vn/admin/class-sessions"
-            ),
+            patch.object(Config, "LMS_URL", "https://lms.mindx.edu.vn/admin/class-sessions"),
             patch(
                 "services.lms_service._login_lms_if_needed",
                 side_effect=_fake_sso_login,
@@ -1928,7 +1923,9 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
         fetch_calls = 0
         observed_worker_slots: list[dict] = []
 
-        async def _fake_pw_fetch(_page: object, codes: list[str], *, target_lessons_by_class: dict | None = None) -> dict:
+        async def _fake_pw_fetch(
+            _page: object, codes: list[str], *, target_lessons_by_class: dict | None = None
+        ) -> dict:
             nonlocal fetch_calls
             fetch_calls += 1
             if fetch_calls == 1:
@@ -2031,11 +2028,7 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
             patch.object(
                 par,
                 "_scan_one_target",
-                AsyncMock(
-                    side_effect=lambda _p, **kw: _verified_scan_result(
-                        kw["target"]
-                    )
-                ),
+                AsyncMock(side_effect=lambda _p, **kw: _verified_scan_result(kw["target"])),
             ),
             patch.object(par, "update_bcnb_reports", new=_fake_update_bcnb),
             patch.object(par, "log_message"),
@@ -2056,9 +2049,7 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
                 evidence_root="unused-evidence-root",
                 screenshots_dir="unused-screenshots-dir",
                 runtime=par_runtime,
-                job_repo=SimpleNamespace(
-                    ensure_not_cancelled=AsyncMock(), update_job=AsyncMock()
-                ),
+                job_repo=SimpleNamespace(ensure_not_cancelled=AsyncMock(), update_job=AsyncMock()),
                 audit_repo=object(),
                 evidence_repo=SimpleNamespace(register_scan_results=AsyncMock()),
             )
@@ -2169,7 +2160,7 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [issue_text(x) for x in res_b14_missing_media["issues"]],
             [
-                "[LMS] SPCK Buổi 14 thiếu link YouTube (2/2 HS)",
+                "[LMS] SPCK Buổi 14 thiếu link video YouTube (2/2 HS)",
                 "[LMS] SPCK Buổi 14 thiếu link/file Slide thuyết trình (2/2 HS)",
             ],
         )
@@ -2190,9 +2181,7 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
         }
         valid_b14_stu2 = {
             **valid_work_b12_stu2,
-            "relatedUrls": [
-                {"name": "Video demo", "url": "https://youtu.be/abc123XYZ89"}
-            ],
+            "relatedUrls": [{"name": "Video demo", "url": "https://youtu.be/abc123XYZ89"}],
             "attachmentUrls": [
                 "https://static.mindx.edu.vn/uploads/source.zip",
                 "https://static.mindx.edu.vn/uploads/slide_thuyet_trinh.pptx",
@@ -2223,22 +2212,16 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
                 lesson=lesson_no,
             )
             spck_fails = [
-                x
-                for x in res_zero["issues"]
-                if issue_code(x) == ISSUE_CODE_LMS_SPCK_MISSING
+                x for x in res_zero["issues"] if issue_code(x) == ISSUE_CODE_LMS_SPCK_MISSING
             ]
             self.assertEqual(len(spck_fails), 1)
-            self.assertEqual(
-                issue_text(spck_fails[0]), "[LMS] Chưa nộp SPCK (2/2 HS)"
-            )
+            self.assertEqual(issue_text(spck_fails[0]), "[LMS] Chưa nộp SPCK (2/2 HS)")
             self.assertEqual(issue_severity(spck_fails[0]), SEVERITY_FAIL)
             row_check = {
                 "lesson": str(lesson_no),
                 "status": LESSON_14_STATUS if lesson_no == 14 else "✅ Đã nộp",
                 "evidence_state": (
-                    LESSON_14_EXEMPTION
-                    if lesson_no == 14
-                    else "SUBMITTED_VERIFIED"
+                    LESSON_14_EXEMPTION if lesson_no == 14 else "SUBMITTED_VERIFIED"
                 ),
                 "lms_status": "✅ Đã nộp LMS",
                 "lms_quality_issues": res_zero["issues"],
@@ -2269,16 +2252,15 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
             [issue_text(x) for x in res_rob_partial["issues"]],
             [
                 "[LMS] Thiếu nộp SPCK (1/2 HS)",
-                "[LMS] SPCK thiếu thông tin học viên (1/1 HS)",
-                "[LMS] SPCK thiếu ảnh thumbnail/ảnh chụp (1/1 HS)",
-                "[LMS] SPCK thiếu file đính kèm (1/1 HS)",
+                "[LMS] Tiêu đề SPCK chưa ghi kèm tên học viên (1/1 HS)",
+                "[LMS] SPCK chưa có ảnh sản phẩm (1/1 HS)",
+                "[LMS] SPCK chưa có file code đính kèm (1/1 HS)",
                 "[LMS] Nhận xét SPCK sơ sài (1/1 HS)",
             ],
         )
         self.assertTrue(
             all(
-                issue_code(x) == ISSUE_CODE_LMS_SPCK_NOTE
-                and issue_severity(x) == SEVERITY_NOTE
+                issue_code(x) == ISSUE_CODE_LMS_SPCK_NOTE and issue_severity(x) == SEVERITY_NOTE
                 for x in res_rob_partial["issues"]
             )
         )
@@ -2340,9 +2322,7 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
         #    PII scrubbing (including relatedUrls.name), pagination cap safety, and Lesson 14 BCNB checker note update
         exp_future = int(time.time()) + 7200
         payload_b64 = (
-            base64.urlsafe_b64encode(
-                json.dumps({"exp": exp_future}).encode("utf-8")
-            )
+            base64.urlsafe_b64encode(json.dumps({"exp": exp_future}).encode("utf-8"))
             .decode("ascii")
             .rstrip("=")
         )
@@ -2376,6 +2356,10 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
                                         {
                                             activeInClass: false,
                                             student: { id: 'stu_dropped_88', fullName: 'Trần Hoàng Bách' }
+                                        },
+                                        {
+                                            activeInClass: false,
+                                            student: { id: 'stu_thai_77', fullName: 'Nguyễn Văn Thái' }
                                         }
                                     ],
                                     slots: [{
@@ -2386,7 +2370,7 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
                                         studentAttendance: [{
                                             student: { id: 'stu_raw_id_99', fullName: 'Nguyễn Văn Minh Quân' },
                                             status: 'ATTENDED',
-                                            comment: ''
+                                            comment: 'Thái Độ Học Tập tích cực, riêng Thái nắm vững vòng lặp Python. Còn Thái làm bài rất nhanh. Với Thái, con nắm bài tốt.'
                                         }]
                                     }]
                                 }]
@@ -2887,6 +2871,10 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
             rel_work["relatedUrls"],
             [{"name": "spck%2F[HS].png", "url": "spck%2FHS.png"}],
         )
+        self.assertEqual(
+            fetched_video_url["VT-JSB15"][0]["studentAttendance"][0]["comment"],
+            "Thái Độ Học Tập tích cực, riêng [HS] nắm vững vòng lặp Python. Còn [HS] làm bài rất nhanh. Với [HS], con nắm bài tốt.",
+        )
         eval_video_slide_ok = evaluate_lms_spck_quality(
             fetched_video_url["VT-JSB15"][0],
             class_code="VT-JSB15",
@@ -2901,9 +2889,7 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stream_stats.get("streamChunksRead"), 6)
         self.assertTrue(stream_stats.get("streamReaderCancelled"))
         self.assertFalse(stream_stats.get("streamJsonCalled"))
-        self.assertTrue(
-            fetched_byte_overflow["VT-JSB15"][0].get("studentWorksFetchError", False)
-        )
+        self.assertTrue(fetched_byte_overflow["VT-JSB15"][0].get("studentWorksFetchError", False))
         eval_byte_overflow = evaluate_lms_slot_quality(
             fetched_byte_overflow["VT-JSB15"][0],
             class_code="VT-JSB15",
@@ -2914,14 +2900,10 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
             [issue_code(x) for x in eval_byte_overflow["issues"]],
             [ISSUE_CODE_LMS_MANUAL_CHECK],
         )
-        serialized_unknown_owner = json.dumps(
-            fetched_unknown_owner, ensure_ascii=False
-        )
+        serialized_unknown_owner = json.dumps(fetched_unknown_owner, ensure_ascii=False)
         self.assertNotIn("Le Anh Dung", serialized_unknown_owner)
         self.assertNotIn("unknown_stu_777", serialized_unknown_owner)
-        self.assertTrue(
-            fetched_unknown_owner["VT-JSB15"][0].get("studentWorksFetchError")
-        )
+        self.assertTrue(fetched_unknown_owner["VT-JSB15"][0].get("studentWorksFetchError"))
         eval_unknown_owner = evaluate_lms_slot_quality(
             fetched_unknown_owner["VT-JSB15"][0],
             class_code="VT-JSB15",
@@ -2932,9 +2914,7 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
             [issue_code(x) for x in eval_unknown_owner["issues"]],
             [ISSUE_CODE_LMS_MANUAL_CHECK],
         )
-        self.assertTrue(
-            fetched_overflow["VT-JSB15"][0].get("studentWorksFetchError", False)
-        )
+        self.assertTrue(fetched_overflow["VT-JSB15"][0].get("studentWorksFetchError", False))
         eval_overflow = evaluate_lms_slot_quality(
             fetched_overflow["VT-JSB15"][0],
             class_code="VT-JSB15",
@@ -2995,7 +2975,7 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
             }
         ]
         expected_l14_note = (
-            "[LMS] SPCK Buổi 14 thiếu link YouTube (1/1 HS); "
+            "[LMS] SPCK Buổi 14 thiếu link video YouTube (1/1 HS); "
             "[LMS] SPCK Buổi 14 thiếu link/file Slide thuyết trình (1/1 HS)"
         )
         l14_page = MagicMock()
@@ -3014,9 +2994,7 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         l14_audit_repo.list_for_target = AsyncMock(return_value=[])
         l14_job_repo = AsyncMock()
-        fake_lms_gw = SimpleNamespace(
-            fetch_class_slots=AsyncMock(return_value=fetched_jsb15)
-        )
+        fake_lms_gw = SimpleNamespace(fetch_class_slots=AsyncMock(return_value=fetched_jsb15))
         with (
             patch(
                 "services.zalo_bcnb_service._read_bcnb_schedule_rows",
@@ -3093,9 +3071,1196 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fake_lms_gw.fetch_class_slots.await_count, 1)
         self.assertEqual(summary_l14_synth["checker_note_updated_count"], 1)
         self.assertEqual(len(synthesized_l14_results), 1)
-        self.assertEqual(
-            synthesized_l14_results[0]["qc_issue_note"], expected_l14_note
+        self.assertEqual(synthesized_l14_results[0]["qc_issue_note"], expected_l14_note)
+
+    def test_phase65_dot_bypass_and_spck_missing_comment_fail(self) -> None:
+        from repositories.report_repository import _resolve_row_evaluation_status
+        from services.lms_quality_service import evaluate_lms_spck_quality
+        from services.report_email_service import build_failed_classes_email_package
+        from services.report_status import (
+            ISSUE_CODE_LMS_QUALITY_FAIL,
+            ISSUE_CODE_LMS_SPCK_COMMENT_MISSING,
+            SEVERITY_FAIL,
+            has_spck_comment_missing_fail,
+            is_failed,
         )
+
+        # 1. LMS Session Comments: empty, ".", "...", "-", "ok", "[HS] ." -> FAIL (missing_count)
+        for bad_comment in ("", "   ", ".", "...", "-", "ok", "[HS] ."):
+            res = evaluate_lms_student_comments(
+                [
+                    {"status": "ATTENDED", "comment": bad_comment},
+                    {
+                        "status": "ATTENDED",
+                        "comment": (
+                            "Con nắm vững kiến thức bài học hôm nay, tự giác hoàn thành đầy đủ "
+                            "các thử thách lập trình trên lớp và biết vận dụng vòng lặp rất tốt."
+                        ),
+                    },
+                ],
+                is_checkpoint=False,
+                lesson=5,
+            )
+            self.assertEqual(
+                res["missing_count"], 1, msg=f"Should count as missing: {bad_comment!r}"
+            )
+            self.assertEqual(res["status"], "MISSING")
+            self.assertEqual(issue_code(res["issues"][0]), ISSUE_CODE_LMS_QUALITY_FAIL)
+            self.assertEqual(issue_severity(res["issues"][0]), SEVERITY_FAIL)
+            self.assertEqual(issue_text(res["issues"][0]), "[LMS] Chưa nhận xét học viên (1/2 HS)")
+
+        # 2. SPCK Comments (Option A): empty or "." -> LMS_SPCK_COMMENT_MISSING (FAIL, is_failed=True)
+        attended_two = [
+            {
+                "status": "ATTENDED",
+                "studentKey": "stu_1",
+                "comment": "Con hoàn thành tốt sản phẩm cuối khóa và nắm vững các khối lệnh lập trình trong dự án.",
+            },
+            {
+                "status": "ATTENDED",
+                "studentKey": "stu_2",
+                "comment": "Con hoàn thành tốt sản phẩm cuối khóa và nắm vững các khối lệnh lập trình trong dự án.",
+            },
+        ]
+        works_dot = [
+            {
+                "studentKey": "stu_1",
+                "title": "GA38 - Nguyễn Văn A - Dự án Game",
+                "hasStudentInfoInTitle": True,
+                "thumbnail": "https://img/thumb1.png",
+                "imageUrl": ["https://img/shot1.png"],
+                "attachmentUrls": ["https://files/game.sb3"],
+                "comment": ".",
+            },
+            {
+                "studentKey": "stu_2",
+                "title": "GA38 - Trần Thị B - Dự án Game",
+                "hasStudentInfoInTitle": True,
+                "thumbnail": "https://img/thumb2.png",
+                "imageUrl": ["https://img/shot2.png"],
+                "attachmentUrls": ["https://files/game2.sb3"],
+                "comment": "Sản phẩm hoàn thiện tốt, giao diện đẹp mắt, nhân vật di chuyển mượt mà và xử lý va chạm chính xác.",
+            },
+        ]
+        spck_res = evaluate_lms_spck_quality(
+            {"studentAttendance": attended_two, "studentWorks": works_dot},
+            class_code="VT-C4K-GA38",
+            khoi="Coding",
+            lesson=13,
+        )
+        self.assertEqual(spck_res["missing_comment_count"], 1)
+        self.assertEqual(spck_res["shallow_comment_count"], 0)
+        self.assertEqual(len(spck_res["issues"]), 1)
+        self.assertEqual(issue_code(spck_res["issues"][0]), ISSUE_CODE_LMS_SPCK_COMMENT_MISSING)
+        self.assertEqual(issue_severity(spck_res["issues"][0]), SEVERITY_FAIL)
+        self.assertEqual(issue_text(spck_res["issues"][0]), "[LMS] SPCK chưa có nhận xét (1/2 HS)")
+
+        row_spck_comment_fail = {
+            "group": "VT-C4K-GA38",
+            "class_code": "VT-C4K-GA38",
+            "lesson": "13",
+            "person": "GV GA38",
+            "status": "✅ Đã báo cáo",
+            "evidence_state": "SUBMITTED_VERIFIED",
+            "lms_status": "✅ Đã nộp LMS",
+            "lms_quality_issues": spck_res["issues"],
+            "quality_issues": spck_res["issues"],
+        }
+        self.assertTrue(has_spck_comment_missing_fail(row_spck_comment_fail))
+        self.assertTrue(is_failed(row_spck_comment_fail))
+        self.assertEqual(
+            _resolve_row_evaluation_status(
+                zalo_status="✅ Đã báo cáo",
+                lms_status="✅ Đã nộp LMS",
+                nx_zalo_checked=True,
+                nx_lms_checked=True,
+                raw_evaluation_status="",
+                row=row_spck_comment_fail,
+            ),
+            "❌ SPCK chưa có nhận xét trên LMS",
+        )
+        email_pkg = build_failed_classes_email_package(
+            week=46,
+            year=2026,
+            failed_rows=[row_spck_comment_fail],
+            total_rows_count=1,
+            selected_job_id=None,
+            recipients=["owner@example.com"],
+        )
+        self.assertIn("color:#b91c1c;font-weight:600;", email_pkg["html_table"])
+        self.assertIn("[LMS] SPCK chưa có nhận xét (1/2 HS)", email_pkg["html_table"])
+        self.assertIn("❌ SPCK chưa có nhận xét trên LMS", email_pkg["html_table"])
+
+    def test_phase65_attendance_conflict_spck_wording_and_robotics_rules(self) -> None:
+        from services.lms_quality_service import evaluate_lms_spck_quality
+        from services.report_status import (
+            ISSUE_CODE_LMS_ATTENDANCE_CONFLICT_NOTE,
+            ISSUE_CODE_LMS_SPCK_NOTE,
+            is_failed,
+        )
+
+        # 1. CSA04-HB / JSA15: LATE_ARRIVED or ATTENDED + "Bạn nghỉ" -> LMS_ATTENDANCE_CONFLICT_NOTE (NOTE, is_failed=False)
+        conflict_res = evaluate_lms_student_comments(
+            [
+                {"status": "LATE_ARRIVED", "comment": "Bạn nghỉ"},
+                {"status": "ATTENDED", "comment": "HV xin nghỉ phép buổi hôm nay"},
+                {
+                    "status": "ATTENDED",
+                    "comment": (
+                        "Con nắm vững kiến thức bài học hôm nay, tự giác hoàn thành đầy đủ "
+                        "các thử thách lập trình trên lớp và biết vận dụng vòng lặp rất tốt."
+                    ),
+                },
+            ],
+            is_checkpoint=False,
+            lesson=4,
+        )
+        self.assertEqual(conflict_res["attendance_conflict_count"], 2)
+        self.assertEqual(conflict_res["shallow_count"], 0)
+        self.assertEqual(conflict_res["status"], "REVIEW")
+        self.assertEqual(len(conflict_res["issues"]), 1)
+        self.assertEqual(
+            issue_code(conflict_res["issues"][0]),
+            ISSUE_CODE_LMS_ATTENDANCE_CONFLICT_NOTE,
+        )
+        self.assertEqual(issue_severity(conflict_res["issues"][0]), SEVERITY_NOTE)
+        self.assertEqual(
+            issue_text(conflict_res["issues"][0]),
+            "[LMS] Lỗi điểm danh: tích Đi học/Đến muộn nhưng nhận xét ghi học viên nghỉ (2 HS)",
+        )
+        self.assertFalse(
+            is_failed(
+                {
+                    "status": "✅ Đã báo cáo",
+                    "evidence_state": "SUBMITTED_VERIFIED",
+                    "lms_status": "✅ Đã nộp LMS",
+                    "lms_quality_issues": conflict_res["issues"],
+                }
+            )
+        )
+
+        # 2. SPCK Title & 3 Distinct Image Notes
+        attended_three = [
+            {
+                "status": "ATTENDED",
+                "studentKey": f"stu_{i}",
+                "comment": "Con hoàn thành tốt sản phẩm cuối khóa và nắm vững các khối lệnh lập trình trong dự án.",
+            }
+            for i in range(1, 4)
+        ]
+        good_comment = "Sản phẩm hoàn thiện tốt, giao diện đẹp mắt, nhân vật di chuyển mượt mà và xử lý va chạm chính xác."
+        works_granularity = [
+            {
+                "studentKey": "stu_1",
+                "title": ".",
+                "hasStudentInfoInTitle": False,
+                "thumbnail": "",
+                "imageUrl": [],
+                "attachmentUrls": ["https://files/a.sb3"],
+                "comment": good_comment,
+            },
+            {
+                "studentKey": "stu_2",
+                "title": "Game Bắn Thiên Thạch",
+                "hasStudentInfoInTitle": False,
+                "thumbnail": "https://img/thumb.png",
+                "imageUrl": [],
+                "attachmentUrls": ["https://files/b.sb3"],
+                "comment": good_comment,
+            },
+            {
+                "studentKey": "stu_3",
+                "title": "CSI02 - HV 3 - Web Bán Hàng",
+                "hasStudentInfoInTitle": True,
+                "thumbnail": "",
+                "imageUrl": ["https://img/shot.png"],
+                "attachmentUrls": ["https://files/c.sb3"],
+                "comment": good_comment,
+            },
+        ]
+        gran_res = evaluate_lms_spck_quality(
+            {"studentAttendance": attended_three, "studentWorks": works_granularity},
+            class_code="VT-C4K-CSI02",
+            khoi="Coding",
+            lesson=12,
+        )
+        self.assertEqual(
+            [issue_text(x) for x in gran_res["issues"]],
+            [
+                "[LMS] SPCK chưa đặt tên sản phẩm (1/3 HS)",
+                "[LMS] Tiêu đề SPCK chưa ghi kèm tên học viên (1/3 HS)",
+                "[LMS] SPCK chưa có ảnh sản phẩm (1/3 HS)",
+                "[LMS] SPCK thiếu ảnh chụp bổ sung (1/3 HS)",
+                "[LMS] SPCK thiếu ảnh đại diện (1/3 HS)",
+            ],
+        )
+        for item in gran_res["issues"]:
+            self.assertEqual(issue_code(item), ISSUE_CODE_LMS_SPCK_NOTE)
+            self.assertEqual(issue_severity(item), SEVERITY_NOTE)
+
+        # 3. Robotics B14: checks YouTube + images, skips Slide check, and notes missing code file with Robotics wording
+        rob_b14_res = evaluate_lms_spck_quality(
+            {
+                "studentAttendance": [attended_three[0]],
+                "studentWorks": [
+                    {
+                        "studentKey": "stu_1",
+                        "title": "ROB-ARMI12 - HV 1 - Robot Cứu Hộ",
+                        "hasStudentInfoInTitle": True,
+                        "thumbnail": "https://img/thumb.png",
+                        "imageUrl": ["https://img/shot.png"],
+                        "attachmentUrls": [],
+                        "videoUrls": [],
+                        "relatedUrls": [],
+                        "comment": good_comment,
+                    }
+                ],
+            },
+            class_code="VT-ROB-ARMI12",
+            khoi="Robotics",
+            lesson=14,
+        )
+        self.assertEqual(
+            [issue_text(x) for x in rob_b14_res["issues"]],
+            [
+                "[LMS] SPCK chưa có file code đính kèm (1/1 HS)",
+                "[LMS] SPCK Buổi 14 thiếu link video YouTube (1/1 HS)",
+            ],
+        )
+
+    def test_phase65_two_tier_ai_funnel_pii_scrubbing_and_future_date_guard(self) -> None:
+        from datetime import datetime
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+        from core.time_utils import BUSINESS_TIMEZONE
+        from services.lms_quality_service import (
+            _scrub_comment_for_ai,
+            evaluate_lms_spck_quality,
+        )
+        from services.report_status import (
+            ISSUE_CODE_LMS_ATTENDANCE_CONFLICT_NOTE,
+            ISSUE_CODE_LMS_COMMENT_NOTE,
+        )
+
+        # 1. Python PII scrubber removes names, emails, phones, and URLs before AI prompt
+        scrubbed = _scrub_comment_for_ai(
+            "Bạn Nguyễn Hoàng Minh (minh@example.com, 0912345678, https://lms.mindx.edu.vn/u/minh) hiểu bài tốt."
+        )
+        self.assertNotIn("Nguyễn Hoàng Minh", scrubbed)
+        self.assertNotIn("minh@example.com", scrubbed)
+        self.assertNotIn("0912345678", scrubbed)
+        self.assertNotIn("lms.mindx.edu.vn", scrubbed)
+        self.assertIn("[HS]", scrubbed)
+
+        # 2. Tier 1 (>= 25 words & >= 80 chars) passes immediately without calling AI
+        mock_ai = SimpleNamespace(review_comments=MagicMock(return_value={}))
+        long_comment = (
+            "Hôm nay con nắm rất vững kiến thức về cảm biến siêu âm, tự tay lắp ráp hoàn chỉnh "
+            "mô hình xe robot tránh vật cản và chủ động hỗ trợ các bạn trong nhóm kiểm tra lỗi mạch điện."
+        )
+        tier1_res = evaluate_lms_student_comments(
+            [{"status": "ATTENDED", "comment": long_comment}],
+            is_checkpoint=False,
+            lesson=3,
+            ai_reviewer=mock_ai,
+        )
+        self.assertEqual(tier1_res["status"], "COMPLETE")
+        self.assertEqual(tier1_res["issues"], [])
+        self.assertEqual(mock_ai.review_comments.call_count, 0)
+
+        # 3. Tier 2 Gray Zone (1..24 words) routes to AI reviewer & respects safety invariant (PLACEHOLDER_BYPASS -> NOTE, never FAIL)
+        gray_ai = SimpleNamespace(
+            review_comments=MagicMock(
+                return_value={
+                    "stu_c_0": "VALID_CONCISE",
+                    "stu_c_1": "SHALLOW_GENERIC",
+                    "stu_c_2": "ATTENDANCE_CONFLICT",
+                    "stu_c_3": "PLACEHOLDER_BYPASS",
+                }
+            )
+        )
+        gray_res = evaluate_lms_student_comments(
+            [
+                {
+                    "status": "ATTENDED",
+                    "comment": "Con hiểu bài vòng lặp for và tự code xong bài thực hành.",
+                },
+                {"status": "ATTENDED", "comment": "Con học ngoan, chú ý nghe giảng."},
+                {
+                    "status": "ATTENDED",
+                    "comment": "Hôm nay gia đình báo con bận việc riêng không tới lớp.",
+                },
+                {"status": "ATTENDED", "comment": "Nhận xét ngắn gọn thử nghiệm."},
+            ],
+            is_checkpoint=False,
+            lesson=3,
+            ai_reviewer=gray_ai,
+            lesson_summary="Buổi 3: Vòng lặp for trong Python",
+        )
+        self.assertEqual(gray_ai.review_comments.call_count, 1)
+        self.assertEqual(gray_res["missing_count"], 0)
+        self.assertEqual(gray_res["shallow_count"], 2)
+        self.assertEqual(gray_res["attendance_conflict_count"], 1)
+        self.assertEqual(
+            [issue_code(x) for x in gray_res["issues"]],
+            [ISSUE_CODE_LMS_ATTENDANCE_CONFLICT_NOTE, ISSUE_CODE_LMS_COMMENT_NOTE],
+        )
+        self.assertTrue(all(issue_severity(x) == SEVERITY_NOTE for x in gray_res["issues"]))
+
+        # 4. SPCK gray-zone comment with AI reviewer
+        spck_ai = SimpleNamespace(
+            review_comments=MagicMock(return_value={"spck_c_0": "VALID_CONCISE"})
+        )
+        spck_concise = evaluate_lms_spck_quality(
+            {
+                "studentAttendance": [{"status": "ATTENDED", "studentKey": "stu_1"}],
+                "studentWorks": [
+                    {
+                        "studentKey": "stu_1",
+                        "title": "GB42-HB - HV 1 - Dự án",
+                        "hasStudentInfoInTitle": True,
+                        "thumbnail": "https://img/t.png",
+                        "imageUrl": ["https://img/s.png"],
+                        "attachmentUrls": ["https://files/p.sb3"],
+                        "comment": "Code chạy mượt, nhân vật di chuyển đúng logic.",
+                    }
+                ],
+            },
+            class_code="VT-C4K-GB42-HB",
+            khoi="Coding",
+            lesson=13,
+            ai_reviewer=spck_ai,
+        )
+        self.assertEqual(spck_concise["issues"], [])
+
+        # 5. Future date defense-in-depth guard in inspect_and_attach_quality_issues
+        future_scan = [
+            {
+                "class_code": "VT-C4K-GB41",
+                "lesson": "14",
+                "class_date_iso": "2026-11-15",
+                "scan_target": {
+                    "class_code": "VT-C4K-GB41",
+                    "lesson": "14",
+                    "class_date_iso": "2026-11-15",
+                },
+            }
+        ]
+        inspect_and_attach_quality_issues(
+            future_scan,
+            lms_slots_by_class={"VT-C4K-GB41": [{"index": 13, "date": "2026-11-15T07:00:00.000Z"}]},
+            now=datetime(2026, 11, 12, 10, 0, tzinfo=BUSINESS_TIMEZONE),
+        )
+        self.assertEqual(future_scan[0]["lms_quality_issues"], [])
+        self.assertEqual(future_scan[0]["quality_issues"], [])
+
+        # 6. Scrubber preserves lowercase verbs after Con/Bạn/Em & scrubs unprefixed 3-word names, www URLs, intl phones
+        preserved_1 = _scrub_comment_for_ai("Con lập trình tốt.")
+        preserved_2 = _scrub_comment_for_ai("Con lắp ráp robot tốt.")
+        self.assertIn("lập trình tốt", preserved_1)
+        self.assertIn("lắp ráp robot tốt", preserved_2)
+
+        scrubbed_edge = _scrub_comment_for_ai(
+            "Cao Gia Bảo nộp bài tại www.example.invalid/student/42 SĐT +1 (202) 555-0123 hoặc (+84) 912 345 678.",
+            known_student_names=["Trần Bảo"],
+        )
+        self.assertNotIn("Cao Gia Bảo", scrubbed_edge)
+        self.assertNotIn("example.invalid", scrubbed_edge)
+        self.assertNotIn("555-0123", scrubbed_edge)
+        self.assertNotIn("912 345 678", scrubbed_edge)
+        self.assertIn("[HS]", scrubbed_edge)
+        self.assertIn("[URL]", scrubbed_edge)
+        self.assertIn("[PHONE]", scrubbed_edge)
+
+        # 7. Attendance conflict negation guard (including "chưa từng nghỉ" / "chưa bao giờ nghỉ") & >15-word absence note detection
+        negated_And_Long_Absence = evaluate_lms_student_comments(
+            [
+                {
+                    "status": "ATTENDED",
+                    "comment": (
+                        "Con không nghỉ học buổi nào, luôn đi học đầy đủ, nắm vững kiến thức "
+                        "về vòng lặp và tự hoàn thành toàn bộ bài tập thực hành trên lớp rất tốt."
+                    ),
+                },
+                {
+                    "status": "ATTENDED",
+                    "comment": "Con chưa từng nghỉ học, vẫn làm bài tốt và hoàn thành dự án Scratch.",
+                },
+                {
+                    "status": "ATTENDED",
+                    "comment": "Con chưa bao giờ nghỉ học, nắm bài rất tốt và chủ động lắp ráp mô hình.",
+                },
+                {
+                    "status": "ATTENDED",
+                    "comment": (
+                        "Hôm nay gia đình xin phép cho bạn nghỉ học vì bị ốm sốt cao, giáo viên "
+                        "đã gửi tài liệu và video bài giảng để con xem lại ở nhà trước buổi tới."
+                    ),
+                },
+            ],
+            is_checkpoint=False,
+            lesson=4,
+        )
+        self.assertEqual(negated_And_Long_Absence["attendance_conflict_count"], 1)
+        self.assertEqual(
+            [issue_code(x) for x in negated_And_Long_Absence["issues"]],
+            [ISSUE_CODE_LMS_ATTENDANCE_CONFLICT_NOTE],
+        )
+
+        # 8. Same-day before-class-end & unknown-time guard in inspect_and_attach_quality_issues + _sanitize_dashboard_item
+        from repositories.report_repository import _sanitize_dashboard_item
+
+        same_day_pending = [
+            {
+                "class_code": "VT-C4K-GB42-HB",
+                "lesson": "14",
+                "class_date_iso": "2026-11-12",
+                "group": "MindX - VT-C4K-GB42-HB T5 18H-20H",
+                "nx_lms_checked": False,
+                "scan_target": {
+                    "class_code": "VT-C4K-GB42-HB",
+                    "lesson": "14",
+                    "class_date": "12/11/2026",
+                    "class_date_iso": "2026-11-12",
+                    "week": 46,
+                    "year": 2026,
+                    "group_name": "MindX - VT-C4K-GB42-HB T5 18H-20H",
+                    "nx_lms_checked": False,
+                },
+            },
+            {
+                "class_code": "VT-C4K-GI32",
+                "lesson": "14",
+                "class_date_iso": "2026-11-12",
+                "group": "MindX - VT-C4K-GI32",
+                "nx_lms_checked": False,
+                "scan_target": {
+                    "class_code": "VT-C4K-GI32",
+                    "lesson": "14",
+                    "class_date": "12/11/2026",
+                    "class_date_iso": "2026-11-12",
+                    "week": 46,
+                    "year": 2026,
+                    "group_name": "MindX - VT-C4K-GI32",
+                    "nx_lms_checked": False,
+                },
+            },
+        ]
+        inspect_and_attach_quality_issues(
+            same_day_pending,
+            lms_slots_by_class={},
+            now=datetime(2026, 11, 12, 10, 0, tzinfo=BUSINESS_TIMEZONE),
+            latest_week={"week": 46, "year": 2026},
+        )
+        self.assertEqual(same_day_pending[0]["lms_quality_issues"], [])
+        self.assertFalse(same_day_pending[0]["is_failed"])
+        self.assertTrue(same_day_pending[0]["session_deferred"])
+        sanitized_deferred = _sanitize_dashboard_item(
+            same_day_pending[0],
+            week=46,
+            year=2026,
+            source_job_id=101,
+            lms_status="Chưa quét LMS",
+            job_timestamp="2026-11-12T10:00:00+07:00",
+        )
+        self.assertFalse(sanitized_deferred["is_failed"])
+        self.assertEqual(sanitized_deferred["lms_status"], "⏳ Chưa tới giờ kiểm tra")
+        self.assertEqual(sanitized_deferred["evaluation_status"], "⏳ Chưa tới giờ kiểm tra")
+
+        # 9. Previous-week (W45) same-day target checked at 12/11 10:00 (18H-20H) WITHOUT latest_week is NOT deferred
+        w45_same_day = [
+            {
+                "class_code": "VT-C4K-GB42-HB",
+                "lesson": "13",
+                "class_date": "12/11/2026",
+                "class_date_iso": "2026-11-12",
+                "week": 45,
+                "year": 2026,
+                "group": "MindX - VT-C4K-GB42-HB (18H-20H)",
+                "scan_target": {
+                    "class_code": "VT-C4K-GB42-HB",
+                    "lesson": "13",
+                    "class_date": "12/11/2026",
+                    "class_date_iso": "2026-11-12",
+                    "week": 45,
+                    "year": 2026,
+                    "group_name": "MindX - VT-C4K-GB42-HB (18H-20H)",
+                },
+            }
+        ]
+        inspect_and_attach_quality_issues(
+            w45_same_day,
+            lms_slots_by_class={},
+            now=datetime(2026, 11, 12, 10, 0, tzinfo=BUSINESS_TIMEZONE),
+        )
+        self.assertFalse(w45_same_day[0].get("session_deferred", False))
+        self.assertEqual(len(w45_same_day[0]["lms_quality_issues"]), 1)
+
+    async def test_phase65_real_gemini_gateway_wiring_through_fetch_and_evaluate(self) -> None:
+        import json
+        from datetime import datetime
+        from types import SimpleNamespace
+        from core.time_utils import BUSINESS_TIMEZONE
+        from services.external_gateways import GeminiLmsCommentReviewerGateway
+        from services.lms_quality_service import fetch_and_evaluate_lms_quality
+        from services.report_status import (
+            ISSUE_CODE_LMS_ATTENDANCE_CONFLICT_NOTE,
+            ISSUE_CODE_LMS_COMMENT_NOTE,
+        )
+
+        captured_prompts: list[str] = []
+
+        def _fake_generate_content(*, model: str, contents: str, config: object = None) -> object:
+            captured_prompts.append(str(contents))
+            return SimpleNamespace(
+                text=json.dumps(
+                    {
+                        "results": [
+                            {
+                                "item_id": "stu_c_0",
+                                "classification": "VALID_CONCISE",
+                                "reason": "Nêu rõ kỹ năng lập trình",
+                            },
+                            {
+                                "item_id": "stu_c_1",
+                                "classification": "SHALLOW_GENERIC",
+                                "reason": "Nhận xét chung chung",
+                            },
+                            {
+                                "item_id": "stu_c_2",
+                                "classification": "ATTENDANCE_CONFLICT",
+                                "reason": "Báo nghỉ học nhưng điểm danh có mặt",
+                            },
+                        ]
+                    }
+                )
+            )
+
+        fake_client = SimpleNamespace(
+            models=SimpleNamespace(generate_content=_fake_generate_content)
+        )
+        real_gateway = GeminiLmsCommentReviewerGateway(
+            model="gemini-3.1-flash-lite-preview",
+            timeout_ms=3000,
+            client_factory=lambda: fake_client,
+        )
+
+        scan_items = [
+            {
+                "class_code": "VT-C4K-GB42-HB",
+                "lesson": "3",
+                "class_date_iso": "2026-11-10",
+                "scan_target": {
+                    "class_code": "VT-C4K-GB42-HB",
+                    "lesson": "3",
+                    "class_date": "10/11/2026",
+                    "class_date_iso": "2026-11-10",
+                    "week": 46,
+                    "year": 2026,
+                    "khoi": "Coding",
+                },
+            }
+        ]
+        slots_by_class = {
+            "VT-C4K-GB42-HB": [
+                {
+                    "index": 2,
+                    "date": "2026-11-10",
+                    "summary": "Buổi 3: Cao Gia Bảo học lập trình Scratch cơ bản",
+                    "studentAttendance": [
+                        {
+                            "status": "ATTENDED",
+                            "comment": "Cao Gia Bảo lập trình tốt tại www.example.invalid/student/42 SĐT +1 (202) 555-0123.",
+                        },
+                        {
+                            "status": "ATTENDED",
+                            "comment": "Con lắp ráp robot tốt, ngoan.",
+                        },
+                        {
+                            "status": "ATTENDED",
+                            "comment": "Bố nhắn tin báo con đang đi du lịch cùng gia đình.",
+                        },
+                    ],
+                }
+            ]
+        }
+
+        await fetch_and_evaluate_lms_quality(
+            page=None,
+            scan_results=scan_items,
+            lms_slots_by_class=slots_by_class,
+            allow_page_fallback=False,
+            now=datetime(2026, 11, 12, 10, 0, tzinfo=BUSINESS_TIMEZONE),
+            ai_reviewer=real_gateway,
+            latest_week={"week": 46, "year": 2026},
+        )
+        self.assertEqual(len(captured_prompts), 1)
+        prompt_sent = captured_prompts[0]
+        self.assertNotIn("Cao Gia Bảo", prompt_sent)
+        self.assertNotIn("example.invalid", prompt_sent)
+        self.assertNotIn("555-0123", prompt_sent)
+        self.assertIn("lập trình tốt", prompt_sent)
+        self.assertIn("lắp ráp robot tốt", prompt_sent)
+
+        issues = scan_items[0]["lms_quality_issues"]
+        self.assertEqual(
+            [issue_code(x) for x in issues],
+            [ISSUE_CODE_LMS_ATTENDANCE_CONFLICT_NOTE, ISSUE_CODE_LMS_COMMENT_NOTE],
+        )
+
+        # 2. Per-scan batch counter reset: max_batches_per_scan=1 allows 1 batch per scan across 2 consecutive scans
+        single_batch_gw = GeminiLmsCommentReviewerGateway(
+            model="gemini-3.1-flash-lite-preview",
+            timeout_ms=3000,
+            max_batches_per_scan=1,
+            client_factory=lambda: fake_client,
+        )
+        before_calls = len(captured_prompts)
+        await fetch_and_evaluate_lms_quality(
+            page=None,
+            scan_results=scan_items,
+            lms_slots_by_class=slots_by_class,
+            allow_page_fallback=False,
+            now=datetime(2026, 11, 12, 10, 0, tzinfo=BUSINESS_TIMEZONE),
+            ai_reviewer=single_batch_gw,
+            latest_week={"week": 46, "year": 2026},
+        )
+        await fetch_and_evaluate_lms_quality(
+            page=None,
+            scan_results=scan_items,
+            lms_slots_by_class=slots_by_class,
+            allow_page_fallback=False,
+            now=datetime(2026, 11, 12, 10, 0, tzinfo=BUSINESS_TIMEZONE),
+            ai_reviewer=single_batch_gw,
+            latest_week={"week": 46, "year": 2026},
+        )
+        self.assertEqual(len(captured_prompts) - before_calls, 2)
+
+        # 3. Non-blocking async + strict 0.5s timeout enforcement against a 0.8s sleeping client
+        import asyncio
+        from datetime import datetime
+        import time
+
+        def _slow_generate_content(*, model: str, contents: str, config: object = None) -> object:
+            time.sleep(0.8)
+            return SimpleNamespace(
+                text='{"items":[{"id":"stu_c_0","classification":"VALID_CONCISE"}]}'
+            )
+
+        slow_gateway = GeminiLmsCommentReviewerGateway(
+            model="gemini-3.1-flash-lite-preview",
+            timeout_seconds=0.5,
+            client_factory=lambda: SimpleNamespace(
+                models=SimpleNamespace(generate_content=_slow_generate_content)
+            ),
+        )
+        heartbeat_ticks = 0
+        stop_hb = False
+
+        async def _heartbeat() -> None:
+            nonlocal heartbeat_ticks
+            while not stop_hb:
+                await asyncio.sleep(0.05)
+                heartbeat_ticks += 1
+
+        hb_task = asyncio.create_task(_heartbeat())
+        t0 = time.perf_counter()
+        try:
+            await fetch_and_evaluate_lms_quality(
+                page=None,
+                scan_results=scan_items,
+                lms_slots_by_class=slots_by_class,
+                allow_page_fallback=False,
+                now=datetime(2026, 11, 12, 10, 0, tzinfo=BUSINESS_TIMEZONE),
+                ai_reviewer=slow_gateway,
+                latest_week={"week": 46, "year": 2026},
+            )
+            elapsed = time.perf_counter() - t0
+        finally:
+            stop_hb = True
+            await hb_task
+        self.assertLess(elapsed, 0.72)
+        self.assertGreaterEqual(heartbeat_ticks, 4)
+
+        # 4. Async-only protocol implementation (class with only async def review_short_comments)
+        async_only_calls = 0
+
+        class AsyncOnlyCustomReviewer:
+            async def review_short_comments(
+                self, comments: list[dict[str, object]], **kwargs: object
+            ) -> dict[str, str]:
+                nonlocal async_only_calls
+                async_only_calls += 1
+                await asyncio.sleep(0.01)
+                return {str(c.get("id")): "VALID_CONCISE" for c in comments}
+
+        custom_rev = AsyncOnlyCustomReviewer()
+        await fetch_and_evaluate_lms_quality(
+            page=None,
+            scan_results=scan_items,
+            lms_slots_by_class=slots_by_class,
+            allow_page_fallback=False,
+            now=datetime(2026, 11, 12, 10, 0, tzinfo=BUSINESS_TIMEZONE),
+            ai_reviewer=custom_rev,
+            latest_week={"week": 46, "year": 2026},
+        )
+        self.assertEqual(async_only_calls, 1)
+        self.assertEqual(scan_items[0]["lms_quality_issues"], [])
+
+        # Re-inspecting already-evaluated scan_items with default reset_ai_batch_counter=False makes 0 extra AI requests
+        inspect_and_attach_quality_issues(
+            scan_items,
+            lms_slots_by_class=slots_by_class,
+            now=datetime(2026, 11, 12, 10, 0, tzinfo=BUSINESS_TIMEZONE),
+            ai_reviewer=custom_rev,
+            latest_week={"week": 46, "year": 2026},
+        )
+        self.assertEqual(async_only_calls, 1)
+        self.assertEqual(scan_items[0]["lms_quality_issues"], [])
+
+        # Passing reset_ai_batch_counter=True starts a fresh scan and invokes the reviewer inside a running event loop
+        inspect_and_attach_quality_issues(
+            scan_items,
+            lms_slots_by_class=slots_by_class,
+            now=datetime(2026, 11, 12, 10, 0, tzinfo=BUSINESS_TIMEZONE),
+            ai_reviewer=custom_rev,
+            latest_week={"week": 46, "year": 2026},
+            reset_ai_batch_counter=True,
+        )
+        self.assertEqual(async_only_calls, 2)
+        self.assertEqual(scan_items[0]["lms_quality_issues"], [])
+
+    async def test_phase65_round3_scrubber_absence_and_bcnb_batch_counter_invariants(
+        self,
+    ) -> None:
+        import asyncio
+        from datetime import datetime
+        import time
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from core.time_utils import BUSINESS_TIMEZONE
+        from services.external_gateways import GeminiLmsCommentReviewerGateway
+        from services.lms_quality_service import (
+            _is_absence_statement_in_comment,
+            _scrub_comment_for_ai,
+            evaluate_lms_student_comments,
+            inspect_and_attach_quality_issues_async,
+        )
+        from services.report_status import (
+            ISSUE_CODE_LMS_ATTENDANCE_CONFLICT_NOTE,
+            ISSUE_CODE_LMS_COMMENT_NOTE,
+            issue_code,
+        )
+        from services.zalo_bcnb_service import update_bcnb_reports
+
+        # 1. Bare hostnames scrubbed to [URL] while tech framework/file names stay intact (Finding #4)
+        scrubbed_hosts = _scrub_comment_for_ai(
+            "Con triển khai sản phẩm tại hv42.example.com và student.mindx.edu.vn bằng Node.js, Next.js, main.py, project.sb3."
+        )
+        self.assertNotIn("hv42.example.com", scrubbed_hosts)
+        self.assertNotIn("student.mindx.edu.vn", scrubbed_hosts)
+        self.assertEqual(scrubbed_hosts.count("[URL]"), 2)
+        for preserved_tech in ("Node.js", "Next.js", "main.py", "project.sb3"):
+            self.assertIn(preserved_tech, scrubbed_hosts)
+
+        # 2. Name scrubber preserves capitalized course/tech terms while scrubbing real names including single given name ("Con Thái") (Finding #5 & Round 4 #1)
+        scrubbed_course = _scrub_comment_for_ai(
+            "Con hoàn thành Bài Tập Vòng Lặp Python. Con Python cơ bản nắm vững. Thái Độ Học Tập tích cực. Cao Gia Bảo, Con Gia Bảo và Con Thái nắm vững vòng lặp Python.",
+            known_student_names=["Nguyễn Văn Thái"],
+        )
+        self.assertIn("Con hoàn thành Bài Tập Vòng Lặp Python", scrubbed_course)
+        self.assertIn("Con Python cơ bản nắm vững", scrubbed_course)
+        self.assertIn("Thái Độ Học Tập", scrubbed_course)
+        self.assertNotIn("Cao Gia Bảo", scrubbed_course)
+        self.assertNotIn("Gia Bảo", scrubbed_course)
+        self.assertNotIn("Con Thái", scrubbed_course)
+        self.assertIn("Con [HS] nắm vững vòng lặp Python", scrubbed_course)
+
+        # Also without known_student_names, "Con Thái nắm vững vòng lặp Python" scrubs "Thái" -> "Con [HS]"
+        scrubbed_single_given = _scrub_comment_for_ai("Con Thái nắm vững vòng lặp Python")
+        self.assertEqual(scrubbed_single_given, "Con [HS] nắm vững vòng lặp Python")
+
+        # 3. Clause-by-clause absence conflict detection with past-session participation + >65 words, both period-joined and comma-joined (Finding #6 & Round 4 #4)
+        long_mixed_absence_comment = (
+            "Trong giờ học con tập trung ở buổi trước và hoàn thành các thử thách lập trình rất tích cực. "
+            "Hôm nay con nghỉ học do bị sốt cao, gia đình đã nhắn tin báo giáo viên trước giờ vào lớp; "
+            "thầy đã gửi toàn bộ tài liệu hướng dẫn chi tiết về vòng lặp, hàm, biến, danh sách và bài tập thực hành "
+            "để con tự xem lại tại nhà khi sức khỏe ổn định hơn trước khi bước sang buổi học tuần sau."
+        )
+        self.assertGreater(len(long_mixed_absence_comment.split()), 65)
+        self.assertTrue(_is_absence_statement_in_comment(long_mixed_absence_comment))
+        comma_joined_absence_comment = (
+            "Trong giờ học con tập trung ở buổi trước và hoàn thành các thử thách lập trình rất tích cực, "
+            "hôm nay con nghỉ học do bị sốt cao, gia đình đã nhắn tin báo giáo viên trước giờ vào lớp, "
+            "thầy đã gửi toàn bộ tài liệu hướng dẫn chi tiết về vòng lặp, hàm, biến, danh sách và bài tập thực hành "
+            "để con tự xem lại tại nhà khi sức khỏe ổn định hơn trước khi bước sang buổi học tuần sau."
+        )
+        self.assertGreater(len(comma_joined_absence_comment.split()), 65)
+        self.assertTrue(_is_absence_statement_in_comment(comma_joined_absence_comment))
+        eval_conflict = evaluate_lms_student_comments(
+            [{"status": "ATTENDED", "comment": comma_joined_absence_comment}],
+            is_checkpoint=False,
+            lesson=6,
+        )
+        self.assertEqual(eval_conflict["attendance_conflict_count"], 1)
+        self.assertEqual(
+            [issue_code(x) for x in eval_conflict["issues"]],
+            [ISSUE_CODE_LMS_ATTENDANCE_CONFLICT_NOTE],
+        )
+
+        # 4. Async non-blocking inspect_and_attach_quality_issues_async during 0.30s slow AI reviewer (Finding #2a)
+        def _slow_300ms_gen(*, model: str, contents: str, config: object = None) -> object:
+            time.sleep(0.30)
+            return SimpleNamespace(
+                text='{"items":[{"id":"stu_c_0","classification":"VALID_CONCISE"}]}'
+            )
+
+        slow_300_gw = GeminiLmsCommentReviewerGateway(
+            model="gemini-3.1-flash-lite-preview",
+            timeout_seconds=2.0,
+            client_factory=lambda: SimpleNamespace(
+                models=SimpleNamespace(generate_content=_slow_300ms_gen)
+            ),
+        )
+        hb_count = 0
+        stop_flag = False
+
+        async def _hb_runner() -> None:
+            nonlocal hb_count
+            while not stop_flag:
+                await asyncio.sleep(0.05)
+                hb_count += 1
+
+        async_scan_results = [
+            {
+                "class_code": "VT-C4K-Async1",
+                "lesson": "3",
+                "evidence_state": "SUBMITTED_VERIFIED",
+                "scan_target": {
+                    "class_code": "VT-C4K-Async1",
+                    "lesson": "3",
+                    "week": 46,
+                    "year": 2026,
+                    "class_date_iso": "2026-11-10",
+                },
+            }
+        ]
+        async_slots = {
+            "VT-C4K-ASYNC1": [
+                {
+                    "index": 2,
+                    "date": "2026-11-10",
+                    "summary": "Buổi 3: Lập trình vòng lặp và hàm cơ bản trong Python",
+                    "studentAttendance": [
+                        {
+                            "status": "ATTENDED",
+                            "comment": "Con hiểu bài và thực hành viết vòng lặp tốt.",
+                        }
+                    ],
+                }
+            ]
+        }
+        hb_future = asyncio.create_task(_hb_runner())
+        try:
+            await inspect_and_attach_quality_issues_async(
+                async_scan_results,
+                lms_slots_by_class=async_slots,
+                now=datetime(2026, 11, 12, 10, 0, tzinfo=BUSINESS_TIMEZONE),
+                ai_reviewer=slow_300_gw,
+                latest_week={"week": 46, "year": 2026},
+                reset_ai_batch_counter=True,
+            )
+        finally:
+            stop_flag = True
+            await hb_future
+        self.assertGreaterEqual(hb_count, 3)
+        self.assertEqual(async_scan_results[0]["lms_quality_issues"], [])
+
+        # 5. update_bcnb_reports with 2 classes and max_batches_per_scan=1 resets counter once,
+        # sends at most 1 AI request total, and preserves Class 1's AI verdict through final row sync (Finding #2b)
+        sdk_calls: list[str] = []
+
+        def _quota1_gen(*, model: str, contents: str, config: object = None) -> object:
+            sdk_calls.append(contents)
+            return SimpleNamespace(
+                text='{"items":[{"id":"stu_c_0","classification":"VALID_CONCISE"}]}'
+            )
+
+        quota1_gw = GeminiLmsCommentReviewerGateway(
+            model="gemini-3.1-flash-lite-preview",
+            timeout_seconds=2.0,
+            max_batches_per_scan=1,
+            client_factory=lambda: SimpleNamespace(
+                models=SimpleNamespace(generate_content=_quota1_gen)
+            ),
+        )
+        orig_reset = quota1_gw.reset_batch_counter
+        reset_call_count = 0
+
+        def _counted_reset() -> None:
+            nonlocal reset_call_count
+            reset_call_count += 1
+            orig_reset()
+
+        quota1_gw.reset_batch_counter = _counted_reset  # type: ignore[method-assign]
+
+        two_class_results = [
+            {
+                "group": "[Vũng Tàu] C4K-CLS1 T3 (18h-20h)",
+                "class_code": "VT-C4K-CLS1",
+                "lesson": "3",
+                "status": "✅ Đã nộp báo cáo",
+                "evidence_state": "SUBMITTED_VERIFIED",
+                "submitted_for_bcnb": True,
+                "scan_target": {
+                    "class_code": "VT-C4K-CLS1",
+                    "group_name": "[Vũng Tàu] C4K-CLS1 T3 (18h-20h)",
+                    "lesson": "3",
+                    "week": 46,
+                    "year": 2026,
+                    "class_date": "10/11/2026",
+                    "class_date_iso": "2026-11-10",
+                },
+            },
+            {
+                "group": "[Vũng Tàu] C4K-CLS2 T3 (18h-20h)",
+                "class_code": "VT-C4K-CLS2",
+                "lesson": "3",
+                "status": "✅ Đã nộp báo cáo",
+                "evidence_state": "SUBMITTED_VERIFIED",
+                "submitted_for_bcnb": True,
+                "scan_target": {
+                    "class_code": "VT-C4K-CLS2",
+                    "group_name": "[Vũng Tàu] C4K-CLS2 T3 (18h-20h)",
+                    "lesson": "3",
+                    "week": 46,
+                    "year": 2026,
+                    "class_date": "10/11/2026",
+                    "class_date_iso": "2026-11-10",
+                },
+            },
+        ]
+        two_class_slots = {
+            "VT-C4K-CLS1": [
+                {
+                    "index": 2,
+                    "date": "2026-11-10",
+                    "summary": "Buổi 3: Lập trình sự kiện và biến trong Scratch cơ bản",
+                    "studentAttendance": [
+                        {
+                            "status": "ATTENDED",
+                            # < 12 words so deterministic fallback would mark shallow if AI verdict were lost!
+                            "comment": "Con hiểu bài và ghép khối lệnh tốt.",
+                        }
+                    ],
+                }
+            ],
+            "VT-C4K-CLS2": [
+                {
+                    "index": 2,
+                    "date": "2026-11-10",
+                    "summary": "Buổi 3: Lập trình sự kiện và biến trong Scratch cơ bản",
+                    "studentAttendance": [
+                        {
+                            "status": "ATTENDED",
+                            "comment": "Con tập trung nghe giảng và làm bài.",
+                        }
+                    ],
+                }
+            ],
+        }
+        fake_plan = {
+            "selected_weeks": [
+                {"week": 45, "year": 2026},
+                {"week": 46, "year": 2026},
+            ],
+            "latest_week": {"week": 46, "year": 2026},
+            "targets": [
+                dict(two_class_results[0]["scan_target"]),
+                dict(two_class_results[1]["scan_target"]),
+            ],
+        }
+        fake_job_repo = SimpleNamespace(ensure_not_cancelled=AsyncMock())
+        fake_audit_repo = SimpleNamespace(
+            record_intent=AsyncMock(return_value=({"id": 1}, True)),
+            mark_verified=AsyncMock(),
+            get_by_action_key=AsyncMock(return_value=None),
+        )
+        fake_bcnb_rows_w46 = [
+            {
+                "row_index": 0,
+                "cells": [MagicMock(), MagicMock(), MagicMock()],
+                "ma_lop": "VT-C4K-CLS1",
+                "buoi_so": "3",
+                "ngay_hoc": "10/11/2026",
+                "ngay_hoc_iso": "2026-11-10",
+                "qc_issue_note": "",
+                "nx_zalo_checked": False,
+                "nx_lms_checked": True,
+            },
+            {
+                "row_index": 1,
+                "cells": [MagicMock(), MagicMock(), MagicMock()],
+                "ma_lop": "VT-C4K-CLS2",
+                "buoi_so": "3",
+                "ngay_hoc": "10/11/2026",
+                "ngay_hoc_iso": "2026-11-10",
+                "qc_issue_note": "",
+                "nx_zalo_checked": False,
+                "nx_lms_checked": True,
+            },
+        ]
+        with (
+            patch(
+                "services.zalo_bcnb_service._read_bcnb_schedule_rows",
+                AsyncMock(
+                    side_effect=lambda _p, *, week, year, **_kw: (
+                        list(fake_bcnb_rows_w46) if week == 46 else []
+                    )
+                ),
+            ),
+            patch(
+                "services.zalo_bcnb_service.resolve_report_columns",
+                AsyncMock(return_value=(0, 1, 2)),
+            ),
+            patch(
+                "services.zalo_bcnb_service.resolve_row_proven_auto_issues",
+                AsyncMock(return_value=[]),
+            ),
+            patch(
+                "services.zalo_bcnb_service.execute_verified_checkbox_action",
+                AsyncMock(return_value="DRY_RUN"),
+            ),
+            patch(
+                "services.zalo_bcnb_service.execute_verified_checker_note_action",
+                AsyncMock(return_value="DRY_RUN"),
+            ),
+        ):
+            await update_bcnb_reports(
+                MagicMock(),
+                job_id=77,
+                execution_mode="dry-run",
+                scan_results=two_class_results,
+                today=datetime(2026, 11, 12, 10, 0, tzinfo=BUSINESS_TIMEZONE),
+                now=datetime(2026, 11, 12, 10, 0, tzinfo=BUSINESS_TIMEZONE),
+                scan_plan=fake_plan,
+                job_repo=fake_job_repo,
+                audit_repo=fake_audit_repo,
+                lms_slots_by_class=two_class_slots,
+                notes_only=True,
+                lms_ai_reviewer=quota1_gw,
+            )
+
+        self.assertEqual(reset_call_count, 1)
+        self.assertEqual(len(sdk_calls), 1)
+        # Class 1's AI verdict (VALID_CONCISE) is preserved through per-row note sync and final re-inspection!
+        self.assertEqual(two_class_results[0]["lms_quality_issues"], [])
+        # Keys in _ai_comment_verdicts and _verdict_cache are SHA-256 digests, never raw text!
+        verdict_map = (two_class_results[0].get("scan_target") or {}).get(
+            "_ai_comment_verdicts", {}
+        )
+        self.assertTrue(verdict_map)
+        for k in verdict_map:
+            self.assertRegex(k, r"^[0-9a-f]{64}$")
+        for k in quota1_gw._verdict_cache:
+            self.assertRegex(k, r"^[0-9a-f]{64}$")
+        # Class 2 fell back deterministically after quota=1 was reached
+        self.assertEqual(
+            [issue_code(x) for x in two_class_results[1]["lms_quality_issues"]],
+            [ISSUE_CODE_LMS_COMMENT_NOTE],
+        )
+
+        # (d) Bare given name at start of comment or after focus words (e.g. "Riêng Thái...", "Còn Thái...", "Với Thái,...")
+        # is scrubbed to "[HS]", while common bigrams ("Thái Độ Học Tập...") remain intact.
+        cases_with_and_without_roster = [
+            (
+                "Riêng Thái nắm vững vòng lặp Python và biết tự sửa lỗi.",
+                "Riêng [HS] nắm vững vòng lặp Python và biết tự sửa lỗi.",
+            ),
+            (
+                "Còn Thái làm bài rất nhanh.",
+                "Còn [HS] làm bài rất nhanh.",
+            ),
+            (
+                "Với Thái, con nắm bài tốt.",
+                "Với [HS], con nắm bài tốt.",
+            ),
+            (
+                "Thái Độ Học Tập tích cực, riêng Thái nắm vững vòng lặp Python.",
+                "Thái Độ Học Tập tích cực, riêng [HS] nắm vững vòng lặp Python.",
+            ),
+        ]
+        for raw_c, expected_c in cases_with_and_without_roster:
+            self.assertEqual(
+                _scrub_comment_for_ai(raw_c, known_student_names=["Nguyễn Văn Thái"]),
+                expected_c,
+            )
+            self.assertEqual(
+                _scrub_comment_for_ai(raw_c),
+                expected_c,
+            )
+
+        # Verify end-to-end prompt capture via GeminiLmsCommentReviewerGateway
+        captured_prompts: list[str] = []
+
+        def _capture_gen(*, model: str, contents: str, config: object = None) -> object:
+            captured_prompts.append(contents)
+            return SimpleNamespace(
+                text='{"items":[{"id":"stu_c_0","classification":"VALID_CONCISE"}]}'
+            )
+
+        thai_gw = GeminiLmsCommentReviewerGateway(
+            model="gemini-3.1-flash-lite-preview",
+            timeout_seconds=2.0,
+            max_batches_per_scan=5,
+            client_factory=lambda: SimpleNamespace(
+                models=SimpleNamespace(generate_content=_capture_gen)
+            ),
+        )
+        thai_scan_results = [
+            {
+                "class_code": "VT-CS-THAI",
+                "lesson": "3",
+                "evidence_state": "SUBMITTED_VERIFIED",
+                "scan_target": {
+                    "class_code": "VT-CS-THAI",
+                    "lesson": "3",
+                    "week": 46,
+                    "year": 2026,
+                    "class_date_iso": "2026-11-10",
+                },
+            }
+        ]
+        thai_slots = {
+            "VT-CS-THAI": [
+                {
+                    "index": 2,
+                    "date": "2026-11-10",
+                    "summary": "Buổi 3: Lập trình vòng lặp và hàm cơ bản trong Python",
+                    "studentAttendance": [
+                        {
+                            "status": "ATTENDED",
+                            "comment": "Thái Độ tốt, riêng Thái làm bài nhanh. Với Thái, con chăm.",
+                        }
+                    ],
+                }
+            ]
+        }
+        await inspect_and_attach_quality_issues_async(
+            thai_scan_results,
+            lms_slots_by_class=thai_slots,
+            now=datetime(2026, 11, 12, 10, 0, tzinfo=BUSINESS_TIMEZONE),
+            ai_reviewer=thai_gw,
+            latest_week={"week": 46, "year": 2026},
+            reset_ai_batch_counter=True,
+        )
+        self.assertEqual(thai_scan_results[0]["lms_quality_issues"], [])
+        self.assertEqual(len(captured_prompts), 1)
+        self.assertIn("Thái Độ tốt", captured_prompts[0])
+        self.assertIn("riêng [HS] làm bài nhanh", captured_prompts[0])
+        self.assertIn("Với [HS], con chăm", captured_prompts[0])
+        self.assertNotIn("riêng Thái", captured_prompts[0])
+        self.assertNotIn("Với Thái", captured_prompts[0])
 
 
 if __name__ == "__main__":

@@ -164,16 +164,167 @@ def infer_report_lesson_date(
     return best_value
 
 
+_NEXT_LESSON_SECTION_PHRASES = (
+    r"buổi\s+(?:học\s+)?(?:kế\s+tiếp|tiếp\s+theo|sau|tới)"
+    r"|lịch\s+học\s+(?:buổi\s+)?(?:kế\s+tiếp|tiếp\s+theo|sau|tới|tuần\s+sau)"
+    r"|nội\s+dung\s+(?:buổi|bài)(?:\s+học)?\s+(?:kế\s+tiếp|tiếp\s+theo|sau|tới)"
+    r"|bài\s+học\s+(?:kế\s+tiếp|tiếp\s+theo|sau|tới)"
+    r"|chuẩn\s+bị\s+(?:cho\s+)?(?:buổi|bài)(?:\s+học)?\s+(?:kế\s+tiếp|tiếp\s+theo|sau|tới)"
+    r"|bài\s+tập\s+về\s+nhà"
+    r"|nhiệm\s+vụ\s+(?:khi\s+)?về\s+nhà"
+    r"|dặn\s+dò\s+(?:cho\s+)?(?:buổi|bài)(?:\s+học)?\s+(?:kế\s+tiếp|tiếp\s+theo|sau|tới)"
+)
+
+_LEADING_LINE_BULLET_OR_NUMBER_RE = re.compile(
+    r"^(?:[^\w\n]+|(?:[ivxlcdm]+|\d+)\s*[.):\-]\s*)+",
+    flags=re.IGNORECASE | re.UNICODE,
+)
+
+_TRAILING_NEXT_LESSON_HEADER_RE = re.compile(
+    rf"^(?:{_NEXT_LESSON_SECTION_PHRASES})\b",
+    flags=re.IGNORECASE,
+)
+
+_INLINE_NEXT_LESSON_SECTION_RE = re.compile(
+    rf"(?:{_NEXT_LESSON_SECTION_PHRASES})\s*[:\-–—]",
+    flags=re.IGNORECASE,
+)
+
+_REPORT_START_RE = re.compile(
+    r"\b(?:báo\s+cáo|tổng\s+kết|update(?:\s+sau)?)\s+buổi\b",
+    flags=re.IGNORECASE,
+)
+
+
+_HOMEWORK_SECTION_HEADER_RE = re.compile(
+    r"^(?:bài\s+tập\s+về\s+nhà|nhiệm\s+vụ\s+(?:khi\s+)?về\s+nhà"
+    r"|chuẩn\s+bị\s+(?:cho\s+)?(?:buổi|bài)(?:\s+học)?\s+(?:kế\s+tiếp|tiếp\s+theo|sau|tới)"
+    r"|dặn\s+dò\s+(?:cho\s+)?(?:buổi|bài)(?:\s+học)?\s+(?:kế\s+tiếp|tiếp\s+theo|sau|tới))\b",
+    flags=re.IGNORECASE,
+)
+
+_RESUMED_CURRENT_SESSION_PHRASES = (
+    r"nội\s+dung\s+(?:buổi\s+học|chính|đã\s+học|học\s+tập)(?!\s*(?:kế\s+tiếp|tiếp\s+theo|sau|tới))"
+    r"|kiến\s+thức(?:\s+trọng\s+tâm|\s+đã\s+học|\s+buổi\s+học)?"
+    r"|chủ\s+đề(?:\s+buổi\s+học|\s+bài\s+học)?"
+    r"|tình\s+hình(?:\s+lớp(?:\s+học)?|\s+học\s+tập|\s+buổi\s+học)?"
+    r"|nhận\s+xét(?:\s+chung|\s+buổi\s+học|\s+lớp|\s+học\s+viên|\s+từng\s+bạn)?"
+    r"|đánh\s+giá(?:\s+chung|\s+buổi\s+học|\s+lớp)?"
+    r"|sĩ\s+số|điểm\s+danh"
+    r"|sản\s+phẩm(?:\s+học\s+viên|\s+trong\s+buổi|\s+buổi\s+học)?"
+    r"|hoạt\s+động(?:\s+trên\s+lớp|\s+buổi\s+học)?"
+    r"|kết\s+quả(?:\s+buổi\s+học|\s+học\s+tập)?"
+)
+
+_RESUMED_CURRENT_SESSION_HEADER_RE = re.compile(
+    rf"^(?:{_RESUMED_CURRENT_SESSION_PHRASES})\b",
+    flags=re.IGNORECASE,
+)
+
+_RESUMED_AFTER_HOMEWORK_PHRASES = (
+    r"nội\s+dung(?:\s+bài\s+học)?(?!\s*(?:buổi|bài)?\s*(?:kế\s+tiếp|tiếp\s+theo|sau|tới))"
+    r"|tên\s+bài(?:\s+học)?"
+)
+
+_RESUMED_AFTER_HOMEWORK_HEADER_RE = re.compile(
+    rf"^(?:{_RESUMED_AFTER_HOMEWORK_PHRASES})\s*[:\-–—]",
+    flags=re.IGNORECASE,
+)
+
+_INLINE_SECTION_BREAK_RE = re.compile(
+    rf"(?P<sep>[.;!|]|\s+[-–—]\s+)\s*(?=(?:{_NEXT_LESSON_SECTION_PHRASES}|{_RESUMED_CURRENT_SESSION_PHRASES}|{_RESUMED_AFTER_HOMEWORK_PHRASES})\s*[:\-–—]|(?:báo\s+cáo|tổng\s+kết|update(?:\s+sau)?)\s+buổi\b)",
+    flags=re.IGNORECASE,
+)
+
+
+def _strip_trailing_next_lesson_sections(message_text: str) -> str:
+    """Truncate next-lesson / homework / preparation sections from a report message without losing later report sections."""
+    normalized = unicodedata.normalize("NFKC", message_text or "")
+    if not normalized:
+        return ""
+    normalized = _INLINE_SECTION_BREAK_RE.sub(
+        lambda m: f"{m.group('sep').rstrip()}\n", normalized
+    )
+    lines = normalized.splitlines()
+    kept_lines: list[str] = []
+    skip_mode: str | None = None
+    for idx, line in enumerate(lines):
+        cleaned = _LEADING_LINE_BULLET_OR_NUMBER_RE.sub("", line.strip()).strip()
+        if cleaned and _TRAILING_NEXT_LESSON_HEADER_RE.match(cleaned):
+            remainder = "\n".join(lines[idx:])
+            prefix = "\n".join(kept_lines).strip()
+            if not prefix and _REPORT_START_RE.search(remainder):
+                m_inline = _INLINE_NEXT_LESSON_SECTION_RE.search(line)
+                if m_inline and not _REPORT_START_RE.search(line[m_inline.start() :]):
+                    kept_lines.append(line[: m_inline.start()])
+                    skip_mode = (
+                        "homework"
+                        if _HOMEWORK_SECTION_HEADER_RE.match(cleaned)
+                        else "next_lesson"
+                    )
+                elif _REPORT_START_RE.search(line):
+                    kept_lines.append(line)
+                else:
+                    skip_mode = (
+                        "homework"
+                        if _HOMEWORK_SECTION_HEADER_RE.match(cleaned)
+                        else "next_lesson"
+                    )
+                continue
+            skip_mode = (
+                "homework"
+                if _HOMEWORK_SECTION_HEADER_RE.match(cleaned)
+                else "next_lesson"
+            )
+            continue
+
+        if skip_mode is not None:
+            can_resume = bool(
+                cleaned
+                and not _TRAILING_NEXT_LESSON_HEADER_RE.match(cleaned)
+                and (
+                    _REPORT_START_RE.search(cleaned)
+                    or _RESUMED_CURRENT_SESSION_HEADER_RE.match(cleaned)
+                    or (
+                        skip_mode == "homework"
+                        and _RESUMED_AFTER_HOMEWORK_HEADER_RE.match(cleaned)
+                    )
+                )
+            )
+            if not can_resume:
+                continue
+            skip_mode = None
+
+        m_inline = _INLINE_NEXT_LESSON_SECTION_RE.search(line)
+        if m_inline and not _REPORT_START_RE.search(line[m_inline.start() :]):
+            kept_lines.append(line[: m_inline.start()])
+            inline_header = line[m_inline.start() :].strip()
+            skip_mode = (
+                "homework"
+                if _HOMEWORK_SECTION_HEADER_RE.match(inline_header)
+                else "next_lesson"
+            )
+            continue
+        kept_lines.append(line)
+    return "\n".join(kept_lines)
+
+
 def extract_report_lesson_number(raw_content: str) -> int | None:
     """Read an explicit ``buổi`` number without treating ``bài`` as a lesson."""
-    text = unicodedata.normalize("NFKC", raw_content or "").casefold()
+    stripped = _strip_trailing_next_lesson_sections(raw_content)
+    text = unicodedata.normalize("NFKC", stripped).casefold()
     pattern = re.compile(r"(?:buổi(?:\s+học)?|buổi\s+số)\s*(?:số\s*)?(\d{1,2})")
     for match in pattern.finditer(text):
         context = text[max(0, match.start() - 24) : match.start()]
-        if "kế tiếp" in context or "tiếp theo" in context:
+        if "kế tiếp" in context or "tiếp theo" in context or "buổi sau" in context:
             continue
         line_start = text.rfind("\n", 0, match.start()) + 1
         same_line_before = text[line_start : match.start()]
+        if any(
+            marker in same_line_before
+            for marker in ("kế tiếp", "tiếp theo", "buổi sau", "chuẩn bị cho buổi")
+        ):
+            continue
         tail_after_report_kw = re.split(
             r"(?:báo\s+cáo|tổng\s+kết|update)", same_line_before
         )[-1]
@@ -193,10 +344,27 @@ def extract_report_content_lesson_number(raw_content: str) -> int | None:
     must therefore use this only as a second signal beside an explicit target
     row and a one-session-old report header.
     """
-    text = unicodedata.normalize("NFKC", raw_content or "").casefold()
+    stripped = _strip_trailing_next_lesson_sections(raw_content)
+    text = unicodedata.normalize("NFKC", stripped).casefold()
     pattern = re.compile(r"(?:bài\s+số|bài\s+học\s+số|lesson)\s*(\d{1,2})")
-    match = pattern.search(text)
-    return int(match.group(1)) if match else None
+    for match in pattern.finditer(text):
+        line_start = text.rfind("\n", 0, match.start()) + 1
+        same_line_before = text[line_start : match.start()]
+        if any(
+            marker in same_line_before
+            for marker in (
+                "kế tiếp",
+                "tiếp theo",
+                "buổi sau",
+                "homework",
+                "bài tập",
+                "nhiệm vụ",
+                "tại file",
+            )
+        ):
+            continue
+        return int(match.group(1))
+    return None
 
 
 def parse_class_date(

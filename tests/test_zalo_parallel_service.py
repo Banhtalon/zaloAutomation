@@ -4030,8 +4030,8 @@ class LandingReadinessTests(unittest.IsolatedAsyncioTestCase):
             "person": "GV L14",
             "class_code": "VT-L14-NOZALO",
             "lesson": "14",
-            "class_date": "30/08/2026",
-            "class_date_iso": "2026-08-30",
+            "class_date": "24/08/2026",
+            "class_date_iso": "2026-08-24",
             "week": 34,
             "year": 2026,
             "exempt": True,
@@ -4169,8 +4169,8 @@ class LandingReadinessTests(unittest.IsolatedAsyncioTestCase):
         bcnb_row = {
             "ma_lop": "VT-L14-NOZALO",
             "buoi_so": "14",
-            "ngay_hoc": "30/08/2026",
-            "ngay_hoc_iso": "2026-08-30",
+            "ngay_hoc": "24/08/2026",
+            "ngay_hoc_iso": "2026-08-24",
             "giao_vien": "GV L14",
         }
         self.assertTrue(

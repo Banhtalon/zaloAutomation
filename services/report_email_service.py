@@ -29,7 +29,12 @@ from repositories.report_repository import (
     normalize_zalo_status_text,
     sanitize_csv_cell,
 )
-from services.report_status import ISSUE_CODE_LMS_SPCK_MISSING, issue_code, resolve_lms_status
+from services.report_status import (
+    ISSUE_CODE_LMS_SPCK_COMMENT_MISSING,
+    ISSUE_CODE_LMS_SPCK_MISSING,
+    issue_code,
+    resolve_lms_status,
+)
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -597,7 +602,10 @@ def build_failed_classes_email_package(
                 issue_items: list[str] = []
                 for issue in _split_display_issues(cell):
                     issue_style = "margin:0 0 6px;"
-                    if issue_code(issue) == ISSUE_CODE_LMS_SPCK_MISSING:
+                    if issue_code(issue) in {
+                        ISSUE_CODE_LMS_SPCK_MISSING,
+                        ISSUE_CODE_LMS_SPCK_COMMENT_MISSING,
+                    }:
                         issue_style += "color:#b91c1c;font-weight:600;"
                     issue_items.append(f'<li style="{issue_style}">{html.escape(issue)}</li>')
                 cell_html = '<ul style="margin:0;padding-left:18px;">' + "".join(issue_items) + "</ul>"

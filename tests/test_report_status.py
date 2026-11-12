@@ -126,7 +126,9 @@ class ReportStatusSingleSourceTests(unittest.IsolatedAsyncioTestCase):
             issue_text(prefixed_d4),
             "[LMS] Chưa kiểm tra được dữ liệu buổi học trên LMS, cần kiểm tra thủ công",
         )
-        prefixed_d2 = "[NOTE:ZALO_MISSING_OR_WRONG_DATE_SAME_DAY] [Zalo] Báo cáo không ghi ngày/buổi"
+        prefixed_d2 = (
+            "[NOTE:ZALO_MISSING_OR_WRONG_DATE_SAME_DAY] [Zalo] Báo cáo không ghi ngày/buổi"
+        )
         self.assertEqual(
             issue_code(prefixed_d2),
             ISSUE_CODE_ZALO_MISSING_OR_WRONG_DATE_SAME_DAY,
@@ -138,10 +140,18 @@ class ReportStatusSingleSourceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             issue_severity("[LMS] Chưa ghi nội dung bài học"),
-            SEVERITY_FAIL,
+            SEVERITY_NOTE,
         )
         self.assertEqual(
             coerce_structured_issue("[LMS] Chưa ghi nội dung bài học")["code"],
+            "LMS_SUMMARY_NOTE",
+        )
+        self.assertEqual(
+            issue_severity("[LMS] Chưa nhận xét học viên (2/5 HS)"),
+            SEVERITY_FAIL,
+        )
+        self.assertEqual(
+            coerce_structured_issue("[LMS] Chưa nhận xét học viên (2/5 HS)")["code"],
             ISSUE_CODE_LEGACY_UNCLASSIFIED_FAIL,
         )
 
@@ -342,15 +352,9 @@ class ReportStatusSingleSourceTests(unittest.IsolatedAsyncioTestCase):
 
         # is_result_item_already_submitted uses evidence_state / categorize_row
         self.assertTrue(
-            is_result_item_already_submitted(
-                {"evidence_state": SUBMITTED_LATE_VERIFIED}
-            )
+            is_result_item_already_submitted({"evidence_state": SUBMITTED_LATE_VERIFIED})
         )
-        self.assertTrue(
-            is_result_item_already_submitted(
-                {"scan_target": {"lesson": "Buổi 14"}}
-            )
-        )
+        self.assertTrue(is_result_item_already_submitted({"scan_target": {"lesson": "Buổi 14"}}))
         self.assertFalse(
             is_result_item_already_submitted(
                 {"evidence_state": NOT_FOUND_VERIFIED, "status": NOT_FOUND_STATUS}
@@ -479,16 +483,11 @@ class ReportStatusSingleSourceTests(unittest.IsolatedAsyncioTestCase):
                 from repositories.report_repository import ReportRepository
 
                 container.report_repo = ReportRepository()
-                summary_resp = await get_weekly_summary(
-                    week=42, year=2026, container=container
-                )
+                summary_resp = await get_weekly_summary(week=42, year=2026, container=container)
 
-                rows_by_code = {
-                    r["class_code"]: r for r in summary_resp["rows"]
-                }
+                rows_by_code = {r["class_code"]: r for r in summary_resp["rows"]}
                 items_by_code = {
-                    it["scan_target"]["class_code"]: it
-                    for it in summary_resp["items"]
+                    it["scan_target"]["class_code"]: it for it in summary_resp["items"]
                 }
 
                 # 1. NOTE row: plain text in issue_description, structured issue preserved, is_failed=False
@@ -505,9 +504,7 @@ class ReportStatusSingleSourceTests(unittest.IsolatedAsyncioTestCase):
                     note_row["lms_quality_issues"][0]["code"],
                     ISSUE_CODE_LMS_MANUAL_CHECK,
                 )
-                self.assertEqual(
-                    items_by_code["VT-C4K-NOTE01"]["category"], CATEGORY_DONE
-                )
+                self.assertEqual(items_by_code["VT-C4K-NOTE01"]["category"], CATEGORY_DONE)
                 self.assertFalse(items_by_code["VT-C4K-NOTE01"]["is_failed"])
 
                 # 2. D1 LATE row: category=LATE, is_failed=False, counted in zalo_late and zalo_reported, NOT zalo_pending
@@ -538,9 +535,7 @@ class ReportStatusSingleSourceTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("VT-C4K-FAIL01", email_resp["text_body"])
                 self.assertNotIn("VT-C4K-NOTE01", email_resp["text_body"])
                 self.assertNotIn("VT-C4K-LATE01", email_resp["text_body"])
-                self.assertIn(
-                    "[LMS] Chưa ghi nội dung bài học", email_resp["text_body"]
-                )
+                self.assertIn("[LMS] Chưa ghi nội dung bài học", email_resp["text_body"])
 
                 # 4. Audit provenance & Teaching note merge preserve plain text and structured metadata
                 merged_note = merge_checker_issue_note(
@@ -738,9 +733,7 @@ class ReportStatusSingleSourceTests(unittest.IsolatedAsyncioTestCase):
                 roundtrip_summary = await get_weekly_summary(
                     week=42, year=2026, container=container
                 )
-                rt_rows = {
-                    r["class_code"]: r for r in roundtrip_summary["rows"]
-                }
+                rt_rows = {r["class_code"]: r for r in roundtrip_summary["rows"]}
                 self.assertEqual(rt_rows["VT-C4K-RESTORE01"]["category"], CATEGORY_DONE)
                 self.assertFalse(rt_rows["VT-C4K-RESTORE01"]["is_failed"])
                 self.assertEqual(
@@ -819,21 +812,15 @@ class ReportStatusSingleSourceTests(unittest.IsolatedAsyncioTestCase):
                     self.assertFalse(items[3]["is_failed"])
 
                 targets_data = await get_job_targets(501, container)
-                self.assertEqual(
-                    targets_data["targets"][0]["category"], CATEGORY_LATE
-                )
+                self.assertEqual(targets_data["targets"][0]["category"], CATEGORY_LATE)
                 self.assertFalse(targets_data["targets"][0]["is_failed"])
-                self.assertEqual(
-                    targets_data["targets"][1]["category"], CATEGORY_REVIEW
-                )
+                self.assertEqual(targets_data["targets"][1]["category"], CATEGORY_REVIEW)
                 self.assertTrue(targets_data["targets"][1]["is_failed"])
                 self.assertEqual(
                     targets_data["targets"][1]["result"]["category"],
                     CATEGORY_REVIEW,
                 )
-                self.assertTrue(
-                    targets_data["targets"][1]["result"]["is_failed"]
-                )
+                self.assertTrue(targets_data["targets"][1]["result"]["is_failed"])
                 self.assertEqual(
                     targets_data["targets"][0]["result"]["category"],
                     CATEGORY_LATE,
@@ -869,25 +856,17 @@ class ReportStatusSingleSourceTests(unittest.IsolatedAsyncioTestCase):
             ),
             (
                 "SCAN_PLAN_INVALID_TARGET",
-                _mutated_snap(
-                    lambda s: s["plan"].update({"scan_targets": [{"week": 32}]})
-                ),
+                _mutated_snap(lambda s: s["plan"].update({"scan_targets": [{"week": 32}]})),
             ),
             (
                 "SCAN_PLAN_DUPLICATE_TARGET",
                 _mutated_snap(
-                    lambda s: s["plan"]["scan_targets"].append(
-                        dict(s["plan"]["scan_targets"][0])
-                    )
+                    lambda s: s["plan"]["scan_targets"].append(dict(s["plan"]["scan_targets"][0]))
                 ),
             ),
             (
                 "SCAN_PLAN_STALE",
-                _mutated_snap(
-                    lambda s: s.update(
-                        {"observed_at": "2020-01-01T00:00:00+00:00"}
-                    )
-                ),
+                _mutated_snap(lambda s: s.update({"observed_at": "2020-01-01T00:00:00+00:00"})),
             ),
             (
                 "SCAN_TARGETS_DEFERRED",
@@ -938,16 +917,12 @@ class ReportStatusSingleSourceTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(HTTPException) as caught:
                     await run_scan(container)
                 self.assertEqual(caught.exception.status_code, 409)
-                self.assertEqual(
-                    caught.exception.detail["code"], expected_code
-                )
+                self.assertEqual(caught.exception.detail["code"], expected_code)
 
         # RED takes precedence over YELLOW in preflight
         red_and_yellow_container = FakeContainer()
         red_and_yellow_container.settings.bcnb_dry_run = False
-        red_and_yellow_container.audit_repo.count_unresolved = AsyncMock(
-            return_value=2
-        )
+        red_and_yellow_container.audit_repo.count_unresolved = AsyncMock(return_value=2)
         preflight_ry = await get_zalo_scan_preflight(red_and_yellow_container)
         self.assertEqual(preflight_ry["status"], "RED")
         self.assertFalse(preflight_ry["requires_confirmation"])
@@ -1060,8 +1035,12 @@ class ReportStatusSingleSourceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("VT-C4K-PTB16", resolved or {})
         self.assertEqual(
-            results[0]["lms_quality_issues"],
+            [issue_text(x) for x in results[0]["lms_quality_issues"]],
             ["[LMS] Chưa ghi nội dung bài học"],
+        )
+        self.assertEqual(
+            issue_severity(results[0]["lms_quality_issues"][0]),
+            SEVERITY_NOTE,
         )
 
         # _collect_row_verifiable_auto_issues preserves structured D2 and D4 NOTE issues,
@@ -1081,11 +1060,7 @@ class ReportStatusSingleSourceTests(unittest.IsolatedAsyncioTestCase):
                 "lms_quality_issues": [d4_note],
             },
             existing_note="",
-            lms_slots_by_class={
-                "VT-C4K-PTB16": [
-                    {"index": 0, "date": "2026-10-17T17:00:00.000Z"}
-                ]
-            },
+            lms_slots_by_class={"VT-C4K-PTB16": [{"index": 0, "date": "2026-10-17T17:00:00.000Z"}]},
         )
         self.assertTrue(should_sync)
         self.assertEqual(effective_auto, [d2_note, d4_note])
@@ -1162,6 +1137,488 @@ class ReportStatusSingleSourceTests(unittest.IsolatedAsyncioTestCase):
             ),
             "✅ Đã hoàn thành nhận xét",
         )
+
+    def test_6_5_2_validate_two_week_plan_defers_future_lesson_14_targets(self) -> None:
+        from datetime import datetime
+        from core.time_utils import BUSINESS_TIMEZONE, utc_iso
+
+        now_b = datetime(2026, 11, 12, 10, 0, tzinfo=BUSINESS_TIMEZONE)
+        snap = {
+            "snapshot_id": 99,
+            "status": "PROMOTED",
+            "observed_at": utc_iso(),
+            "plan": {
+                "reliable": True,
+                "group_reliable": True,
+                "bcnb_week_plan": {
+                    "latest_week": {"week": 46, "year": 2026},
+                    "required_week": {"week": 45, "year": 2026},
+                    "selected_weeks": [
+                        {"week": 45, "year": 2026},
+                        {"week": 46, "year": 2026},
+                    ],
+                },
+                "scan_targets": [],
+                "deferred_targets": [],
+                "exempt_targets": [
+                    {
+                        "class_code": "VT-ROB-ARMB19",
+                        "lesson": "14",
+                        "class_date": "07/11/2026",
+                        "class_date_iso": "2026-11-07",
+                        "week": 45,
+                        "year": 2026,
+                        "target_kind": "EXEMPTION",
+                    },
+                    {
+                        "class_code": "VT-C4K-GB42-HB",
+                        "lesson": "14",
+                        "class_date": "11/11/2026",
+                        "class_date_iso": "2026-11-11",
+                        "week": 46,
+                        "year": 2026,
+                        "target_kind": "EXEMPTION",
+                    },
+                    {
+                        "class_code": "VT-C4K-GI32",
+                        "lesson": "14",
+                        "class_date": "13/11/2026",
+                        "class_date_iso": "2026-11-13",
+                        "week": 46,
+                        "year": 2026,
+                        "target_kind": "EXEMPTION",
+                    },
+                    {
+                        "class_code": "VT-ROB-ARMI12",
+                        "lesson": "14",
+                        "class_date": "15/11/2026",
+                        "class_date_iso": "2026-11-15",
+                        "week": 46,
+                        "year": 2026,
+                        "target_kind": "EXEMPTION",
+                    },
+                ],
+            },
+        }
+        val = validate_two_week_plan(snap, max_age_minutes=30, business_now=now_b)
+        self.assertTrue(val["valid"])
+        self.assertEqual(
+            [item["class_code"] for item in val["exempt_targets"]],
+            ["VT-ROB-ARMB19", "VT-C4K-GB42-HB"],
+        )
+        self.assertEqual(
+            [item["class_code"] for item in val["deferred_targets"]],
+            ["VT-C4K-GI32", "VT-ROB-ARMI12"],
+        )
+
+        # When all Lesson 14 targets are in the future and no scan_targets exist -> SCAN_TARGETS_DEFERRED
+        all_future_snap = json.loads(json.dumps(snap))
+        all_future_snap["plan"]["exempt_targets"] = [
+            {
+                "class_code": "VT-C4K-GI32",
+                "lesson": "14",
+                "class_date": "13/11/2026",
+                "class_date_iso": "2026-11-13",
+                "week": 46,
+                "year": 2026,
+                "target_kind": "EXEMPTION",
+            }
+        ]
+        val_deferred = validate_two_week_plan(
+            all_future_snap, max_age_minutes=30, business_now=now_b
+        )
+        self.assertFalse(val_deferred["valid"])
+        self.assertEqual(val_deferred["error_code"], "SCAN_TARGETS_DEFERRED")
+
+    async def test_6_5_2_weekly_summary_synthesized_deferred_row_not_failed(self) -> None:
+        import sqlite3
+        import tempfile
+        from pathlib import Path
+        from repositories.report_repository import ReportRepository
+        from services.report_status import is_session_deferred
+
+        # 1. Direct is_session_deferred check on deferred_reason
+        self.assertTrue(is_session_deferred({"deferred_reason": "DEFERRED_FUTURE_DATE"}))
+        self.assertTrue(
+            is_session_deferred(
+                {"scan_target": {"deferred_reason": "DEFERRED_SAME_DAY_BEFORE_CLASS_END"}}
+            )
+        )
+
+        # 2. In-memory / temp SQLite ReportRepository.get_weekly_summary for deferred W46 B14 (15/11, nx_lms_checked=False)
+        from db.database import database_context, init_db
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test_weekly_deferred.db"
+            init_db(str(db_path))
+            conn = sqlite3.connect(db_path)
+            try:
+                plan_payload = {
+                    "snapshot_id": 1,
+                    "selected_weeks": [
+                        {"week": 45, "year": 2026},
+                        {"week": 46, "year": 2026},
+                    ],
+                    "required_week": {"week": 45, "year": 2026},
+                    "latest_week": {"week": 46, "year": 2026},
+                    "scan_targets": [
+                        {
+                            "class_code": "VT-C4K-GB42-HB",
+                            "group_name": "[Vũng Tàu] C4K-GB42-HB T4 (18h-20h)",
+                            "person": "Nguyễn Văn A",
+                            "week": 46,
+                            "year": 2026,
+                            "lesson": "13",
+                            "class_date": "11/11/2026",
+                            "class_date_iso": "2026-11-11",
+                            "nx_zalo_checked": True,
+                            "nx_lms_checked": True,
+                        }
+                    ],
+                    "deferred_targets": [
+                        {
+                            "class_code": "VT-ROB-ARMI12",
+                            "group_name": "[Vũng Tàu] ROB-ARMI12 CN (18h-20h)",
+                            "person": "Trần Thị B",
+                            "week": 46,
+                            "year": 2026,
+                            "lesson": "14",
+                            "class_date": "15/11/2026",
+                            "class_date_iso": "2026-11-15",
+                            "target_kind": "EXEMPTION",
+                            "deferred_reason": "DEFERRED_FUTURE_DATE",
+                            "nx_zalo_checked": False,
+                            "nx_lms_checked": False,
+                        }
+                    ],
+                    "bcnb_week_plan": {
+                        "required_week": {"week": 45, "year": 2026},
+                        "latest_week": {"week": 46, "year": 2026},
+                        "selected_weeks": [
+                            {"week": 45, "year": 2026},
+                            {"week": 46, "year": 2026},
+                        ],
+                        "latest_data": [
+                            {
+                                "ma_lop": "VT-ROB-ARMI12",
+                                "buoi_so": "14",
+                                "ngay_hoc": "15/11/2026",
+                                "ngay_hoc_iso": "2026-11-15",
+                                "giang_vien": "Trần Thị B",
+                                "nx_zalo_checked": False,
+                                "nx_lms_checked": False,
+                            }
+                        ],
+                    },
+                }
+                conn.execute(
+                    """
+                    INSERT INTO discovery_snapshots (
+                        id, observed_at, source_count, recognized_count, expected_count,
+                        coverage, delta_count, fingerprint_sha256, status, plan_json, promoted_at
+                    ) VALUES (
+                        1, '2026-11-12T03:00:00Z', 2, 2, 2, 1.0, 0, 'fp1', 'PROMOTED', ?, '2026-11-12T03:00:00Z'
+                    )
+                    """,
+                    (json.dumps(plan_payload, ensure_ascii=False),),
+                )
+                job_results = {
+                    "snapshot_id": 1,
+                    "selected_weeks": [
+                        {"week": 45, "year": 2026},
+                        {"week": 46, "year": 2026},
+                    ],
+                    "required_week": {"week": 45, "year": 2026},
+                    "items": [
+                        {
+                            "group": "[Vũng Tàu] C4K-GB42-HB T4 (18h-20h)",
+                            "person": "Nguyễn Văn A",
+                            "status": "✅ Đã nộp báo cáo",
+                            "evidence_state": "SUBMITTED_VERIFIED",
+                            "nx_zalo_checked": True,
+                            "nx_lms_checked": True,
+                            "scan_target": {
+                                "class_code": "VT-C4K-GB42-HB",
+                                "week": 46,
+                                "year": 2026,
+                                "lesson": "13",
+                                "class_date": "11/11/2026",
+                                "class_date_iso": "2026-11-11",
+                            },
+                        }
+                    ],
+                }
+                conn.execute(
+                    "INSERT INTO scan_jobs (id, job_type, status, created_at, started_at, finished_at, results, request_payload, mutates_external) VALUES (10, 'ZALO_SCAN', 'SUCCESS', '2026-11-12T03:01:00Z', '2026-11-12T03:01:05Z', '2026-11-12T03:02:00Z', ?, ?, 1)",
+                    (
+                        json.dumps(job_results, ensure_ascii=False),
+                        json.dumps(
+                            {"execution_mode": "production", "scan_plan": plan_payload},
+                            ensure_ascii=False,
+                        ),
+                    ),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            with database_context(str(db_path)):
+                repo = ReportRepository()
+                summary = await repo.get_weekly_summary(
+                    week=46, year=2026, execution_mode="production"
+                )
+
+            rows_by_code = {r["class_code"]: r for r in summary["rows"]}
+            self.assertIn("VT-ROB-ARMI12", rows_by_code)
+            deferred_row = rows_by_code["VT-ROB-ARMI12"]
+            self.assertTrue(deferred_row.get("session_deferred"))
+            self.assertEqual(deferred_row.get("deferred_reason"), "DEFERRED_FUTURE_DATE")
+            self.assertEqual(deferred_row["lms_status"], "⏳ Chưa tới giờ kiểm tra")
+            self.assertEqual(deferred_row["evaluation_status"], "⏳ Chưa tới giờ kiểm tra")
+            self.assertFalse(deferred_row["is_failed"])
+
+            # 3. Enriched deferred context from fallback_bcnb_meta on genuinely unscanned item
+            from repositories.report_repository import _sanitize_dashboard_item
+
+            sanitized_unscanned_def = _sanitize_dashboard_item(
+                {
+                    "group": "[Vũng Tàu] ROB-ARMI12 CN (18h-20h)",
+                    "person": "Trần Thị B",
+                    "status": "Chưa quét Zalo",
+                    "nx_zalo_checked": True,
+                    "nx_lms_checked": False,
+                    "scan_target": {
+                        "class_code": "VT-ROB-ARMI12",
+                        "week": 46,
+                        "year": 2026,
+                        "lesson": "14",
+                        "class_date": "15/11/2026",
+                        "class_date_iso": "2026-11-15",
+                    },
+                },
+                week=46,
+                year=2026,
+                source_job_id=10,
+                lms_status="❌ Chưa nộp LMS",
+                job_timestamp="2026-11-12T03:02:00Z",
+                fallback_bcnb_meta={
+                    "session_deferred": True,
+                    "deferred_reason": "DEFERRED_FUTURE_DATE",
+                },
+            )
+            self.assertTrue(sanitized_unscanned_def.get("session_deferred"))
+            self.assertEqual(sanitized_unscanned_def["lms_status"], "⏳ Chưa tới giờ kiểm tra")
+            self.assertEqual(
+                sanitized_unscanned_def["evaluation_status"],
+                "⏳ Chưa tới giờ kiểm tra",
+            )
+            self.assertFalse(sanitized_unscanned_def["is_failed"])
+
+            # 4. Historical deferral in older snapshot/job MUST NOT mask newer executed scan failure (0/1 LMS comments)
+            conn2 = sqlite3.connect(db_path)
+            try:
+                older_deferred_plan = {
+                    **plan_payload,
+                    "deferred_targets": [
+                        *plan_payload["deferred_targets"],
+                        {
+                            "class_code": "VT-C4K-LATE1",
+                            "group_name": "[Vũng Tàu] C4K-LATE1 T5 (18h-20h)",
+                            "person": "Lê Văn C",
+                            "week": 46,
+                            "year": 2026,
+                            "lesson": "5",
+                            "class_date": "12/11/2026",
+                            "class_date_iso": "2026-11-12",
+                            "deferred_reason": "DEFERRED_SAME_DAY_BEFORE_CLASS_END",
+                            "nx_zalo_checked": False,
+                            "nx_lms_checked": False,
+                        },
+                    ],
+                }
+                conn2.execute(
+                    "UPDATE discovery_snapshots SET plan_json = ? WHERE id = 1",
+                    (json.dumps(older_deferred_plan, ensure_ascii=False),),
+                )
+                newer_plan = {
+                    **plan_payload,
+                    "snapshot_id": 2,
+                    "scan_targets": [
+                        *plan_payload["scan_targets"],
+                        {
+                            "class_code": "VT-C4K-LATE1",
+                            "group_name": "[Vũng Tàu] C4K-LATE1 T5 (18h-20h)",
+                            "person": "Lê Văn C",
+                            "week": 46,
+                            "year": 2026,
+                            "lesson": "5",
+                            "class_date": "12/11/2026",
+                            "class_date_iso": "2026-11-12",
+                            "nx_zalo_checked": True,
+                            "nx_lms_checked": False,
+                        },
+                    ],
+                }
+                newer_job_results = {
+                    "snapshot_id": 1,
+                    "selected_weeks": [
+                        {"week": 45, "year": 2026},
+                        {"week": 46, "year": 2026},
+                    ],
+                    "required_week": {"week": 45, "year": 2026},
+                    "items": [
+                        *job_results["items"],
+                        {
+                            "group": "[Vũng Tàu] C4K-LATE1 T5 (18h-20h)",
+                            "person": "Lê Văn C",
+                            "status": "✅ Đã nộp báo cáo",
+                            "evidence_state": "SUBMITTED_VERIFIED",
+                            "scan_status": "COMPLETED",
+                            "nx_zalo_checked": True,
+                            "nx_lms_checked": False,
+                            "lms_attendance": {
+                                "status": "COMPLETE",
+                                "attended_count": 1,
+                                "absent_count": 0,
+                                "total_students": 1,
+                            },
+                            "lms_comments": {
+                                "status": "MISSING",
+                                "submitted_count": 0,
+                                "attended_count": 1,
+                            },
+                            "lms_quality_issues": [
+                                {
+                                    "code": "LMS_QUALITY_FAIL",
+                                    "severity": "FAIL",
+                                    "text": "[LMS] Chưa nhận xét học viên (1/1 HS)",
+                                }
+                            ],
+                            "quality_issues": [
+                                {
+                                    "code": "LMS_QUALITY_FAIL",
+                                    "severity": "FAIL",
+                                    "text": "[LMS] Chưa nhận xét học viên (1/1 HS)",
+                                }
+                            ],
+                            "scan_target": {
+                                "class_code": "VT-C4K-LATE1",
+                                "week": 46,
+                                "year": 2026,
+                                "lesson": "5",
+                                "class_date": "12/11/2026",
+                                "class_date_iso": "2026-11-12",
+                            },
+                        },
+                    ],
+                }
+                conn2.execute(
+                    "INSERT INTO scan_jobs (id, job_type, status, created_at, started_at, finished_at, results, request_payload, mutates_external) VALUES (11, 'ZALO_SCAN', 'SUCCESS', '2026-11-12T14:01:00Z', '2026-11-12T14:01:05Z', '2026-11-12T14:02:00Z', ?, ?, 1)",
+                    (
+                        json.dumps(newer_job_results, ensure_ascii=False),
+                        json.dumps(
+                            {"execution_mode": "production", "scan_plan": newer_plan},
+                            ensure_ascii=False,
+                        ),
+                    ),
+                )
+                conn2.commit()
+            finally:
+                conn2.close()
+
+            with database_context(str(db_path)):
+                repo = ReportRepository()
+                summary_after = await repo.get_weekly_summary(
+                    week=46, year=2026, execution_mode="production"
+                )
+
+            rows_after = {r["class_code"]: r for r in summary_after["rows"]}
+            self.assertIn("VT-C4K-LATE1", rows_after)
+            executed_row = rows_after["VT-C4K-LATE1"]
+            self.assertFalse(bool(executed_row.get("session_deferred")))
+            self.assertEqual(executed_row["lms_status"], "❌ Đã nhận xét 0/1 HS đi học")
+            self.assertTrue(executed_row["is_failed"])
+
+            # 5. Newer deferred snapshot (Snapshot 2) MUST override older non-deferred snapshot (Snapshot 1)
+            conn3 = sqlite3.connect(db_path)
+            try:
+                snap1_non_deferred = {
+                    **older_deferred_plan,
+                    "exempt_targets": [
+                        {
+                            "class_code": "VT-C4K-B14-REPLAN",
+                            "group_name": "[Vũng Tàu] C4K-B14-REPLAN CN (09h-11h)",
+                            "person": "Phạm Thị D",
+                            "week": 46,
+                            "year": 2026,
+                            "lesson": "14",
+                            "class_date": "15/11/2026",
+                            "class_date_iso": "2026-11-15",
+                            "nx_zalo_checked": False,
+                            "nx_lms_checked": False,
+                        }
+                    ],
+                }
+                conn3.execute(
+                    "UPDATE discovery_snapshots SET plan_json = ? WHERE id = 1",
+                    (json.dumps(snap1_non_deferred, ensure_ascii=False),),
+                )
+                snap2_deferred = {
+                    **newer_plan,
+                    "snapshot_id": 2,
+                    "exempt_targets": [],
+                    "deferred_targets": [
+                        *newer_plan["deferred_targets"],
+                        {
+                            "class_code": "VT-C4K-B14-REPLAN",
+                            "group_name": "[Vũng Tàu] C4K-B14-REPLAN CN (09h-11h)",
+                            "person": "Phạm Thị D",
+                            "week": 46,
+                            "year": 2026,
+                            "lesson": "14",
+                            "class_date": "15/11/2026",
+                            "class_date_iso": "2026-11-15",
+                            "target_kind": "EXEMPTION",
+                            "deferred_reason": "DEFERRED_FUTURE_DATE",
+                            "nx_zalo_checked": False,
+                            "nx_lms_checked": False,
+                            "_ai_comment_verdicts": {"dummy_hash": "VALID_CONCISE"},
+                        },
+                    ],
+                }
+                conn3.execute(
+                    """
+                    INSERT INTO discovery_snapshots (
+                        id, observed_at, source_count, recognized_count, expected_count,
+                        coverage, delta_count, fingerprint_sha256, status, plan_json, promoted_at
+                    ) VALUES (
+                        2, '2026-11-12T15:00:00Z', 2, 2, 2, 1.0, 0, 'fp2', 'PROMOTED', ?, '2026-11-12T15:00:00Z'
+                    )
+                    """,
+                    (json.dumps(snap2_deferred, ensure_ascii=False),),
+                )
+                conn3.commit()
+            finally:
+                conn3.close()
+
+            with database_context(str(db_path)):
+                repo = ReportRepository()
+                summary_replan = await repo.get_weekly_summary(
+                    week=46, year=2026, execution_mode="production"
+                )
+
+            rows_replan = {r["class_code"]: r for r in summary_replan["rows"]}
+            self.assertIn("VT-C4K-B14-REPLAN", rows_replan)
+            replan_row = rows_replan["VT-C4K-B14-REPLAN"]
+            self.assertTrue(replan_row.get("session_deferred"))
+            self.assertEqual(replan_row.get("deferred_reason"), "DEFERRED_FUTURE_DATE")
+            self.assertEqual(replan_row["lms_status"], "⏳ Chưa tới giờ kiểm tra")
+            self.assertEqual(replan_row["evaluation_status"], "⏳ Chưa tới giờ kiểm tra")
+            self.assertFalse(replan_row["is_failed"])
+            self.assertNotIn(
+                "_ai_comment_verdicts",
+                replan_row.get("scan_target") or {},
+            )
 
 
 if __name__ == "__main__":

@@ -108,6 +108,15 @@ class Config:
     ZALO_AI_ASSIST_CLASSIFIER = (
         os.getenv("ZALO_AI_ASSIST_CLASSIFIER", "false").strip().lower() == "true"
     )
+    LMS_AI_COMMENT_CHECK = (
+        os.getenv("LMS_AI_COMMENT_CHECK", "true").strip().lower() == "true"
+    )
+    LMS_AI_MAX_BATCHES_PER_SCAN = max(
+        1, int(os.getenv("LMS_AI_MAX_BATCHES_PER_SCAN", "25"))
+    )
+    LMS_AI_TIMEOUT_SECONDS = max(
+        0.5, float(os.getenv("LMS_AI_TIMEOUT_SECONDS", "8.0"))
+    )
     BCNB_USERNAME = os.getenv("BCNB_USERNAME", "")
     BCNB_PASSWORD = os.getenv("BCNB_PASSWORD", "")
     BCNB_URL = os.getenv("BCNB_URL", "https://teachingmindx.top/check_nhanxet.php")

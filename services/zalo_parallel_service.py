@@ -34,9 +34,9 @@ from services.bcnb_safety import (
 from services.lms_quality_service import (
     fetch_and_evaluate_lms_quality,
     fetch_lms_slots_for_targets,
-    lms_target_lessons_by_class,
-    inspect_and_attach_quality_issues,
+    inspect_and_attach_quality_issues_async,
     is_lms_fetch_unavailable,
+    lms_target_lessons_by_class,
 )
 from services.report_status import (
     ISSUE_CODE_LMS_MANUAL_CHECK,
@@ -785,12 +785,21 @@ async def prepare_frozen_scan_execution(
         latest_week=plan.get("latest_week"),
         now=scan_started_at,
     )
+    ready_exempt_targets, deferred_exempt_targets = split_scan_targets_for_execution(
+        exempt_targets,
+        latest_week=plan.get("latest_week"),
+        now=scan_started_at,
+    )
     plan["targets"] = ready_targets
-    plan["deferred_targets"] = [*previously_deferred, *newly_deferred]
-    plan["exempt_targets"] = exempt_targets
-    if newly_deferred:
+    plan["deferred_targets"] = [
+        *previously_deferred,
+        *newly_deferred,
+        *deferred_exempt_targets,
+    ]
+    plan["exempt_targets"] = ready_exempt_targets
+    if newly_deferred or deferred_exempt_targets:
         log_message(
-            f"Hoãn {len(newly_deferred)} lớp chưa đến giờ học; không quét và không tick BCNB.",
+            f"Hoãn {len(newly_deferred) + len(deferred_exempt_targets)} lớp chưa đến giờ học; không quét và không tick BCNB.",
             event="zalo.scan.targets_deferred",
         )
     groups = [
@@ -2662,9 +2671,19 @@ async def run_parallel_zalo_batch(
                         ):
                             with contextlib.suppress(Exception):
                                 await session.close_page(lms_pre_page)
-        inspect_and_attach_quality_issues(
+        runtime_ai_reviewer = (
+            getattr(getattr(runtime, "external", None), "lms_ai_reviewer", None)
+            or getattr(getattr(runtime, "external", None), "lms_comment_reviewer", None)
+        )
+        await inspect_and_attach_quality_issues_async(
             scan_results,
             lms_slots_by_class=prefetched_lms_slots,
+            now=scan_started_at or today,
+            ai_reviewer=runtime_ai_reviewer,
+            latest_week=(scan_plan or {}).get("latest_week")
+            if isinstance(scan_plan, Mapping)
+            else None,
+            reset_ai_batch_counter=True,
         )
         await evidence_repo.register_scan_results(
             job_id=job_id,
@@ -2785,9 +2804,13 @@ async def run_parallel_zalo_batch(
                     )
                     if isinstance(retried_slots, dict) and retried_slots:
                         prefetched_lms_slots = retried_slots
-                        inspect_and_attach_quality_issues(
+                        await inspect_and_attach_quality_issues_async(
                             scan_results,
                             lms_slots_by_class=prefetched_lms_slots,
+                            now=scan_started_at or today,
+                            ai_reviewer=runtime_ai_reviewer,
+                            latest_week=(scan_plan or {}).get("latest_week"),
+                            reset_ai_batch_counter=False,
                         )
                         if hasattr(repository, "update_target_result"):
                             for r_key, r_val in scan_results_by_key.items():
@@ -2929,6 +2952,10 @@ async def run_parallel_zalo_batch(
                                     runtime.external, "lms_quality", None
                                 ),
                                 allow_page_fallback=True,
+                                now=scan_started_at or today,
+                                ai_reviewer=runtime_ai_reviewer,
+                                latest_week=(scan_plan or {}).get("latest_week"),
+                                reset_ai_batch_counter=False,
                             )
                             has_verifiable_note_issues = any(
                                 (
@@ -3027,6 +3054,20 @@ async def run_parallel_zalo_batch(
                                         extra_note_kwargs["lms_slots_by_class"] = (
                                             resolved_slots
                                         )
+                                    if runtime_ai_reviewer is not None and (
+                                        "lms_ai_reviewer" in update_sig_params
+                                        or accepts_var_kw
+                                    ):
+                                        extra_note_kwargs["lms_ai_reviewer"] = (
+                                            runtime_ai_reviewer
+                                        )
+                                    if (
+                                        "reset_ai_batch_counter" in update_sig_params
+                                        or accepts_var_kw
+                                    ):
+                                        extra_note_kwargs["reset_ai_batch_counter"] = (
+                                            False
+                                        )
                                     note_summary = await update_bcnb_reports(
                                         page,
                                         job_id=job_id,
@@ -3070,6 +3111,28 @@ async def run_parallel_zalo_batch(
                     return
                 try:
 
+                    update_params = inspect.signature(update_bcnb_reports).parameters
+                    accepts_var_kw = any(
+                        p.kind == inspect.Parameter.VAR_KEYWORD
+                        for p in update_params.values()
+                    )
+                    extra_update_kwargs: dict[str, Any] = {}
+                    if prefetched_lms_slots is not None and (
+                        "lms_slots_by_class" in update_params or accepts_var_kw
+                    ):
+                        extra_update_kwargs["lms_slots_by_class"] = prefetched_lms_slots
+                    elif getattr(runtime.external, "lms_quality", None) is not None and (
+                        "lms_quality_gateway" in update_params or accepts_var_kw
+                    ):
+                        extra_update_kwargs["lms_quality_gateway"] = getattr(
+                            runtime.external, "lms_quality", None
+                        )
+                    if runtime_ai_reviewer is not None and (
+                        "lms_ai_reviewer" in update_params or accepts_var_kw
+                    ):
+                        extra_update_kwargs["lms_ai_reviewer"] = runtime_ai_reviewer
+                    if "reset_ai_batch_counter" in update_params or accepts_var_kw:
+                        extra_update_kwargs["reset_ai_batch_counter"] = False
                     summary = await update_bcnb_reports(
                         page,
                         job_id=job_id,
@@ -3083,24 +3146,7 @@ async def run_parallel_zalo_batch(
                         period_filter=set(assigned),
                         should_halt=policy.halted.is_set,
                         on_target_outcome=record_row_outcome,
-                        **(
-                            {"lms_slots_by_class": prefetched_lms_slots}
-                            if prefetched_lms_slots is not None
-                            and "lms_slots_by_class"
-                            in inspect.signature(update_bcnb_reports).parameters
-                            else (
-                                {
-                                    "lms_quality_gateway": getattr(
-                                        runtime.external, "lms_quality", None
-                                    )
-                                }
-                                if getattr(runtime.external, "lms_quality", None)
-                                is not None
-                                and "lms_quality_gateway"
-                                in inspect.signature(update_bcnb_reports).parameters
-                                else {}
-                            )
-                        ),
+                        **extra_update_kwargs,
                     )
                     summaries.append(summary)
                     assigned_set = set(assigned)

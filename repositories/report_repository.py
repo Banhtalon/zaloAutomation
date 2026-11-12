@@ -19,9 +19,11 @@ from services.report_status import (
     LESSON_14_EXEMPTION,
     LESSON_14_STATUS,
     categorize_row,
+    has_spck_comment_missing_fail,
     has_spck_missing_fail,
     is_failed,
     is_lesson_14,
+    is_session_deferred,
     issue_text,
     resolve_lms_status,
     resolve_spck_status,
@@ -48,12 +50,8 @@ MAX_WEEKLY_SUMMARY_AVAILABLE_WEEKS = 260
 MAX_WEEKLY_SUMMARY_GROUPS = 2000
 MAX_WEEKLY_SUMMARY_ACTIVE_JOBS = 100
 
-FINISHED_ZALO_SCAN_STATUSES: frozenset[str] = frozenset(
-    {"SUCCESS", "PARTIAL_SUCCESS"}
-)
-FINISHED_LMS_AUTOMATION_STATUSES: frozenset[str] = frozenset(
-    {"SUCCESS", "PARTIAL_SUCCESS"}
-)
+FINISHED_ZALO_SCAN_STATUSES: frozenset[str] = frozenset({"SUCCESS", "PARTIAL_SUCCESS"})
+FINISHED_LMS_AUTOMATION_STATUSES: frozenset[str] = frozenset({"SUCCESS", "PARTIAL_SUCCESS"})
 VALID_EXECUTION_MODES: frozenset[str] = frozenset({"production", "dry-run"})
 ACTIVE_WEEK_MUTATION_JOB_TYPES: tuple[str, ...] = (
     "ZALO_SCAN",
@@ -142,15 +140,9 @@ def normalize_zalo_status_text(
                     rest = f"{rest} (chờ kiểm tra deadline BCNB)"
                 return f"{dry_prefix}{rest}"
             if rest.startswith("🟡"):
-                return (
-                    f"{dry_prefix}⏳ Đã báo cáo – Minh chứng hợp lệ "
-                    "(chờ kiểm tra deadline BCNB)"
-                )
+                return f"{dry_prefix}⏳ Đã báo cáo – Minh chứng hợp lệ (chờ kiểm tra deadline BCNB)"
             if not rest.startswith(("⏳", "❌", "⚠️")):
-                return (
-                    f"{dry_prefix}⏳ Đã thấy báo cáo Zalo "
-                    "(chờ kiểm tra deadline BCNB)"
-                )
+                return f"{dry_prefix}⏳ Đã thấy báo cáo Zalo (chờ kiểm tra deadline BCNB)"
     return text
 
 
@@ -180,21 +172,18 @@ def build_weekly_summary_csv(
             st=st,
         )
         if dry_badge and f"[{dry_badge}]" not in zalo_status:
-            zalo_status = (
-                f"[{dry_badge}] {zalo_status}" if zalo_status else f"[{dry_badge}]"
-            )
+            zalo_status = f"[{dry_badge}] {zalo_status}" if zalo_status else f"[{dry_badge}]"
         lms_status = resolve_lms_status(row, str(row.get("lms_status") or "").strip())
         eval_status = str(row.get("evaluation_status") or "").strip()
         row_category = str(row.get("category") or "").strip() or categorize_row(row)
-        if (
-            row_category == CATEGORY_EXEMPT
-            and (
-                "zalo cần kiểm tra" in eval_status.lower()
-                or "chưa nhận xét zalo" in eval_status.lower()
-            )
+        if row_category == CATEGORY_EXEMPT and (
+            "zalo cần kiểm tra" in eval_status.lower()
+            or "chưa nhận xét zalo" in eval_status.lower()
         ):
             eval_status = ""
-        if (not eval_status or "lms_comments" in row or "lms_comments" in st) and (zalo_status or lms_status):
+        if (not eval_status or "lms_comments" in row or "lms_comments" in st) and (
+            zalo_status or lms_status
+        ):
             eval_status = _resolve_row_evaluation_status(
                 zalo_status=zalo_status,
                 lms_status=lms_status,
@@ -249,7 +238,7 @@ def _parse_json(raw: Any, fallback: Any = None) -> Any:
         return fallback
     try:
         return json.loads(raw)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return fallback
 
 
@@ -259,7 +248,7 @@ def _valid_period_pair(week_val: Any, year_val: Any) -> tuple[int, int] | None:
     try:
         week = int(week_val)
         year = int(year_val)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None
     if 1 <= week <= 53 and 2000 <= year <= 2100:
         return week, year
@@ -319,9 +308,7 @@ def _normalize_date_iso(raw_date: Any) -> str:
         return ""
     dm_match = re.fullmatch(r"(\d{1,2})/(\d{1,2})/(\d{4})", text)
     if dm_match:
-        return (
-            f"{int(dm_match.group(3)):04d}-{int(dm_match.group(2)):02d}-{int(dm_match.group(1)):02d}"
-        )
+        return f"{int(dm_match.group(3)):04d}-{int(dm_match.group(2)):02d}-{int(dm_match.group(1)):02d}"
     if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
         return text
     return text
@@ -355,10 +342,7 @@ def _extract_item_row_key(item: dict[str, Any], week: int, year: int) -> str:
         class_code = _extract_item_class_code(item)
         lesson = str(st.get("lesson") or item.get("lesson") or "?").strip()
         class_date = str(
-            st.get("class_date_iso")
-            or st.get("class_date")
-            or item.get("class_date")
-            or "?"
+            st.get("class_date_iso") or st.get("class_date") or item.get("class_date") or "?"
         ).strip()
         return f"{year:04d}-W{week:02d}|{class_code}|{lesson}|{class_date}"
 
@@ -402,9 +386,7 @@ def _apply_verified_manual_approval(
                 merged_ev = dict(merged["evidence"])
                 merged_ev["images"] = app_imgs
                 merged["evidence"] = merged_ev
-    approved_by = (
-        str(approval_info.get("approved_by") or "operator").strip() or "operator"
-    )
+    approved_by = str(approval_info.get("approved_by") or "operator").strip() or "operator"
     st_raw = merged.get("scan_target")
     st_dict = dict(st_raw) if isinstance(st_raw, dict) else {}
     approval_sid = str(approval_info.get("bcnb_session_id") or "").strip()
@@ -421,13 +403,9 @@ def _apply_verified_manual_approval(
         merged["bcnb_session_id"] = approval_sid
         st_dict["bcnb_session_id"] = approval_sid
         merged["scan_target"] = st_dict
-    lesson = str(
-        approval_info.get("lesson") or st_dict.get("lesson") or "?"
-    ).strip()
+    lesson = str(approval_info.get("lesson") or st_dict.get("lesson") or "?").strip()
     merged["status"] = "✅ Đã duyệt tay & Tích BCNB"
-    merged["status_detail"] = (
-        f"Duyệt tay bởi {approved_by} · BCNB W{week}/{year} buổi {lesson}"
-    )
+    merged["status_detail"] = f"Duyệt tay bởi {approved_by} · BCNB W{week}/{year} buổi {lesson}"
     merged["submitted_for_bcnb"] = True
     merged["manual_approved"] = True
     merged["evidence_state"] = "MANUAL_APPROVED_VERIFIED"
@@ -449,28 +427,19 @@ def _apply_verified_manual_approval(
             "approved_by": approved_by,
             "approved_at": approved_at,
             "approval_job_id": (
-                approval_info.get("approval_job_id")
-                or ma_dict.get("approval_job_id")
+                approval_info.get("approval_job_id") or ma_dict.get("approval_job_id")
             ),
             "source_job_id": resolved_src_job_id,
             "evidence_path": (
-                approval_info.get("evidence_path")
-                or ma_dict.get("evidence_path")
-                or ""
+                approval_info.get("evidence_path") or ma_dict.get("evidence_path") or ""
             ),
             "evidence_sha256": (
-                approval_info.get("evidence_sha256")
-                or ma_dict.get("evidence_sha256")
-                or ""
+                approval_info.get("evidence_sha256") or ma_dict.get("evidence_sha256") or ""
             ),
             "outcome": "VERIFIED",
             "dry_run": False,
             "target_key": approval_info.get("target_key"),
-            **(
-                {"bcnb_session_id": approval_sid}
-                if approval_sid
-                else {}
-            ),
+            **({"bcnb_session_id": approval_sid} if approval_sid else {}),
         }
     )
     merged["manual_approval"] = ma_dict
@@ -506,6 +475,8 @@ def _resolve_row_evaluation_status(
     category: str | None = None,
 ) -> str:
     """Resolve the unified Teaching evaluation status for a weekly summary row."""
+    if row is not None and is_session_deferred(row):
+        return "⏳ Chưa tới giờ kiểm tra"
     if row is not None:
         lms_status = resolve_lms_status(row, lms_status)
     clean_raw = str(raw_evaluation_status or "").strip()
@@ -517,15 +488,15 @@ def _resolve_row_evaluation_status(
         }
     )
     if row_category == CATEGORY_EXEMPT and (
-        "zalo cần kiểm tra" in clean_raw.lower()
-        or "chưa nhận xét zalo" in clean_raw.lower()
+        "zalo cần kiểm tra" in clean_raw.lower() or "chưa nhận xét zalo" in clean_raw.lower()
     ):
         clean_raw = ""
     lms_failed_or_warn = lms_status.startswith(("❌", "⚠️"))
     zalo_done = row_category in {CATEGORY_DONE, CATEGORY_LATE, CATEGORY_EXEMPT}
-    zalo_review = row_category == CATEGORY_REVIEW and str(
-        zalo_status or ""
-    ).strip() not in {"", "Chưa xác định"}
+    zalo_review = row_category == CATEGORY_REVIEW and str(zalo_status or "").strip() not in {
+        "",
+        "Chưa xác định",
+    }
     lms_done = not lms_failed_or_warn and (
         lms_status.startswith("✅")
         or ("Dry-run LMS" in lms_status)
@@ -534,6 +505,13 @@ def _resolve_row_evaluation_status(
     )
     if row is not None and has_spck_missing_fail(row) and zalo_done:
         return "❌ Chưa nộp SPCK trên LMS"
+    if (
+        row is not None
+        and has_spck_comment_missing_fail(row)
+        and zalo_done
+        and not lms_failed_or_warn
+    ):
+        return "❌ SPCK chưa có nhận xét trên LMS"
     if row is not None and zalo_done:
         raw_st = row.get("scan_target")
         st = raw_st if isinstance(raw_st, Mapping) else {}
@@ -548,7 +526,11 @@ def _resolve_row_evaluation_status(
                     return "✅ Không áp dụng LMS (toàn bộ học viên nghỉ)"
             if comments.get("status") in {"COMPLETE", "REVIEW", "EXEMPT"}:
                 clean_raw = ""
-        if isinstance(spck, Mapping) and spck.get("status") == "UNVERIFIED" and not lms_failed_or_warn:
+        if (
+            isinstance(spck, Mapping)
+            and spck.get("status") == "UNVERIFIED"
+            and not lms_failed_or_warn
+        ):
             return "⏳ Chờ xác minh SPCK trên LMS"
     if lms_status.startswith("⚠️") or zalo_review:
         if zalo_done and lms_status.startswith("⚠️"):
@@ -570,22 +552,14 @@ def _resolve_row_evaluation_status(
         spck_status = resolve_spck_status(row) if row is not None else ""
         return "✅ Đã hoàn thành nhận xét" + (f" · {spck_status}" if spck_status else "")
     if lms_done and not zalo_done:
-        if clean_raw.startswith("⚠️") or (
-            clean_raw and "chưa nhận xét zalo" in clean_raw.lower()
-        ):
+        if clean_raw.startswith("⚠️") or (clean_raw and "chưa nhận xét zalo" in clean_raw.lower()):
             return clean_raw
         return "⏳ Đã hoàn tất nhận xét LMS, chưa nhận xét Zalo"
     if zalo_done and not lms_done:
-        if clean_raw.startswith("⚠️") or (
-            clean_raw and "chưa nhận xét lms" in clean_raw.lower()
-        ):
+        if clean_raw.startswith("⚠️") or (clean_raw and "chưa nhận xét lms" in clean_raw.lower()):
             return clean_raw
         return "⏳ Đã hoàn tất nhận xét Zalo, chưa nhận xét LMS"
-    if (
-        clean_raw
-        and "hoàn thành" not in clean_raw.lower()
-        and "hoàn tất" not in clean_raw.lower()
-    ):
+    if clean_raw and "hoàn thành" not in clean_raw.lower() and "hoàn tất" not in clean_raw.lower():
         return clean_raw
     return "❌ Chưa hoàn thành nhận xét"
 
@@ -673,7 +647,13 @@ def _resolve_row_issue_description(
     qc_note = _first_defined_str(item, st, fb_dict, key="qc_issue_note")
     _add(qc_note, split_semicolon=False)
     for key in ("quality_issues", "lms_quality_issues", "zalo_content_issues"):
-        _add(next((src[key] for src in (item, st) if key in src and src[key] is not None), fb_dict.get(key)), is_auto=True)
+        _add(
+            next(
+                (src[key] for src in (item, st) if key in src and src[key] is not None),
+                fb_dict.get(key),
+            ),
+            is_auto=True,
+        )
     lms_summary = _first_defined_str(item, st, fb_dict, key="lms_lesson_summary")
     for zalo_issue in evaluate_zalo_content_issues(
         item,
@@ -696,6 +676,7 @@ def _sanitize_dashboard_item(
 ) -> dict[str, Any]:
     scan_target = item.get("scan_target")
     st = dict(scan_target) if isinstance(scan_target, dict) else {}
+    st.pop("_ai_comment_verdicts", None)
     fb = fallback_bcnb_meta if isinstance(fallback_bcnb_meta, dict) else {}
     class_code = _extract_item_class_code(item)
     st.setdefault("week", week)
@@ -737,18 +718,59 @@ def _sanitize_dashboard_item(
     nx_zalo_checked: bool | None = None
     nx_lms_checked: bool | None = None
     for candidate_src in (item, st, fb):
-        if nx_zalo_checked is None and isinstance(
-            candidate_src.get("nx_zalo_checked"), bool
-        ):
+        if nx_zalo_checked is None and isinstance(candidate_src.get("nx_zalo_checked"), bool):
             nx_zalo_checked = bool(candidate_src["nx_zalo_checked"])
-        if nx_lms_checked is None and isinstance(
-            candidate_src.get("nx_lms_checked"), bool
-        ):
+        if nx_lms_checked is None and isinstance(candidate_src.get("nx_lms_checked"), bool):
             nx_lms_checked = bool(candidate_src["nx_lms_checked"])
     if isinstance(nx_zalo_checked, bool):
         st["nx_zalo_checked"] = nx_zalo_checked
     if isinstance(nx_lms_checked, bool):
         st["nx_lms_checked"] = nx_lms_checked
+
+    item_explicit_deferred = is_session_deferred(item) or is_session_deferred(st)
+    ev_state_str = str(item.get("evidence_state") or st.get("evidence_state") or "").strip().upper()
+    scan_st_str = str(item.get("scan_status") or st.get("scan_status") or "").strip().upper()
+    lms_c_map = item.get("lms_comments", st.get("lms_comments"))
+    lms_c_st = (
+        str(lms_c_map.get("status") or "").strip().upper() if isinstance(lms_c_map, Mapping) else ""
+    )
+    lms_s_map = item.get("lms_spck", st.get("lms_spck"))
+    lms_s_st = (
+        str(lms_s_map.get("status") or "").strip().upper() if isinstance(lms_s_map, Mapping) else ""
+    )
+    lms_a_map = item.get("lms_attendance", st.get("lms_attendance"))
+    lms_a_st = (
+        str(lms_a_map.get("status") or "").strip().upper() if isinstance(lms_a_map, Mapping) else ""
+    )
+    has_executed_evidence = (
+        bool(ev_state_str)
+        or scan_st_str == "COMPLETED"
+        or lms_c_st in {"COMPLETE", "MISSING", "REVIEW", "EXEMPT"}
+        or lms_s_st in {"COMPLETE", "MISSING", "PARTIAL", "EXEMPT"}
+        or lms_a_st in {"COMPLETE", "MISSING", "PARTIAL", "EXEMPT"}
+        or bool(
+            item.get("quality_issues")
+            or item.get("lms_quality_issues")
+            or st.get("quality_issues")
+            or st.get("lms_quality_issues")
+        )
+    )
+    session_deferred = item_explicit_deferred or (
+        not has_executed_evidence and is_session_deferred(fb)
+    )
+    deferred_sources = (
+        (item, st) if has_executed_evidence and not item_explicit_deferred else (item, st, fb)
+    )
+    deferred_reason = _first_defined_str(
+        *deferred_sources, key="deferred_reason"
+    ) or _first_defined_str(*deferred_sources, key="eligibility_reason")
+    if session_deferred:
+        st["session_deferred"] = True
+        if deferred_reason and deferred_reason.upper().startswith("DEFERRED_"):
+            st["deferred_reason"] = deferred_reason
+    else:
+        st.pop("session_deferred", None)
+        st.pop("deferred_reason", None)
 
     # Inspection counts belong to this result, never the week's fallback snapshot.
     lms_inspection = {}
@@ -757,7 +779,9 @@ def _sanitize_dashboard_item(
         if isinstance(value, Mapping):
             lms_inspection[key] = dict(value)
             st[key] = dict(value)
-    resolved_lms_status = resolve_lms_status(item, lms_status)
+    resolved_lms_status = (
+        "⏳ Chưa tới giờ kiểm tra" if session_deferred else resolve_lms_status(item, lms_status)
+    )
     if resolved_lms_status == "Chưa quét LMS":
         if nx_lms_checked is True:
             resolved_lms_status = "✅ Đã nộp LMS"
@@ -779,13 +803,16 @@ def _sanitize_dashboard_item(
             or "Không xác minh được tên nhóm Zalo thực tế" in detail_str
         ):
             raw_status_detail = "Buổi 14 – miễn báo cáo theo quy tắc nghiệp vụ."
+    eval_row_ctx = (
+        {**item, "session_deferred": True, "scan_target": st} if session_deferred else item
+    )
     evaluation_status = _resolve_row_evaluation_status(
         zalo_status=zalo_status_str,
         lms_status=resolved_lms_status,
         nx_zalo_checked=nx_zalo_checked,
         nx_lms_checked=nx_lms_checked,
         raw_evaluation_status=str(st.get("evaluation_status") or ""),
-        row=item,
+        row=eval_row_ctx,
     )
     issue_description = _resolve_row_issue_description(
         item,
@@ -845,7 +872,12 @@ def _sanitize_dashboard_item(
         else (snapshot_id if snapshot_id is not None else item.get("snapshot_id"))
     )
     resolved_issue_lists = {
-        key: list(next((src[key] for src in (item, st) if key in src and src[key] is not None), fb.get(key)) or [])
+        key: list(
+            next(
+                (src[key] for src in (item, st) if key in src and src[key] is not None), fb.get(key)
+            )
+            or []
+        )
         for key in ("quality_issues", "lms_quality_issues", "zalo_content_issues")
     }
     resolved_quality_issues = resolved_issue_lists["quality_issues"]
@@ -865,9 +897,7 @@ def _sanitize_dashboard_item(
     sanitized_item = {
         "group": str(item.get("group") or st.get("group_name") or class_code),
         "person": str(item.get("person") or st.get("person") or "Chưa phân công"),
-        "timestamp": str(
-            ev.get("scanned_at") or item.get("timestamp") or job_timestamp or "—"
-        ),
+        "timestamp": str(ev.get("scanned_at") or item.get("timestamp") or job_timestamp or "—"),
         "status": zalo_status_str,
         "status_detail": raw_status_detail,
         "lms_status": resolved_lms_status,
@@ -882,9 +912,7 @@ def _sanitize_dashboard_item(
         "submitted_for_bcnb": bool(item.get("submitted_for_bcnb")) or is_lesson_14_exempt,
         "manual_approved": bool(item.get("manual_approved")),
         "evidence_state": (
-            LESSON_14_EXEMPTION
-            if is_lesson_14_exempt
-            else item.get("evidence_state")
+            LESSON_14_EXEMPTION if is_lesson_14_exempt else item.get("evidence_state")
         ),
         "bcnb_update_state": item.get("bcnb_update_state") or item.get("write_status"),
         "write_status": item.get("write_status"),
@@ -894,8 +922,18 @@ def _sanitize_dashboard_item(
         "lms_quality_issues": resolved_lms_quality_issues,
         "zalo_content_issues": resolved_zalo_content_issues,
         "lms_fetch_unavailable": lms_fetch_unavailable,
+        **({"session_deferred": True} if session_deferred else {}),
+        **(
+            {"deferred_reason": deferred_reason}
+            if session_deferred and deferred_reason.upper().startswith("DEFERRED_")
+            else {}
+        ),
         **lms_inspection,
-        **{key: item.get(key, st.get(key)) for key in ("lms_spck_submitted_count", "lms_previous_quality_issues") if key in item or key in st},
+        **{
+            key: item.get(key, st.get(key))
+            for key in ("lms_spck_submitted_count", "lms_previous_quality_issues")
+            if key in item or key in st
+        },
         "source_job_id": resolved_source_job_id,
         "snapshot_id": resolved_snapshot_id,
         "scan_target": st,
@@ -905,28 +943,40 @@ def _sanitize_dashboard_item(
     sanitized_item["is_failed"] = is_failed(sanitized_item)
     return sanitized_item
 
+
 class ReportRepository:
     async def get_form_mappings(self):
         async with get_db_connection() as db:
-            async with db.execute("SELECT id, question, field_type, value FROM form_mappings ORDER BY id") as cursor:
+            async with db.execute(
+                "SELECT id, question, field_type, value FROM form_mappings ORDER BY id"
+            ) as cursor:
                 rows = await cursor.fetchall()
-                return [{"id": row[0], "question": row[1], "field_type": row[2], "value": row[3]} for row in rows]
+                return [
+                    {"id": row[0], "question": row[1], "field_type": row[2], "value": row[3]}
+                    for row in rows
+                ]
 
     async def get_form_mapping_dict(self):
         mappings = await self.get_form_mappings()
         mapping_dict = {}
         for m in mappings:
-            mapping_dict[m['question']] = {"type": m['field_type'], "value": m['value']}
+            mapping_dict[m["question"]] = {"type": m["field_type"], "value": m["value"]}
         return mapping_dict
 
     async def add_form_mapping(self, question, field_type, value):
         async with get_db_connection() as db:
-            await db.execute("INSERT INTO form_mappings (question, field_type, value) VALUES (?, ?, ?)", (question, field_type, value))
+            await db.execute(
+                "INSERT INTO form_mappings (question, field_type, value) VALUES (?, ?, ?)",
+                (question, field_type, value),
+            )
             await db.commit()
 
     async def update_form_mapping(self, mapping_id, question, field_type, value):
         async with get_db_connection() as db:
-            await db.execute("UPDATE form_mappings SET question=?, field_type=?, value=? WHERE id=?", (question, field_type, value, mapping_id))
+            await db.execute(
+                "UPDATE form_mappings SET question=?, field_type=?, value=? WHERE id=?",
+                (question, field_type, value, mapping_id),
+            )
             await db.commit()
 
     async def delete_form_mapping(self, mapping_id):
@@ -1019,6 +1069,7 @@ class ReportRepository:
         if screenshot_path:
             try:
                 import os
+
                 if os.path.exists(screenshot_path):
                     os.remove(screenshot_path)
             except Exception:
@@ -1038,6 +1089,7 @@ class ReportRepository:
             ) as cursor:
                 rows = await cursor.fetchall()
                 import os
+
                 for row in rows:
                     p = row[0]
                     if p and os.path.exists(p):
@@ -1049,22 +1101,24 @@ class ReportRepository:
                 deleted_count = cursor.rowcount
             await db.commit()
             return deleted_count
-            
+
     async def save_report(self, group_name, class_code, lesson_number, lesson_date, confidence):
         created_at = utc_iso()
         async with get_db_connection() as db:
             await db.execute(
                 "INSERT INTO reports (group_name, class_code, lesson_number, lesson_date, confidence, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-                (group_name, class_code, lesson_number, lesson_date, confidence, created_at)
+                (group_name, class_code, lesson_number, lesson_date, confidence, created_at),
             )
             await db.commit()
-            
-    async def save_classification_log(self, message, rule_score, embedding_score, llm_result, final_result):
+
+    async def save_classification_log(
+        self, message, rule_score, embedding_score, llm_result, final_result
+    ):
         created_at = utc_iso()
         async with get_db_connection() as db:
             await db.execute(
                 "INSERT INTO classification_logs (message, rule_score, embedding_score, llm_result, final_result, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-                (message, rule_score, embedding_score, llm_result, final_result, created_at)
+                (message, rule_score, embedding_score, llm_result, final_result, created_at),
             )
             await db.commit()
 
@@ -1186,7 +1240,13 @@ class ReportRepository:
                     sub_p = _valid_period_pair(sub.get("week"), sub.get("year"))
                     if sub_p is not None:
                         out.add(sub_p)
-            for list_key in ("selected_weeks", "targets", "scan_targets", "deferred_targets", "items"):
+            for list_key in (
+                "selected_weeks",
+                "targets",
+                "scan_targets",
+                "deferred_targets",
+                "items",
+            ):
                 lst = obj.get(list_key)
                 if isinstance(lst, list):
                     for entry in lst:
@@ -1240,9 +1300,7 @@ class ReportRepository:
     ) -> dict[str, Any]:
         """Aggregate Zalo scan results and LMS status for a selected week from SQLite."""
         requested_mode = (
-            "dry-run"
-            if include_dry_run
-            else str(execution_mode or "production").strip().lower()
+            "dry-run" if include_dry_run else str(execution_mode or "production").strip().lower()
         )
         if requested_mode not in VALID_EXECUTION_MODES:
             raise WeeklySummaryError(
@@ -1269,24 +1327,15 @@ class ReportRepository:
             envelope = raw_results if isinstance(raw_results, dict) else {}
             if isinstance(raw_results, list):
                 raw_items = [it for it in raw_results if isinstance(it, dict)]
-            elif isinstance(raw_results, dict) and isinstance(
-                raw_results.get("items"), list
-            ):
-                raw_items = [
-                    it for it in raw_results["items"] if isinstance(it, dict)
-                ]
+            elif isinstance(raw_results, dict) and isinstance(raw_results.get("items"), list):
+                raw_items = [it for it in raw_results["items"] if isinstance(it, dict)]
             else:
                 raw_items = []
 
-            scan_plan_raw = (
-                req_payload.get("scan_plan") if isinstance(req_payload, dict) else None
-            )
-            scan_plan: dict[str, Any] = (
-                scan_plan_raw if isinstance(scan_plan_raw, dict) else {}
-            )
+            scan_plan_raw = req_payload.get("scan_plan") if isinstance(req_payload, dict) else None
+            scan_plan: dict[str, Any] = scan_plan_raw if isinstance(scan_plan_raw, dict) else {}
             selective_rescan = bool(
-                envelope.get("selective_rescan")
-                or scan_plan.get("selective_rescan")
+                envelope.get("selective_rescan") or scan_plan.get("selective_rescan")
             )
             snapshot_id = (
                 envelope.get("snapshot_id")
@@ -1307,9 +1356,7 @@ class ReportRepository:
                 scan_plan.get("required_week"),
             ):
                 if isinstance(req_candidate, dict):
-                    pair = _valid_period_pair(
-                        req_candidate.get("week"), req_candidate.get("year")
-                    )
+                    pair = _valid_period_pair(req_candidate.get("week"), req_candidate.get("year"))
                     if pair is not None:
                         declared_periods.add(pair)
                         if req_week_pair is None:
@@ -1321,9 +1368,7 @@ class ReportRepository:
                 if isinstance(sel_list, list):
                     for sel_item in sel_list:
                         if isinstance(sel_item, dict):
-                            pair = _valid_period_pair(
-                                sel_item.get("week"), sel_item.get("year")
-                            )
+                            pair = _valid_period_pair(sel_item.get("week"), sel_item.get("year"))
                             if pair is not None:
                                 declared_periods.add(pair)
 
@@ -1356,9 +1401,7 @@ class ReportRepository:
                         it_st = merged_it.get("scan_target")
                         if isinstance(bt_st, dict):
                             merged_it["scan_target"] = (
-                                {**bt_st, **it_st}
-                                if isinstance(it_st, dict)
-                                else dict(bt_st)
+                                {**bt_st, **it_st} if isinstance(it_st, dict) else dict(bt_st)
                             )
                         bt_scan = str(bt_match.get("scan_status") or "").strip()
                         bt_write = str(bt_match.get("write_status") or "").strip()
@@ -1521,7 +1564,7 @@ class ReportRepository:
                        OR (
                            sj.job_type = 'ZALO_SCAN'
                            AND sj.status IN ('SUCCESS', 'PARTIAL_SUCCESS')
-                           AND {_SQL_ZALO_JOB_EXEC_MODE.replace('request_payload', 'sj.request_payload').replace('mutates_external', 'sj.mutates_external')} = ?
+                           AND {_SQL_ZALO_JOB_EXEC_MODE.replace("request_payload", "sj.request_payload").replace("mutates_external", "sj.mutates_external")} = ?
                        )
                     UNION
                     SELECT CAST(json_extract(results, '$.required_week.week') AS INTEGER) AS w,
@@ -1718,13 +1761,9 @@ class ReportRepository:
                 if explicit_parsed_job["required_week"] is not None:
                     selected_period = explicit_parsed_job["required_week"]
                 elif len(explicit_parsed_job["items_by_period"]) == 1:
-                    selected_period = next(
-                        iter(explicit_parsed_job["items_by_period"].keys())
-                    )
+                    selected_period = next(iter(explicit_parsed_job["items_by_period"].keys()))
                 elif len(explicit_parsed_job["declared_periods"]) == 1:
-                    selected_period = next(
-                        iter(explicit_parsed_job["declared_periods"])
-                    )
+                    selected_period = next(iter(explicit_parsed_job["declared_periods"]))
                 if selected_period is None:
                     raise WeeklySummaryError(
                         "Không xác định được tuần của job đã chọn; hãy truyền thêm week và year.",
@@ -1894,9 +1933,8 @@ class ReportRepository:
                     code="WEEKLY_SUMMARY_RESOURCE_LIMIT_EXCEEDED",
                     status_code=409,
                 )
-            if (
-                sum(int(r[1] or 0) for r in zalo_job_meta_rows) > bt_cap
-                or any(int(r[1] or 0) > bt_cap for r in zalo_job_meta_rows)
+            if sum(int(r[1] or 0) for r in zalo_job_meta_rows) > bt_cap or any(
+                int(r[1] or 0) > bt_cap for r in zalo_job_meta_rows
             ):
                 raise WeeklySummaryError(
                     f"Số lượng mục kết quả (results.items) trong tuần W{sel_week:02d}/{sel_year} vượt giới hạn tài nguyên ({bt_cap}).",
@@ -2107,9 +2145,7 @@ class ReportRepository:
                 if latest_snapshot_row and latest_snapshot_row[0] is not None
                 else None
             )
-            extra_snap_ids = sorted(
-                sid for sid in referenced_snap_ids if sid != latest_snap_id
-            )
+            extra_snap_ids = sorted(sid for sid in referenced_snap_ids if sid != latest_snap_id)
             snapshot_plans_by_id: dict[int, dict[str, Any]] = {}
             if latest_snap_id is not None and latest_snapshot_row[1]:
                 parsed_latest_snap = _parse_json(latest_snapshot_row[1], {})
@@ -2214,9 +2250,7 @@ class ReportRepository:
                 merged_item.setdefault("group", st_obj["group_name"])
                 merged_item.setdefault("person", st_obj["person"])
                 merged_item.setdefault("source_job_id", bt_job_id)
-                merged_item.setdefault(
-                    "timestamp", str(bt[13] or bt[12] or bt[14] or "")
-                )
+                merged_item.setdefault("timestamp", str(bt[13] or bt[12] or bt[14] or ""))
                 if scan_status:
                     merged_item["scan_status"] = scan_status
                 if write_status:
@@ -2247,9 +2281,7 @@ class ReportRepository:
                     "status": fallback_status,
                     "timestamp": str(bt[13] or bt[12] or bt[14] or ""),
                     "evidence_state": (
-                        "BLOCKED_BATCH_HALT"
-                        if eff_write == "BLOCKED_BATCH_HALT"
-                        else "UNKNOWN"
+                        "BLOCKED_BATCH_HALT" if eff_write == "BLOCKED_BATCH_HALT" else "UNKNOWN"
                     ),
                     "scan_status": eff_scan,
                     "write_status": eff_write,
@@ -2305,6 +2337,7 @@ class ReportRepository:
             default_week: int | None = None,
             default_year: int | None = None,
             source_tag: str = "",
+            decision_order: tuple[int, int, int] = (0, 0, 0),
         ) -> None:
             if not isinstance(raw_entry, dict):
                 return
@@ -2314,14 +2347,12 @@ class ReportRepository:
             )
             if pair is None:
                 return
-            c_code = str(
-                raw_entry.get("class_code") or raw_entry.get("ma_lop") or ""
-            ).strip().upper()
+            c_code = (
+                str(raw_entry.get("class_code") or raw_entry.get("ma_lop") or "").strip().upper()
+            )
             if not c_code:
                 return
-            lesson_str = str(
-                raw_entry.get("lesson") or raw_entry.get("buoi_so") or ""
-            ).strip()
+            lesson_str = str(raw_entry.get("lesson") or raw_entry.get("buoi_so") or "").strip()
             if not lesson_str:
                 return
             raw_display_date = str(
@@ -2380,15 +2411,29 @@ class ReportRepository:
                 iv = raw_entry.get(ik)
                 if isinstance(iv, (list, tuple)) and iv:
                     meta[ik] = list(iv)
+            is_def = is_session_deferred(raw_entry) or source_tag.endswith("_deferred_targets")
+            is_non_def_target = (
+                source_tag.endswith(("_scan_targets", "_targets", "_exempt_targets")) and not is_def
+            )
+            def_reason = str(
+                raw_entry.get("deferred_reason")
+                or raw_entry.get("eligibility_reason")
+                or ("DEFERRED_TARGET" if is_def else "")
+            ).strip()
+            if is_def:
+                meta["session_deferred"] = True
+                meta["_deferral_order"] = decision_order
+                if def_reason.upper().startswith("DEFERRED_"):
+                    meta["deferred_reason"] = def_reason
+            elif is_non_def_target:
+                meta["session_deferred"] = False
+                meta["_deferral_order"] = decision_order
+                meta["deferred_reason"] = ""
             lesson_list = bcnb_meta_by_lesson_rows.setdefault(
                 (pair[0], pair[1], c_code, lesson_str), []
             )
             matched_lesson_entry = next(
-                (
-                    m
-                    for m in lesson_list
-                    if _can_merge_bcnb_meta(m, meta, source_tag=source_tag)
-                ),
+                (m for m in lesson_list if _can_merge_bcnb_meta(m, meta, source_tag=source_tag)),
                 None,
             )
             if matched_lesson_entry is None:
@@ -2398,18 +2443,28 @@ class ReportRepository:
             else:
                 if source_tag:
                     matched_lesson_entry.setdefault("_sources", set()).add(source_tag)
+                if "session_deferred" in meta:
+                    prev_lesson_order = matched_lesson_entry.get("_deferral_order")
+                    if prev_lesson_order is None or decision_order > prev_lesson_order:
+                        matched_lesson_entry["_deferral_order"] = decision_order
+                        matched_lesson_entry["session_deferred"] = bool(meta["session_deferred"])
+                        if meta["session_deferred"] and meta.get("deferred_reason"):
+                            matched_lesson_entry["deferred_reason"] = meta["deferred_reason"]
+                        else:
+                            matched_lesson_entry.pop("deferred_reason", None)
                 for mk, mv in meta.items():
-                    if mk != "_sources" and mv != "":
+                    if mk in {
+                        "_sources",
+                        "_deferral_order",
+                        "session_deferred",
+                        "deferred_reason",
+                    }:
+                        continue
+                    if mv != "":
                         matched_lesson_entry.setdefault(mk, mv)
-            code_list = bcnb_meta_by_code_rows.setdefault(
-                (pair[0], pair[1], c_code), []
-            )
+            code_list = bcnb_meta_by_code_rows.setdefault((pair[0], pair[1], c_code), [])
             matched_code_entry = next(
-                (
-                    m
-                    for m in code_list
-                    if _can_merge_bcnb_meta(m, meta, source_tag=source_tag)
-                ),
+                (m for m in code_list if _can_merge_bcnb_meta(m, meta, source_tag=source_tag)),
                 None,
             )
             if matched_code_entry is None:
@@ -2419,17 +2474,44 @@ class ReportRepository:
             else:
                 if source_tag:
                     matched_code_entry.setdefault("_sources", set()).add(source_tag)
+                if "session_deferred" in meta:
+                    prev_code_order = matched_code_entry.get("_deferral_order")
+                    if prev_code_order is None or decision_order > prev_code_order:
+                        matched_code_entry["_deferral_order"] = decision_order
+                        matched_code_entry["session_deferred"] = bool(meta["session_deferred"])
+                        if meta["session_deferred"] and meta.get("deferred_reason"):
+                            matched_code_entry["deferred_reason"] = meta["deferred_reason"]
+                        else:
+                            matched_code_entry.pop("deferred_reason", None)
                 for mk, mv in meta.items():
-                    if mk != "_sources" and mv != "":
+                    if mk in {
+                        "_sources",
+                        "_deferral_order",
+                        "session_deferred",
+                        "deferred_reason",
+                    }:
+                        continue
+                    if mv != "":
                         matched_code_entry.setdefault(mk, mv)
 
-        def _register_snapshot_plan_meta(snap_plan: dict[str, Any], tag_prefix: str) -> None:
-            for tgt_list_key in ("scan_targets", "targets", "deferred_targets"):
+        def _register_snapshot_plan_meta(
+            snap_plan: dict[str, Any],
+            tag_prefix: str,
+            *,
+            decision_order: tuple[int, int, int] = (0, 0, 0),
+        ) -> None:
+            for tgt_list_key in (
+                "scan_targets",
+                "targets",
+                "exempt_targets",
+                "deferred_targets",
+            ):
                 for tgt_entry in snap_plan.get(tgt_list_key) or []:
                     if isinstance(tgt_entry, dict):
                         _register_bcnb_row_meta(
                             tgt_entry,
                             source_tag=f"{tag_prefix}_{tgt_list_key}",
+                            decision_order=decision_order,
                         )
             bcnb_wp = snap_plan.get("bcnb_week_plan")
             if isinstance(bcnb_wp, dict):
@@ -2444,6 +2526,7 @@ class ReportRepository:
                                     default_week=pair[0],
                                     default_year=pair[1],
                                     source_tag=f"{tag_prefix}_required_data",
+                                    decision_order=decision_order,
                                 )
                 lat_w = bcnb_wp.get("latest_week")
                 if isinstance(lat_w, dict):
@@ -2456,6 +2539,7 @@ class ReportRepository:
                                     default_week=l_pair[0],
                                     default_year=l_pair[1],
                                     source_tag=f"{tag_prefix}_latest_data",
+                                    decision_order=decision_order,
                                 )
             coverage = snap_plan.get("bcnb_zalo_coverage")
             if isinstance(coverage, dict):
@@ -2485,6 +2569,7 @@ class ReportRepository:
                                 "class_date_iso": cov_p.get("class_date_iso"),
                             },
                             source_tag=f"{tag_prefix}_coverage",
+                            decision_order=decision_order,
                         )
 
         def _resolve_bcnb_row_fallback(
@@ -2498,9 +2583,7 @@ class ReportRepository:
         ) -> dict[str, Any]:
             if not lesson_str:
                 return {}
-            candidates = bcnb_meta_by_lesson_rows.get(
-                (week_num, year_num, c_code, lesson_str), []
-            )
+            candidates = bcnb_meta_by_lesson_rows.get((week_num, year_num, c_code, lesson_str), [])
             if not candidates:
                 return {}
             sid = str(session_id or "").strip()
@@ -2523,14 +2606,11 @@ class ReportRepository:
                     return {}
             if date_iso:
                 date_matches = [
-                    c
-                    for c in candidates
-                    if str(c.get("_class_date_iso") or "").strip() == date_iso
+                    c for c in candidates if str(c.get("_class_date_iso") or "").strip() == date_iso
                 ]
                 if len(date_matches) == 1:
                     has_undated_other = any(
-                        not str(c.get("_class_date_iso") or "").strip()
-                        for c in candidates
+                        not str(c.get("_class_date_iso") or "").strip() for c in candidates
                     )
                     if not has_undated_other:
                         return date_matches[0]
@@ -2545,9 +2625,21 @@ class ReportRepository:
                 return {}
             return only
 
-        for s_id, s_plan in snapshot_plans_by_id.items():
+        for s_id, s_plan in sorted(
+            snapshot_plans_by_id.items(), key=lambda kv: kv[0], reverse=True
+        ):
             tag_prefix = f"snap_{s_id}"
-            _register_snapshot_plan_meta(s_plan, tag_prefix)
+            raw_s_snap = s_plan.get("snapshot_id") if isinstance(s_plan, dict) else None
+            eff_s_id = (
+                max(int(s_id), int(raw_s_snap))
+                if isinstance(raw_s_snap, int) and not isinstance(raw_s_snap, bool)
+                else int(s_id)
+            )
+            _register_snapshot_plan_meta(
+                s_plan,
+                tag_prefix,
+                decision_order=(eff_s_id, 0, 0),
+            )
 
         parsed_zalo_jobs: list[dict[str, Any]] = []
         for row in zalo_job_rows:
@@ -2561,9 +2653,23 @@ class ReportRepository:
                 or parsed_job["execution_mode"] != requested_mode
             ):
                 continue
+            j_plan = parsed_job["scan_plan"]
+            raw_j_snap = (
+                j_plan.get("snapshot_id")
+                if isinstance(j_plan, dict) and j_plan.get("snapshot_id") is not None
+                else parsed_job.get("snapshot_id")
+            )
+            eff_j_snap = (
+                int(raw_j_snap)
+                if isinstance(raw_j_snap, int)
+                and not isinstance(raw_j_snap, bool)
+                and int(raw_j_snap) > 0
+                else 0
+            )
             _register_snapshot_plan_meta(
-                parsed_job["scan_plan"],
+                j_plan,
                 f"job_{j_id}",
+                decision_order=(eff_j_snap, 1, j_id),
             )
             parsed_zalo_jobs.append(parsed_job)
 
@@ -2599,8 +2705,7 @@ class ReportRepository:
                 pair = _valid_period_pair(l_res.get("week"), l_res.get("year"))
                 if pair is not None and l_status == "SUCCESS":
                     existing_ids = {
-                        p["analysis_job_id"]
-                        for p in lms_previews_by_period.get(pair, [])
+                        p["analysis_job_id"] for p in lms_previews_by_period.get(pair, [])
                     }
                     if l_id not in existing_ids:
                         lms_previews_by_period.setdefault(pair, []).append(
@@ -2613,13 +2718,9 @@ class ReportRepository:
                         )
             elif l_type == "LMS_AUTOMATION" and l_status in FINISHED_LMS_AUTOMATION_STATUSES:
                 source_obj = (
-                    l_res
-                    if isinstance(l_res, dict)
-                    else (l_req if isinstance(l_req, dict) else {})
+                    l_res if isinstance(l_res, dict) else (l_req if isinstance(l_req, dict) else {})
                 )
-                pair = _valid_period_pair(
-                    source_obj.get("week"), source_obj.get("year")
-                )
+                pair = _valid_period_pair(source_obj.get("week"), source_obj.get("year"))
                 if pair is not None and isinstance(l_res, dict):
                     lms_executions_by_period.setdefault(pair, []).append(
                         {
@@ -2741,14 +2842,10 @@ class ReportRepository:
                     "approval_job_id": int(ma_job_id) if ma_job_id else None,
                     "source_job_id": (
                         int(src_j)
-                        if isinstance(src_j, int)
-                        and not isinstance(src_j, bool)
-                        and int(src_j) > 0
+                        if isinstance(src_j, int) and not isinstance(src_j, bool) and int(src_j) > 0
                         else None
                     ),
-                    "evidence_path": str(
-                        ma_ev_path or reason.get("evidence_path") or ""
-                    ).strip(),
+                    "evidence_path": str(ma_ev_path or reason.get("evidence_path") or "").strip(),
                     "evidence_sha256": str(
                         ma_ev_sha or reason.get("evidence_sha256") or ""
                     ).strip(),
@@ -2762,9 +2859,7 @@ class ReportRepository:
         matching_jobs_chronological: list[dict[str, Any]] = []
         for j in parsed_zalo_jobs:
             period_items = j["items_by_period"].get(selected_period, [])
-            is_for_period = bool(period_items) or (
-                selected_period in j["declared_periods"]
-            )
+            is_for_period = bool(period_items) or (selected_period in j["declared_periods"])
             if not is_for_period:
                 continue
             jobs_for_week.append(
@@ -2857,13 +2952,10 @@ class ReportRepository:
                 for cand_ma_key in (ma_lookup_key, r_key):
                     if (
                         cand_ma_key in period_manual_approvals
-                        and period_manual_approvals[cand_ma_key].get("approved_item")
-                        is None
+                        and period_manual_approvals[cand_ma_key].get("approved_item") is None
                     ):
                         existing_app = period_manual_approvals[cand_ma_key]
-                        ex_app_sid = str(
-                            existing_app.get("bcnb_session_id") or ""
-                        ).strip()
+                        ex_app_sid = str(existing_app.get("bcnb_session_id") or "").strip()
                         if ex_app_sid and item_sid and ex_app_sid != item_sid:
                             continue
                         if ex_app_sid and not item_sid:
@@ -2876,9 +2968,7 @@ class ReportRepository:
                         if not ex_app_sid and len(same_key_in_job) != 1:
                             continue
                         src_candidate = existing_app.get("source_job_id")
-                        if src_candidate is None or int(src_candidate) == int(
-                            j["job_id"]
-                        ):
+                        if src_candidate is None or int(src_candidate) == int(j["job_id"]):
                             existing_app["approved_item"] = item
                             if item_sid and not ex_app_sid:
                                 existing_app["bcnb_session_id"] = item_sid
@@ -2897,16 +2987,10 @@ class ReportRepository:
                 )
                 st_raw = item.get("scan_target")
                 st_dict = st_raw if isinstance(st_raw, dict) else {}
-                src_j = (
-                    ma_meta.get("source_job_id")
-                    or item.get("source_job_id")
-                    or j["job_id"]
-                )
+                src_j = ma_meta.get("source_job_id") or item.get("source_job_id") or j["job_id"]
                 resolved_src_j = (
                     int(src_j)
-                    if isinstance(src_j, int)
-                    and not isinstance(src_j, bool)
-                    and int(src_j) > 0
+                    if isinstance(src_j, int) and not isinstance(src_j, bool) and int(src_j) > 0
                     else j["job_id"]
                 )
                 ma_store_key = f"{r_key}|sid:{item_sid}" if item_sid else r_key
@@ -2914,9 +2998,7 @@ class ReportRepository:
                     "target_key": r_key,
                     "bcnb_session_id": item_sid,
                     "class_code": _extract_item_class_code(item),
-                    "group_name": str(
-                        item.get("group") or st_dict.get("group_name") or ""
-                    ).strip(),
+                    "group_name": str(item.get("group") or st_dict.get("group_name") or "").strip(),
                     "week": sel_week,
                     "year": sel_year,
                     "lesson": str(st_dict.get("lesson") or "").strip(),
@@ -2926,16 +3008,11 @@ class ReportRepository:
                     "approved_by": str(ma_meta.get("approved_by") or "operator").strip()
                     or "operator",
                     "approved_at": str(
-                        ma_meta.get("approved_at")
-                        or item.get("timestamp")
-                        or j["timestamp"]
-                        or ""
+                        ma_meta.get("approved_at") or item.get("timestamp") or j["timestamp"] or ""
                     ).strip(),
                     "approval_job_id": ma_meta.get("approval_job_id"),
                     "source_job_id": resolved_src_j,
-                    "snapshot_id": job_snapshot_by_id.get(
-                        resolved_src_j, j["snapshot_id"]
-                    ),
+                    "snapshot_id": job_snapshot_by_id.get(resolved_src_j, j["snapshot_id"]),
                     "evidence_path": str(ma_meta.get("evidence_path") or "").strip(),
                     "evidence_sha256": str(ma_meta.get("evidence_sha256") or "").strip(),
                     "outcome": "VERIFIED",
@@ -3022,8 +3099,7 @@ class ReportRepository:
                 jobs_to_merge = contiguous_same_snapshot
 
             has_full_baseline = any(
-                not j["selective_rescan"]
-                and j["status"] in {"SUCCESS", "PARTIAL_SUCCESS"}
+                not j["selective_rescan"] and j["status"] in {"SUCCESS", "PARTIAL_SUCCESS"}
                 for j in jobs_to_merge
             )
             selected_snapshot_id = active_snapshot_id
@@ -3065,9 +3141,8 @@ class ReportRepository:
                             merge_key = r_key
                     if merge_key in merged_by_key:
                         _, _, prev_item = merged_by_key[merge_key]
-                        if (
-                            _is_halted_unscanned_item(item)
-                            and not _is_halted_unscanned_item(prev_item)
+                        if _is_halted_unscanned_item(item) and not _is_halted_unscanned_item(
+                            prev_item
                         ):
                             continue
                     else:
@@ -3086,14 +3161,11 @@ class ReportRepository:
                 r_key_merge_keys = [
                     mk
                     for mk in ordered_keys
-                    if _extract_item_row_key(merged_by_key[mk][2], sel_week, sel_year)
-                    == r_key
+                    if _extract_item_row_key(merged_by_key[mk][2], sel_week, sel_year) == r_key
                 ]
                 app_sid = _approval_session_id(app_info)
                 if r_key_merge_keys:
-                    same_r_key_items = [
-                        merged_by_key[mk][2] for mk in r_key_merge_keys
-                    ]
+                    same_r_key_items = [merged_by_key[mk][2] for mk in r_key_merge_keys]
                     compatible_mks = [
                         mk
                         for mk in r_key_merge_keys
@@ -3131,17 +3203,11 @@ class ReportRepository:
                     else:
                         c_code = app_info.get("class_code") or "KHONG_RO_LOP"
                         g_name = app_info.get("group_name") or c_code
-                        person_name = teacher_by_class_code.get(
-                            c_code, "Chưa phân công"
-                        )
+                        person_name = teacher_by_class_code.get(c_code, "Chưa phân công")
                         base_item = {
                             "group": g_name,
                             "person": person_name,
-                            **(
-                                {"bcnb_session_id": app_sid}
-                                if app_sid
-                                else {}
-                            ),
+                            **({"bcnb_session_id": app_sid} if app_sid else {}),
                             "scan_target": {
                                 "group_name": g_name,
                                 "person": person_name,
@@ -3151,22 +3217,14 @@ class ReportRepository:
                                 "lesson": app_info.get("lesson") or "—",
                                 "class_date": app_info.get("class_date_iso") or "—",
                                 "class_date_iso": app_info.get("class_date_iso") or "",
-                                **(
-                                    {"bcnb_session_id": app_sid}
-                                    if app_sid
-                                    else {}
-                                ),
+                                **({"bcnb_session_id": app_sid} if app_sid else {}),
                             },
                         }
                     app_snapshot_id = app_info.get("snapshot_id")
                     base_item["_origin_snapshot_id"] = app_snapshot_id
                     if app_snapshot_id is None or app_snapshot_id != active_snapshot_id:
                         selected_snapshot_id = None
-                    fallback_job_id = int(
-                        app_info.get("source_job_id")
-                        or selected_job_id
-                        or 0
-                    )
+                    fallback_job_id = int(app_info.get("source_job_id") or selected_job_id or 0)
                     synth_mk = ma_key if ma_key not in merged_by_key else f"{ma_key}#ma"
                     ordered_keys.append(synth_mk)
                     merged_by_key[synth_mk] = _apply_verified_manual_approval(
@@ -3200,11 +3258,7 @@ class ReportRepository:
                         "group": g_name,
                         "person": person_name,
                         "_origin_snapshot_id": app_info.get("snapshot_id"),
-                        **(
-                            {"bcnb_session_id": app_sid}
-                            if app_sid
-                            else {}
-                        ),
+                        **({"bcnb_session_id": app_sid} if app_sid else {}),
                         "scan_target": {
                             "group_name": g_name,
                             "person": person_name,
@@ -3214,11 +3268,7 @@ class ReportRepository:
                             "lesson": app_info.get("lesson") or "—",
                             "class_date": app_info.get("class_date_iso") or "—",
                             "class_date_iso": app_info.get("class_date_iso") or "",
-                            **(
-                                {"bcnb_session_id": app_sid}
-                                if app_sid
-                                else {}
-                            ),
+                            **({"bcnb_session_id": app_sid} if app_sid else {}),
                         },
                     }
                 fallback_job_id = int(app_info.get("source_job_id") or 0)
@@ -3356,9 +3406,7 @@ class ReportRepository:
                     )
                 else:
                     lms_status_by_class[code] = (
-                        f"❌ Chưa nhận xét ({detail})"
-                        if detail
-                        else "❌ Chưa nhận xét"
+                        f"❌ Chưa nhận xét ({detail})" if detail else "❌ Chưa nhận xét"
                     )
                 lms_verified_at_by_class[code] = p_time
 
@@ -3390,9 +3438,7 @@ class ReportRepository:
             e_time = latest_exec["timestamp"]
             e_dry_run = bool(latest_exec["dry_run"])
             ver_status = (
-                "🧪 Đã nhận xét (Dry-run LMS)"
-                if e_dry_run
-                else "✅ Đã nhận xét & Tích BCNB"
+                "🧪 Đã nhận xét (Dry-run LMS)" if e_dry_run else "✅ Đã nhận xét & Tích BCNB"
             )
             for raw_code in e_res.get("verified_classes") or []:
                 if isinstance(raw_code, dict):
@@ -3476,9 +3522,7 @@ class ReportRepository:
                     aud_ts = str(audit_info.get("timestamp") or "")
                     prev_j_id = int(latest_preview.get("analysis_job_id") or 0)
                     prev_ts = str(latest_preview.get("timestamp") or "")
-                    if aud_j_id < prev_j_id and (
-                        not aud_ts or not prev_ts or aud_ts < prev_ts
-                    ):
+                    if aud_j_id < prev_j_id and (not aud_ts or not prev_ts or aud_ts < prev_ts):
                         continue
                 if code not in bcnb_lms_classes_in_week:
                     bcnb_lms_classes_in_week.append(code)
@@ -3540,11 +3584,7 @@ class ReportRepository:
                 return raw_sess_status
 
             detail = str(preview_overdue_details.get(c_code) or "").strip()
-            if (
-                c_code in classes_with_session_lms_keys
-                and not detail
-                and (norm_lesson or date_iso)
-            ):
+            if c_code in classes_with_session_lms_keys and not detail and (norm_lesson or date_iso):
                 eff_exec = _effective_exec_status()
                 if eff_exec is not None:
                     return eff_exec
@@ -3559,18 +3599,11 @@ class ReportRepository:
                 return "✅ Đã nộp LMS"
 
             if c_code in preview_missing_set and detail and (norm_lesson or date_iso):
-                clauses = [
-                    seg.strip()
-                    for seg in re.split(r"[,;]+", detail)
-                    if seg.strip()
-                ]
+                clauses = [seg.strip() for seg in re.split(r"[,;]+", detail) if seg.strip()]
                 parsed_clauses: list[tuple[set[str], set[str], str]] = []
                 any_specific_selector = False
                 for cl in clauses:
-                    cl_lessons = {
-                        str(int(m))
-                        for m in re.findall(r"(?i)\bbuổi\s*0*(\d+)\b", cl)
-                    }
+                    cl_lessons = {str(int(m)) for m in re.findall(r"(?i)\bbuổi\s*0*(\d+)\b", cl)}
                     cl_dates = {
                         _normalize_date_iso(d)
                         for d in re.findall(
@@ -3585,12 +3618,8 @@ class ReportRepository:
                 if any_specific_selector:
                     matched_clauses: list[str] = []
                     for cl_lessons, cl_dates, cl_text in parsed_clauses:
-                        lesson_ok = bool(
-                            cl_lessons and norm_lesson and norm_lesson in cl_lessons
-                        )
-                        date_ok = bool(
-                            cl_dates and date_iso and date_iso in cl_dates
-                        )
+                        lesson_ok = bool(cl_lessons and norm_lesson and norm_lesson in cl_lessons)
+                        date_ok = bool(cl_dates and date_iso and date_iso in cl_dates)
                         if cl_lessons and cl_dates:
                             if lesson_ok and date_ok:
                                 matched_clauses.append(cl_text)
@@ -3601,12 +3630,8 @@ class ReportRepository:
 
                     if matched_clauses:
                         matched_detail = ", ".join(matched_clauses)
-                        is_checked_warn = (
-                            nx_lms_checked is True
-                            or (
-                                nx_lms_checked is None
-                                and c_code in preview_missing_checked_set
-                            )
+                        is_checked_warn = nx_lms_checked is True or (
+                            nx_lms_checked is None and c_code in preview_missing_checked_set
                         )
                         if is_checked_warn:
                             return f"⚠️ Chưa nhận xét ({matched_detail}) - BCNB đã tích"
@@ -3668,16 +3693,10 @@ class ReportRepository:
         for _src_j, _j_ts, raw_it in selected_raw_items:
             c_code = _extract_item_class_code(raw_it)
             raw_st_obj = raw_it.get("scan_target")
-            raw_st_d: dict[str, Any] = (
-                raw_st_obj if isinstance(raw_st_obj, dict) else {}
-            )
+            raw_st_d: dict[str, Any] = raw_st_obj if isinstance(raw_st_obj, dict) else {}
             raw_ev = raw_it.get("evidence")
-            raw_ctx_obj = (
-                raw_ev.get("date_context") if isinstance(raw_ev, dict) else None
-            )
-            raw_ctx_d: dict[str, Any] = (
-                raw_ctx_obj if isinstance(raw_ctx_obj, dict) else {}
-            )
+            raw_ctx_obj = raw_ev.get("date_context") if isinstance(raw_ev, dict) else None
+            raw_ctx_d: dict[str, Any] = raw_ctx_obj if isinstance(raw_ctx_obj, dict) else {}
             it_lesson = str(
                 raw_st_d.get("lesson")
                 or raw_ctx_d.get("target_lesson")
@@ -3693,9 +3712,7 @@ class ReportRepository:
                 or ""
             )
             norm_l = _norm_lesson_token(it_lesson)
-            session_keys_by_class.setdefault(c_code, set()).add(
-                (norm_l or it_lesson, it_date_iso)
-            )
+            session_keys_by_class.setdefault(c_code, set()).add((norm_l or it_lesson, it_date_iso))
             covered_session_keys.add((c_code, it_lesson, it_date_iso))
             if norm_l:
                 covered_session_keys.add((c_code, norm_l, it_date_iso))
@@ -3724,21 +3741,12 @@ class ReportRepository:
             class_code = _extract_item_class_code(item)
             seen_class_codes.add(class_code)
             raw_st_obj = item.get("scan_target")
-            raw_st: dict[str, Any] = (
-                raw_st_obj if isinstance(raw_st_obj, dict) else {}
-            )
+            raw_st: dict[str, Any] = raw_st_obj if isinstance(raw_st_obj, dict) else {}
             raw_ev = item.get("evidence")
-            raw_ctx_obj = (
-                raw_ev.get("date_context") if isinstance(raw_ev, dict) else None
-            )
-            raw_ctx: dict[str, Any] = (
-                raw_ctx_obj if isinstance(raw_ctx_obj, dict) else {}
-            )
+            raw_ctx_obj = raw_ev.get("date_context") if isinstance(raw_ev, dict) else None
+            raw_ctx: dict[str, Any] = raw_ctx_obj if isinstance(raw_ctx_obj, dict) else {}
             item_lesson = str(
-                raw_st.get("lesson")
-                or raw_ctx.get("target_lesson")
-                or item.get("lesson")
-                or ""
+                raw_st.get("lesson") or raw_ctx.get("target_lesson") or item.get("lesson") or ""
             ).strip()
             item_date_iso = _normalize_date_iso(
                 raw_st.get("class_date_iso")
@@ -3748,9 +3756,7 @@ class ReportRepository:
                 or item.get("class_date")
                 or ""
             )
-            item_session_id = _first_defined_str(
-                item, raw_st, key="bcnb_session_id"
-            )
+            item_session_id = _first_defined_str(item, raw_st, key="bcnb_session_id")
             fallback_meta = _resolve_bcnb_row_fallback(
                 week_num=sel_week,
                 year_num=sel_year,
@@ -3761,9 +3767,7 @@ class ReportRepository:
             )
             row_nx_lms: bool | None = None
             for cand_src in (item, raw_st, fallback_meta):
-                if isinstance(cand_src, dict) and isinstance(
-                    cand_src.get("nx_lms_checked"), bool
-                ):
+                if isinstance(cand_src, dict) and isinstance(cand_src.get("nx_lms_checked"), bool):
                     row_nx_lms = bool(cand_src["nx_lms_checked"])
                     break
             multi_session = len(session_keys_by_class.get(class_code, set())) > 1
@@ -3788,11 +3792,7 @@ class ReportRepository:
             st = sanitized["scan_target"]
             manual_app = item.get("manual_approval")
             verified_at = str(
-                (
-                    manual_app.get("approved_at")
-                    if isinstance(manual_app, dict)
-                    else None
-                )
+                (manual_app.get("approved_at") if isinstance(manual_app, dict) else None)
                 or sanitized["evidence"].get("scanned_at")
                 or job_ts
                 or sanitized.get("timestamp")
@@ -3803,14 +3803,20 @@ class ReportRepository:
                 "teacher": str(sanitized.get("person") or "Chưa phân công").strip()
                 or "Chưa phân công",
                 "lesson": str(st.get("lesson") or "—").strip() or "—",
-                "class_date": str(
-                    st.get("class_date") or st.get("class_date_iso") or "—"
-                ).strip()
+                "class_date": str(st.get("class_date") or st.get("class_date_iso") or "—").strip()
                 or "—",
                 "zalo_status": str(sanitized.get("status") or "Chưa xác định").strip(),
                 "lms_status": resolved_lms_status,
-                **{key: sanitized[key] for key in ("lms_attendance", "lms_comments", "lms_spck") if key in sanitized},
-                **{key: sanitized[key] for key in ("lms_spck_submitted_count", "lms_previous_quality_issues") if key in sanitized},
+                **{
+                    key: sanitized[key]
+                    for key in ("lms_attendance", "lms_comments", "lms_spck")
+                    if key in sanitized
+                },
+                **{
+                    key: sanitized[key]
+                    for key in ("lms_spck_submitted_count", "lms_previous_quality_issues")
+                    if key in sanitized
+                },
                 "evaluation_status": str(sanitized.get("evaluation_status") or ""),
                 "issue_description": str(sanitized.get("issue_description") or ""),
                 "qc_issue_note": str(sanitized.get("qc_issue_note") or ""),
@@ -3828,6 +3834,12 @@ class ReportRepository:
                 "quality_issues": list(sanitized.get("quality_issues") or []),
                 "lms_quality_issues": list(sanitized.get("lms_quality_issues") or []),
                 "zalo_content_issues": list(sanitized.get("zalo_content_issues") or []),
+                **({"session_deferred": True} if sanitized.get("session_deferred") else {}),
+                **(
+                    {"deferred_reason": sanitized["deferred_reason"]}
+                    if sanitized.get("deferred_reason")
+                    else {}
+                ),
                 "category": sanitized["category"],
                 "is_failed": sanitized["is_failed"],
                 "verified_at": verified_at,
@@ -3880,26 +3892,31 @@ class ReportRepository:
                         if isinstance(fb_meta.get("nx_lms_checked"), bool)
                         else None
                     )
-                    raw_lms_status = _resolve_lms_status_for_session(
-                        c_code=code,
-                        lesson_str=m_lesson,
-                        date_iso=m_date_iso,
-                        nx_lms_checked=m_nx_lms,
-                        multi_session_class=multi_session,
-                    )
-                    if raw_lms_status == "Chưa quét LMS":
-                        if m_nx_lms is True:
-                            raw_lms_status = "✅ Đã nộp LMS"
-                        elif m_nx_lms is False:
-                            raw_lms_status = "❌ Chưa nộp LMS"
+                    fb_deferred = is_session_deferred(fb_meta)
+                    fb_def_reason = str(
+                        fb_meta.get("deferred_reason") or fb_meta.get("eligibility_reason") or ""
+                    ).strip()
+                    if fb_deferred:
+                        raw_lms_status = "⏳ Chưa tới giờ kiểm tra"
+                    else:
+                        raw_lms_status = _resolve_lms_status_for_session(
+                            c_code=code,
+                            lesson_str=m_lesson,
+                            date_iso=m_date_iso,
+                            nx_lms_checked=m_nx_lms,
+                            multi_session_class=multi_session,
+                        )
+                        if raw_lms_status == "Chưa quét LMS":
+                            if m_nx_lms is True:
+                                raw_lms_status = "✅ Đã nộp LMS"
+                            elif m_nx_lms is False:
+                                raw_lms_status = "❌ Chưa nộp LMS"
                     lms_ts = lms_verified_at_by_class.get(code) or "—"
-                    teacher = (
-                        str(fb_meta.get("_teacher") or "").strip()
-                        or teacher_by_class_code.get(code, "Chưa phân công")
-                    )
+                    teacher = str(
+                        fb_meta.get("_teacher") or ""
+                    ).strip() or teacher_by_class_code.get(code, "Chưa phân công")
                     display_date = (
-                        str(fb_meta.get("_class_date") or m_date_iso or "—").strip()
-                        or "—"
+                        str(fb_meta.get("_class_date") or m_date_iso or "—").strip() or "—"
                     )
                     eval_status = _resolve_row_evaluation_status(
                         zalo_status="Chưa quét Zalo",
@@ -3907,8 +3924,9 @@ class ReportRepository:
                         nx_zalo_checked=fb_meta.get("nx_zalo_checked"),
                         nx_lms_checked=m_nx_lms,
                         raw_evaluation_status=str(fb_meta.get("evaluation_status") or ""),
+                        row=({**fb_meta, "session_deferred": True} if fb_deferred else fb_meta),
                     )
-                    unscanned_row = {
+                    unscanned_row: dict[str, Any] = {
                         "class_code": code,
                         "teacher": teacher,
                         "lesson": m_lesson or "—",
@@ -3926,13 +3944,35 @@ class ReportRepository:
                         "nx_zalo_checked": fb_meta.get("nx_zalo_checked"),
                         "nx_lms_checked": m_nx_lms,
                         "quality_issues": list(fb_meta.get("quality_issues") or []),
-                        "lms_quality_issues": list(
-                            fb_meta.get("lms_quality_issues") or []
-                        ),
-                        "zalo_content_issues": list(
-                            fb_meta.get("zalo_content_issues") or []
-                        ),
+                        "lms_quality_issues": list(fb_meta.get("lms_quality_issues") or []),
+                        "zalo_content_issues": list(fb_meta.get("zalo_content_issues") or []),
                         "verified_at": lms_ts,
+                        **({"session_deferred": True} if fb_deferred else {}),
+                        **(
+                            {"deferred_reason": fb_def_reason}
+                            if fb_deferred and fb_def_reason.upper().startswith("DEFERRED_")
+                            else {}
+                        ),
+                        **(
+                            {
+                                "scan_target": {
+                                    "class_code": code,
+                                    "week": sel_week,
+                                    "year": sel_year,
+                                    "lesson": m_lesson or "—",
+                                    "class_date": display_date,
+                                    "class_date_iso": m_date_iso,
+                                    "session_deferred": True,
+                                    **(
+                                        {"deferred_reason": fb_def_reason}
+                                        if fb_def_reason.upper().startswith("DEFERRED_")
+                                        else {}
+                                    ),
+                                }
+                            }
+                            if fb_deferred
+                            else {}
+                        ),
                     }
                     unscanned_row["category"] = categorize_row(unscanned_row)
                     unscanned_row["is_failed"] = is_failed(unscanned_row)
@@ -3945,25 +3985,28 @@ class ReportRepository:
                 lms_status = lms_status_by_class.get(code, "Chưa quét LMS")
                 lms_ts = lms_verified_at_by_class.get(code) or "—"
                 teacher = teacher_by_class_code.get(code, "Chưa phân công")
-                code_candidates = bcnb_meta_by_code_rows.get(
-                    (sel_week, sel_year, code), []
-                )
+                code_candidates = bcnb_meta_by_code_rows.get((sel_week, sel_year, code), [])
                 fb_meta = code_candidates[0] if len(code_candidates) == 1 else {}
+                fb_deferred = is_session_deferred(fb_meta)
+                fb_def_reason = str(
+                    fb_meta.get("deferred_reason") or fb_meta.get("eligibility_reason") or ""
+                ).strip()
+                if fb_deferred:
+                    lms_status = "⏳ Chưa tới giờ kiểm tra"
                 eval_status = _resolve_row_evaluation_status(
                     zalo_status="Chưa quét Zalo",
                     lms_status=lms_status,
                     nx_zalo_checked=fb_meta.get("nx_zalo_checked"),
                     nx_lms_checked=fb_meta.get("nx_lms_checked"),
                     raw_evaluation_status=str(fb_meta.get("evaluation_status") or ""),
+                    row=({**fb_meta, "session_deferred": True} if fb_deferred else fb_meta),
                 )
-                lms_only_row = {
+                lms_only_row: dict[str, Any] = {
                     "class_code": code,
                     "teacher": teacher,
                     "lesson": str(fb_meta.get("_lesson") or "—").strip() or "—",
                     "class_date": str(
-                        fb_meta.get("_class_date")
-                        or fb_meta.get("_class_date_iso")
-                        or "—"
+                        fb_meta.get("_class_date") or fb_meta.get("_class_date_iso") or "—"
                     ).strip()
                     or "—",
                     "zalo_status": "Chưa quét Zalo",
@@ -3979,45 +4022,35 @@ class ReportRepository:
                     "nx_zalo_checked": fb_meta.get("nx_zalo_checked"),
                     "nx_lms_checked": fb_meta.get("nx_lms_checked"),
                     "quality_issues": list(fb_meta.get("quality_issues") or []),
-                    "lms_quality_issues": list(
-                        fb_meta.get("lms_quality_issues") or []
-                    ),
-                    "zalo_content_issues": list(
-                        fb_meta.get("zalo_content_issues") or []
-                    ),
+                    "lms_quality_issues": list(fb_meta.get("lms_quality_issues") or []),
+                    "zalo_content_issues": list(fb_meta.get("zalo_content_issues") or []),
                     "verified_at": lms_ts,
+                    **({"session_deferred": True} if fb_deferred else {}),
+                    **(
+                        {"deferred_reason": fb_def_reason}
+                        if fb_deferred and fb_def_reason.upper().startswith("DEFERRED_")
+                        else {}
+                    ),
                 }
                 lms_only_row["category"] = categorize_row(lms_only_row)
                 lms_only_row["is_failed"] = is_failed(lms_only_row)
                 rows.append(lms_only_row)
 
         zalo_exempt = sum(
-            1
-            for r in rows
-            if (r.get("category") or categorize_row(r)) == CATEGORY_EXEMPT
+            1 for r in rows if (r.get("category") or categorize_row(r)) == CATEGORY_EXEMPT
         )
         zalo_completed = sum(
-            1
-            for r in rows
-            if (r.get("category") or categorize_row(r)) == CATEGORY_DONE
+            1 for r in rows if (r.get("category") or categorize_row(r)) == CATEGORY_DONE
         )
         zalo_late = sum(
-            1
-            for r in rows
-            if (r.get("category") or categorize_row(r)) == CATEGORY_LATE
+            1 for r in rows if (r.get("category") or categorize_row(r)) == CATEGORY_LATE
         )
         zalo_unscanned = sum(
-            1
-            for r in rows
-            if (r.get("category") or categorize_row(r)) == CATEGORY_NOT_SCANNED
+            1 for r in rows if (r.get("category") or categorize_row(r)) == CATEGORY_NOT_SCANNED
         )
         zalo_pending = max(
             0,
-            len(rows)
-            - zalo_completed
-            - zalo_late
-            - zalo_exempt
-            - zalo_unscanned,
+            len(rows) - zalo_completed - zalo_late - zalo_exempt - zalo_unscanned,
         )
 
         lms_completed = sum(
@@ -4031,27 +4064,15 @@ class ReportRepository:
             }
         )
         lms_dry_run = sum(
-            1
-            for r in rows
-            if str(r.get("lms_status") or "") == "🧪 Đã nhận xét (Dry-run LMS)"
+            1 for r in rows if str(r.get("lms_status") or "") == "🧪 Đã nhận xét (Dry-run LMS)"
         )
         lms_pending_tick = sum(
-            1
-            for r in rows
-            if str(r.get("lms_status") or "") == "⏳ Đã nhận xét (Chờ tích BCNB)"
+            1 for r in rows if str(r.get("lms_status") or "") == "⏳ Đã nhận xét (Chờ tích BCNB)"
         )
-        lms_overdue = sum(
-            1
-            for r in rows
-            if str(r.get("lms_status") or "").startswith(("❌", "⚠️"))
-        )
+        lms_overdue = sum(1 for r in rows if str(r.get("lms_status") or "").startswith(("❌", "⚠️")))
         lms_unscanned = max(
             0,
-            len(rows)
-            - lms_completed
-            - lms_dry_run
-            - lms_pending_tick
-            - lms_overdue,
+            len(rows) - lms_completed - lms_dry_run - lms_pending_tick - lms_overdue,
         )
 
         summary_lms_fetch_unavailable = bool(
@@ -4097,44 +4118,28 @@ class ReportRepository:
             },
             "lms_summary": {
                 "has_lms_data": bool(
-                    latest_preview is not None
-                    or latest_exec is not None
-                    or audits
+                    latest_preview is not None or latest_exec is not None or audits
                 ),
                 "analysis_job_id": (
-                    latest_preview["analysis_job_id"]
-                    if latest_preview is not None
-                    else None
+                    latest_preview["analysis_job_id"] if latest_preview is not None else None
                 ),
                 "execution_job_id": (
-                    latest_exec["execution_job_id"]
-                    if latest_exec is not None
-                    else None
+                    latest_exec["execution_job_id"] if latest_exec is not None else None
                 ),
                 "missing_count": sum(
-                    1
-                    for s in lms_status_by_class.values()
-                    if s.startswith(("❌", "⚠️"))
+                    1 for s in lms_status_by_class.values() if s.startswith(("❌", "⚠️"))
                 ),
                 "ticked_count": sum(
-                    1
-                    for s in lms_status_by_class.values()
-                    if s == "✅ Đã nhận xét & Tích BCNB"
+                    1 for s in lms_status_by_class.values() if s == "✅ Đã nhận xét & Tích BCNB"
                 ),
                 "dry_run_count": sum(
-                    1
-                    for s in lms_status_by_class.values()
-                    if s == "🧪 Đã nhận xét (Dry-run LMS)"
+                    1 for s in lms_status_by_class.values() if s == "🧪 Đã nhận xét (Dry-run LMS)"
                 ),
                 "pending_tick_count": sum(
-                    1
-                    for s in lms_status_by_class.values()
-                    if s == "⏳ Đã nhận xét (Chờ tích BCNB)"
+                    1 for s in lms_status_by_class.values() if s == "⏳ Đã nhận xét (Chờ tích BCNB)"
                 ),
                 "already_checked_count": sum(
-                    1
-                    for s in lms_status_by_class.values()
-                    if s == "✅ Đã tích trên BCNB"
+                    1 for s in lms_status_by_class.values() if s == "✅ Đã tích trên BCNB"
                 ),
                 "lms_fetch_unavailable": summary_lms_fetch_unavailable,
             },
@@ -4143,6 +4148,4 @@ class ReportRepository:
         }
 
     is_failed_weekly_summary_row = staticmethod(is_failed_weekly_summary_row)
-    filter_failed_weekly_summary_rows = staticmethod(
-        filter_failed_weekly_summary_rows
-    )
+    filter_failed_weekly_summary_rows = staticmethod(filter_failed_weekly_summary_rows)

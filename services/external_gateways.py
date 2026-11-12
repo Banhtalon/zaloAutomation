@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+import concurrent.futures
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from enum import Enum
+import hashlib
 import inspect
 import json
 import os
@@ -78,6 +80,19 @@ class LmsQualityGateway(Protocol):
         *,
         target_lessons_by_class: dict[str, list[int]] | None = None,
     ) -> dict[str, list[dict[str, Any]]]: ...
+
+
+class LmsAiCommentReviewerGateway(Protocol):
+    async def review_short_comments(
+        self,
+        comments: list[dict[str, Any]],
+        *,
+        class_code: str = "",
+        khoi: str = "",
+        lesson: int | str | None = None,
+        lesson_summary: str = "",
+        comment_kind: str = "SESSION",
+    ) -> dict[str, dict[str, Any]]: ...
 
 
 class QualityIsolationViolation(RuntimeError):
@@ -239,7 +254,7 @@ class RuntimeLandingFactsProvider:
             )
         except asyncio.CancelledError:
             raise
-        except (asyncio.TimeoutError, TimeoutError):
+        except asyncio.TimeoutError, TimeoutError:
             return self._facts(
                 started_at=started_at,
                 page_state="TIMEOUT",
@@ -341,7 +356,7 @@ class RuntimeLandingFactsProvider:
             return None
         try:
             return urlsplit(raw_url).hostname == LANDING_EXPECTED_HOST
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             return None
 
     async def _search_control_visible(self, page: Any) -> bool:
@@ -412,9 +427,7 @@ class LandingProbeProfileBinding(str, Enum):
 class LandingCandidateStatus(str, Enum):
     """Candidate vocabulary; positive outcomes need an approved contract."""
 
-    CANDIDATE_PRESENT_WITH_LIVE_PROVENANCE = (
-        "CANDIDATE_PRESENT_WITH_LIVE_PROVENANCE"
-    )
+    CANDIDATE_PRESENT_WITH_LIVE_PROVENANCE = "CANDIDATE_PRESENT_WITH_LIVE_PROVENANCE"
     NO_CANDIDATE = "NO_CANDIDATE"
     UNPROVEN = "UNPROVEN"
     AMBIGUOUS = "AMBIGUOUS"
@@ -429,9 +442,7 @@ class LandingCandidateStatus(str, Enum):
     LANDING_PAGE_DETACHED = "LANDING_PAGE_DETACHED"
     LANDING_CANDIDATE_PROBE_TIMEOUT = "LANDING_CANDIDATE_PROBE_TIMEOUT"
     LANDING_CANDIDATE_PROBE_FAILED = "LANDING_CANDIDATE_PROBE_FAILED"
-    LANDING_CANDIDATE_PROVENANCE_INVALID = (
-        "LANDING_CANDIDATE_PROVENANCE_INVALID"
-    )
+    LANDING_CANDIDATE_PROVENANCE_INVALID = "LANDING_CANDIDATE_PROVENANCE_INVALID"
     LANDING_READINESS_TIMEOUT = "LANDING_READINESS_TIMEOUT"
     LANDING_CLEANUP_FAILED = "LANDING_CLEANUP_FAILED"
     LANDING_UNKNOWN_FAIL_CLOSED = "LANDING_UNKNOWN_FAIL_CLOSED"
@@ -450,9 +461,7 @@ class StructuralCandidateStatus(str, Enum):
     UNPROVEN = "UNPROVEN"
     AMBIGUOUS = "AMBIGUOUS"
     NO_CANDIDATE = "NO_CANDIDATE"
-    CANDIDATE_PRESENT_WITH_LIVE_PROVENANCE = (
-        "CANDIDATE_PRESENT_WITH_LIVE_PROVENANCE"
-    )
+    CANDIDATE_PRESENT_WITH_LIVE_PROVENANCE = "CANDIDATE_PRESENT_WITH_LIVE_PROVENANCE"
     STRUCTURAL_PAGESET_BLOCKED = "STRUCTURAL_PAGESET_BLOCKED"
     STRUCTURAL_PAGE_CLOSED = "STRUCTURAL_PAGE_CLOSED"
     STRUCTURAL_PAGE_DETACHED = "STRUCTURAL_PAGE_DETACHED"
@@ -463,17 +472,13 @@ class StructuralCandidateStatus(str, Enum):
     STRUCTURAL_UNKNOWN_FAIL_CLOSED = "STRUCTURAL_UNKNOWN_FAIL_CLOSED"
     STRUCTURAL_SESSION_UNAVAILABLE = "STRUCTURAL_SESSION_UNAVAILABLE"
     STRUCTURAL_CLEANUP_FAILED = "STRUCTURAL_CLEANUP_FAILED"
-    STRUCTURAL_OBSERVATION_ALREADY_CONSUMED = (
-        "STRUCTURAL_OBSERVATION_ALREADY_CONSUMED"
-    )
+    STRUCTURAL_OBSERVATION_ALREADY_CONSUMED = "STRUCTURAL_OBSERVATION_ALREADY_CONSUMED"
 
 
 class StructuralProvenanceCode(str, Enum):
     """Sanitized provenance vocabulary; no concrete selector is bound yet."""
 
-    STRUCTURAL_SELECTOR_CONTRACT_NOT_PROVEN = (
-        "STRUCTURAL_SELECTOR_CONTRACT_NOT_PROVEN"
-    )
+    STRUCTURAL_SELECTOR_CONTRACT_NOT_PROVEN = "STRUCTURAL_SELECTOR_CONTRACT_NOT_PROVEN"
     STRUCTURAL_PAGESET_NOT_OBSERVED = "STRUCTURAL_PAGESET_NOT_OBSERVED"
     STRUCTURAL_PROVENANCE_NOT_VERIFIED = "STRUCTURAL_PROVENANCE_NOT_VERIFIED"
     STRUCTURAL_PROVENANCE_INVALID = "STRUCTURAL_PROVENANCE_INVALID"
@@ -537,10 +542,7 @@ CandidateStatus = LandingCandidateStatus
 
 def _landing_probe_action_counters(navigation: int = 0) -> dict[str, int]:
     """Return the fixed, sanitized action ledger for one probe invocation."""
-    return {
-        key: (navigation if key == "navigation" else 0)
-        for key in LANDING_PROBE_ACTION_KEYS
-    }
+    return {key: (navigation if key == "navigation" else 0) for key in LANDING_PROBE_ACTION_KEYS}
 
 
 def _landing_probe_value(value: LandingCandidateStatus | str) -> str:
@@ -576,12 +578,8 @@ def _landing_probe_result(
         "launch_count": safe_launch_count,
         "expected_host_reached": expected_host_reached,
         "search_control_visible": search_control_visible,
-        "auth_shell_candidate_status": _landing_probe_value(
-            auth_shell_candidate_status
-        ),
-        "login_or_qr_candidate_status": _landing_probe_value(
-            login_or_qr_candidate_status
-        ),
+        "auth_shell_candidate_status": _landing_probe_value(auth_shell_candidate_status),
+        "login_or_qr_candidate_status": _landing_probe_value(login_or_qr_candidate_status),
         "selector_contract_version": LANDING_PROBE_SELECTOR_CONTRACT_VERSION,
         "diagnostic_code": _landing_probe_value(diagnostic_code),
         "zero_action_counters": _landing_probe_action_counters(navigation_count),
@@ -603,11 +601,7 @@ def _structural_candidates(
 ) -> list[dict[str, object]]:
     """Return the fixed two-candidate schema without selector-bearing data."""
     raw_status = _structural_value(status)
-    safe_status = (
-        raw_status
-        if raw_status in _STRUCTURAL_CANDIDATE_STATUS_ALLOWLIST
-        else "UNPROVEN"
-    )
+    safe_status = raw_status if raw_status in _STRUCTURAL_CANDIDATE_STATUS_ALLOWLIST else "UNPROVEN"
     safe_provenance = _structural_value(provenance_code)
     return [
         {
@@ -629,9 +623,7 @@ def _structural_observation_result(
     expected_host_reached: bool | None,
     search_control_visible: bool | None,
     diagnostic_code: StructuralCandidateStatus | str,
-    candidate_status: StructuralCandidateStatus | str = (
-        StructuralCandidateStatus.UNPROVEN
-    ),
+    candidate_status: StructuralCandidateStatus | str = (StructuralCandidateStatus.UNPROVEN),
     provenance_code: StructuralProvenanceCode | str = (
         StructuralProvenanceCode.STRUCTURAL_SELECTOR_CONTRACT_NOT_PROVEN
     ),
@@ -692,9 +684,7 @@ def _emit_structural_observation_telemetry(
     fields = dict(result)
     candidates = fields.get("candidates")
     if isinstance(candidates, list):
-        fields["candidates"] = [
-            dict(item) for item in candidates if isinstance(item, dict)
-        ]
+        fields["candidates"] = [dict(item) for item in candidates if isinstance(item, dict)]
     counters = fields.get("zero_action_counters")
     if isinstance(counters, dict):
         fields["zero_action_counters"] = dict(counters)
@@ -726,9 +716,7 @@ CleanupOutcome = CleanupCode
 # do not need to import the enum.
 CLEANUP_OK = CleanupCode.CLEANUP_OK.value
 CLEANUP_ALREADY_CLOSED = CleanupCode.CLEANUP_ALREADY_CLOSED.value
-CLEANUP_SKIPPED_NON_OWNING_ABORT = (
-    CleanupCode.CLEANUP_SKIPPED_NON_OWNING_ABORT.value
-)
+CLEANUP_SKIPPED_NON_OWNING_ABORT = CleanupCode.CLEANUP_SKIPPED_NON_OWNING_ABORT.value
 CONTEXT_CLOSE_TIMEOUT = CleanupCode.CONTEXT_CLOSE_TIMEOUT.value
 CONTEXT_CLOSE_ERROR = CleanupCode.CONTEXT_CLOSE_ERROR.value
 PLAYWRIGHT_STOP_TIMEOUT = CleanupCode.PLAYWRIGHT_STOP_TIMEOUT.value
@@ -816,9 +804,7 @@ class PageSetThreatModel(str, Enum):
     COOPERATIVE_CALLER_ONLY = "COOPERATIVE_CALLER_ONLY"
 
 
-PAGESET_THREAT_MODEL: PageSetThreatModel = (
-    PageSetThreatModel.COOPERATIVE_CALLER_ONLY
-)
+PAGESET_THREAT_MODEL: PageSetThreatModel = PageSetThreatModel.COOPERATIVE_CALLER_ONLY
 
 
 class PageSetCategory(str, Enum):
@@ -1160,10 +1146,10 @@ def _make_page_set_classifier() -> type:
                     return PageSetCount.TWO_PLUS, None
                 try:
                     sole_page = pages[0]
-                except (IndexError, KeyError, TypeError, AttributeError):
+                except IndexError, KeyError, TypeError, AttributeError:
                     try:
                         sole_page = next(iter(pages))
-                    except (StopIteration, TypeError):
+                    except StopIteration, TypeError:
                         return None, None
                 return PageSetCount.ONE, sole_page
             except BaseException:
@@ -1302,7 +1288,7 @@ async def _call_cleanup_operation(
             operation(),
             timeout=timeout,
         )
-    except (asyncio.TimeoutError, TimeoutError):
+    except asyncio.TimeoutError, TimeoutError:
         if deadline is not None and asyncio.get_running_loop().time() >= deadline:
             raise CleanupDeadlineExceeded from None
         raise
@@ -1458,7 +1444,7 @@ class PersistentBrowserSession:
         source = self._landing_facts_source
         try:
             signature = inspect.signature(source)
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             signature = None
         if signature is not None:
             positional = [
@@ -1648,7 +1634,7 @@ class PersistentBrowserSession:
                 )
             except asyncio.CancelledError:
                 raise
-            except (asyncio.TimeoutError, TimeoutError):
+            except asyncio.TimeoutError, TimeoutError:
                 return make_result(
                     page_set_category=preclassification.category.value,
                     expected_host_reached=None,
@@ -1733,7 +1719,7 @@ class PersistentBrowserSession:
                 except BaseException:
                     pass
                 raise
-            except (asyncio.TimeoutError, TimeoutError):
+            except asyncio.TimeoutError, TimeoutError:
                 try:
                     await close_owned_observer_page()
                 except asyncio.CancelledError:
@@ -1806,7 +1792,7 @@ class PersistentBrowserSession:
                 )
             except asyncio.CancelledError:
                 raise
-            except (asyncio.TimeoutError, TimeoutError):
+            except asyncio.TimeoutError, TimeoutError:
                 return make_result(
                     page_set_category=preclassification.category.value,
                     expected_host_reached=False,
@@ -1837,7 +1823,7 @@ class PersistentBrowserSession:
                     )
             except asyncio.CancelledError:
                 raise
-            except (asyncio.TimeoutError, TimeoutError):
+            except asyncio.TimeoutError, TimeoutError:
                 return make_result(
                     page_set_category=preclassification.category.value,
                     expected_host_reached=None,
@@ -1862,12 +1848,11 @@ class PersistentBrowserSession:
                         timeout_seconds=operation_timeout,
                     )
                 expected_host_reached = (
-                    isinstance(raw_url, str)
-                    and urlsplit(raw_url).hostname == LANDING_EXPECTED_HOST
+                    isinstance(raw_url, str) and urlsplit(raw_url).hostname == LANDING_EXPECTED_HOST
                 )
             except asyncio.CancelledError:
                 raise
-            except (asyncio.TimeoutError, TimeoutError):
+            except asyncio.TimeoutError, TimeoutError:
                 return make_result(
                     page_set_category=preclassification.category.value,
                     expected_host_reached=None,
@@ -1899,7 +1884,7 @@ class PersistentBrowserSession:
                 )
             except asyncio.CancelledError:
                 raise
-            except (asyncio.TimeoutError, TimeoutError):
+            except asyncio.TimeoutError, TimeoutError:
                 return make_result(
                     page_set_category=preclassification.category.value,
                     expected_host_reached=True,
@@ -1932,9 +1917,7 @@ class PersistentBrowserSession:
                 page_set_category=preclassification.category.value,
                 expected_host_reached=True,
                 search_control_visible=True,
-                diagnostic_code=(
-                    StructuralProvenanceCode.STRUCTURAL_SELECTOR_CONTRACT_NOT_PROVEN
-                ),
+                diagnostic_code=(StructuralProvenanceCode.STRUCTURAL_SELECTOR_CONTRACT_NOT_PROVEN),
             )
 
         try:
@@ -1949,7 +1932,7 @@ class PersistentBrowserSession:
                 except BaseException:
                     pass
             raise
-        except (asyncio.TimeoutError, TimeoutError):
+        except asyncio.TimeoutError, TimeoutError:
             result = _structural_observation_result(
                 started_at=started_at,
                 profile_binding=LandingProbeProfileBinding.WORKER_PERSISTENT_SESSION,
@@ -2054,7 +2037,7 @@ class PersistentBrowserSession:
         started_at = asyncio.get_running_loop().time()
         try:
             total_timeout = max(0.001, float(timeout_seconds))
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             total_timeout = LANDING_PROBE_TOTAL_TIMEOUT_SECONDS
         operation_timeout = min(
             total_timeout,
@@ -2101,9 +2084,7 @@ class PersistentBrowserSession:
 
         observer_release_started = False
 
-        cleanup_telemetry = (
-            _cleanup_telemetry if _cleanup_telemetry is not None else telemetry
-        )
+        cleanup_telemetry = _cleanup_telemetry if _cleanup_telemetry is not None else telemetry
 
         async def close_owned_observer_page() -> None:
             """Release the proven observer without changing context ownership.
@@ -2214,7 +2195,7 @@ class PersistentBrowserSession:
             except asyncio.CancelledError:
                 await abort_before_navigation(preclassification)
                 raise
-            except (asyncio.TimeoutError, TimeoutError):
+            except asyncio.TimeoutError, TimeoutError:
                 await abort_before_navigation(preclassification)
                 return make_result(
                     expected_host_reached=None,
@@ -2232,9 +2213,7 @@ class PersistentBrowserSession:
                 return make_result(
                     expected_host_reached=None,
                     search_control_visible=None,
-                    auth_shell_candidate_status=(
-                        LandingCandidateStatus.LANDING_PAGE_CREATE_FAILED
-                    ),
+                    auth_shell_candidate_status=(LandingCandidateStatus.LANDING_PAGE_CREATE_FAILED),
                     login_or_qr_candidate_status=(
                         LandingCandidateStatus.LANDING_PAGE_CREATE_FAILED
                     ),
@@ -2246,9 +2225,7 @@ class PersistentBrowserSession:
                 return make_result(
                     expected_host_reached=None,
                     search_control_visible=None,
-                    auth_shell_candidate_status=(
-                        LandingCandidateStatus.LANDING_PAGE_CREATE_FAILED
-                    ),
+                    auth_shell_candidate_status=(LandingCandidateStatus.LANDING_PAGE_CREATE_FAILED),
                     login_or_qr_candidate_status=(
                         LandingCandidateStatus.LANDING_PAGE_CREATE_FAILED
                     ),
@@ -2303,7 +2280,7 @@ class PersistentBrowserSession:
             except asyncio.CancelledError:
                 await finalize_owned_observer_cancellation()
                 raise
-            except (asyncio.TimeoutError, TimeoutError):
+            except asyncio.TimeoutError, TimeoutError:
                 await close_owned_observer_page()
                 return make_result(
                     expected_host_reached=None,
@@ -2344,7 +2321,7 @@ class PersistentBrowserSession:
                 )
             except asyncio.CancelledError:
                 raise
-            except (asyncio.TimeoutError, TimeoutError):
+            except asyncio.TimeoutError, TimeoutError:
                 return make_result(
                     expected_host_reached=False,
                     search_control_visible=None,
@@ -2378,7 +2355,7 @@ class PersistentBrowserSession:
                     )
             except asyncio.CancelledError:
                 raise
-            except (asyncio.TimeoutError, TimeoutError):
+            except asyncio.TimeoutError, TimeoutError:
                 return make_result(
                     expected_host_reached=None,
                     search_control_visible=None,
@@ -2405,12 +2382,11 @@ class PersistentBrowserSession:
                         timeout_seconds=operation_timeout,
                     )
                 expected_host_reached = (
-                    isinstance(raw_url, str)
-                    and urlsplit(raw_url).hostname == LANDING_EXPECTED_HOST
+                    isinstance(raw_url, str) and urlsplit(raw_url).hostname == LANDING_EXPECTED_HOST
                 )
             except asyncio.CancelledError:
                 raise
-            except (asyncio.TimeoutError, TimeoutError):
+            except asyncio.TimeoutError, TimeoutError:
                 return make_result(
                     expected_host_reached=None,
                     search_control_visible=None,
@@ -2419,7 +2395,7 @@ class PersistentBrowserSession:
                     diagnostic_code=LandingCandidateStatus.LANDING_NAVIGATION_TIMEOUT,
                     navigation=navigation_count,
                 )
-            except (TypeError, ValueError):
+            except TypeError, ValueError:
                 expected_host_reached = None
             except Exception:
                 return make_result(
@@ -2447,7 +2423,7 @@ class PersistentBrowserSession:
                 )
             except asyncio.CancelledError:
                 raise
-            except (asyncio.TimeoutError, TimeoutError):
+            except asyncio.TimeoutError, TimeoutError:
                 return make_result(
                     expected_host_reached=True,
                     search_control_visible=None,
@@ -2499,7 +2475,7 @@ class PersistentBrowserSession:
             ):
                 await abort_before_navigation(preclassification)
             raise
-        except (asyncio.TimeoutError, TimeoutError):
+        except asyncio.TimeoutError, TimeoutError:
             result = _landing_probe_result(
                 started_at=started_at,
                 profile_binding=LandingProbeProfileBinding.WORKER_PERSISTENT_SESSION,
@@ -2798,9 +2774,7 @@ class PersistentBrowserSession:
                         ("closed", "is_closed"),
                     )
                     context_state = (
-                        CleanupState.ALREADY_CLOSED
-                        if context_was_closed
-                        else CleanupState.CLOSED
+                        CleanupState.ALREADY_CLOSED if context_was_closed else CleanupState.CLOSED
                     )
                     context_code = (
                         CleanupCode.CLEANUP_ALREADY_CLOSED
@@ -2867,9 +2841,7 @@ class PersistentBrowserSession:
                         ("stopped", "is_stopped"),
                     )
                     playwright_state = (
-                        CleanupState.ALREADY_STOPPED
-                        if stop_was_stopped
-                        else CleanupState.STOPPED
+                        CleanupState.ALREADY_STOPPED if stop_was_stopped else CleanupState.STOPPED
                     )
                     stop_code = (
                         CleanupCode.CLEANUP_ALREADY_CLOSED
@@ -2900,12 +2872,12 @@ class PersistentBrowserSession:
                 and remaining_holders == 0
                 and holders_known
                 and context_marker is not False
-                and context_state in {
+                and context_state
+                in {
                     CleanupState.CLOSED,
                     CleanupState.ALREADY_CLOSED,
                 }
-                and playwright_state
-                in {CleanupState.STOPPED, CleanupState.ALREADY_STOPPED}
+                and playwright_state in {CleanupState.STOPPED, CleanupState.ALREADY_STOPPED}
                 and stop_marker is not False
             )
             final_code: CleanupCode
@@ -2931,10 +2903,15 @@ class PersistentBrowserSession:
             elif page_code is not None:
                 final_code = page_code
                 final_state = page_state
-            elif CleanupCode.CLEANUP_ALREADY_CLOSED in {
-                context_code,
-                stop_code,
-            } or context_state == CleanupState.ALREADY_CLOSED or self._page_already_closed:
+            elif (
+                CleanupCode.CLEANUP_ALREADY_CLOSED
+                in {
+                    context_code,
+                    stop_code,
+                }
+                or context_state == CleanupState.ALREADY_CLOSED
+                or self._page_already_closed
+            ):
                 final_code = CleanupCode.CLEANUP_ALREADY_CLOSED
                 final_state = CleanupState.ALREADY_CLOSED
             else:
@@ -2995,12 +2972,8 @@ class _RawCleanupState:
     result: CleanupResult | None = None
 
 
-_RAW_CONTEXT_CLEANUP: weakref.WeakKeyDictionary[Any, _RawCleanupState] = (
-    weakref.WeakKeyDictionary()
-)
-_UNWEAKREFABLE_CONTEXT_CLEANUP: dict[
-    int, tuple[Any, _RawCleanupState]
-] = {}
+_RAW_CONTEXT_CLEANUP: weakref.WeakKeyDictionary[Any, _RawCleanupState] = weakref.WeakKeyDictionary()
+_UNWEAKREFABLE_CONTEXT_CLEANUP: dict[int, tuple[Any, _RawCleanupState]] = {}
 
 
 def _raw_cleanup_state(context: Any) -> _RawCleanupState:
@@ -3097,9 +3070,7 @@ class PlaywrightBrowserGateway:
     ):
         self._playwright_factory = playwright_factory
         self._uses_real_playwright_factory = playwright_factory is async_playwright
-        self._form_submitter_factory = (
-            form_submitter_factory or _default_form_submitter_factory
-        )
+        self._form_submitter_factory = form_submitter_factory or _default_form_submitter_factory
         self._landing_facts_provider_factory = landing_facts_provider_factory
         self._authenticated_shell_probe = authenticated_shell_probe
         self._login_or_qr_probe = login_or_qr_probe
@@ -3115,9 +3086,7 @@ class PlaywrightBrowserGateway:
         self._active_session: PersistentBrowserSession | None = None
         self._circuit = GatewayCircuitBreaker(
             max_retries=(
-                _config_value("GATEWAY_MAX_RETRIES", 2)
-                if max_retries is None
-                else max_retries
+                _config_value("GATEWAY_MAX_RETRIES", 2) if max_retries is None else max_retries
             ),
             backoff_seconds=(
                 _config_value("GATEWAY_BACKOFF_SECONDS", 0.25)
@@ -3141,17 +3110,9 @@ class PlaywrightBrowserGateway:
         viewport: dict[str, int] | None = None,
     ) -> dict[str, Any]:
         """Return the worker's exact persistent Chromium launch contract."""
-        effective_viewport = dict(
-            DEFAULT_BROWSER_VIEWPORT if viewport is None else viewport
-        )
-        width = int(
-            effective_viewport.get("width", DEFAULT_BROWSER_VIEWPORT["width"])
-        )
-        height = int(
-            effective_viewport.get(
-                "height", DEFAULT_BROWSER_VIEWPORT["height"]
-            )
-        )
+        effective_viewport = dict(DEFAULT_BROWSER_VIEWPORT if viewport is None else viewport)
+        width = int(effective_viewport.get("width", DEFAULT_BROWSER_VIEWPORT["width"]))
+        height = int(effective_viewport.get("height", DEFAULT_BROWSER_VIEWPORT["height"]))
         launch_options: dict[str, Any] = {
             "user_data_dir": self.profile_path,
             "headless": False,
@@ -3181,11 +3142,7 @@ class PlaywrightBrowserGateway:
             if cleanup_timeout_seconds is None
             else max(0.001, float(cleanup_timeout_seconds))
         )
-        cleanup_total_timeout = (
-            None
-            if cleanup_timeout_seconds is None
-            else cleanup_timeout
-        )
+        cleanup_total_timeout = None if cleanup_timeout_seconds is None else cleanup_timeout
         manager = self._playwright_factory()
         entered = False
         manager_exit_called = False
@@ -3204,9 +3161,7 @@ class PlaywrightBrowserGateway:
             launch_options = self._persistent_launch_options(viewport)
 
             async def launch_context():
-                return await playwright.chromium.launch_persistent_context(
-                    **launch_options
-                )
+                return await playwright.chromium.launch_persistent_context(**launch_options)
 
             context = cast(Any, await self._circuit.call(launch_context))
             provider = (
@@ -3321,7 +3276,7 @@ class PlaywrightBrowserGateway:
         started_at = asyncio.get_running_loop().time()
         try:
             total_timeout = max(0.001, float(timeout_seconds))
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             total_timeout = LANDING_PROBE_TOTAL_TIMEOUT_SECONDS
         operation_timeout = min(
             total_timeout,
@@ -3375,7 +3330,7 @@ class PlaywrightBrowserGateway:
             if session is not None:
                 self.last_cleanup_result = session.cleanup_result
             raise
-        except (asyncio.TimeoutError, TimeoutError):
+        except asyncio.TimeoutError, TimeoutError:
             result = _landing_probe_result(
                 started_at=started_at,
                 profile_binding=(
@@ -3436,6 +3391,7 @@ class PlaywrightBrowserGateway:
         headless: bool,
     ) -> AsyncIterator[FormBatch]:
         async with self._playwright_factory() as playwright:
+
             async def launch_browser():
                 return await launch_chromium_with_fallback(
                     playwright.chromium,
@@ -3459,9 +3415,7 @@ class GeminiLmsOcrGateway:
     def __init__(
         self,
         *,
-        api_key_provider: Callable[[], str | None] = lambda: _config_value(
-            "GEMINI_API_KEY", None
-        ),
+        api_key_provider: Callable[[], str | None] = lambda: _config_value("GEMINI_API_KEY", None),
         model_provider: Callable[[], str] = lambda: _config_value(
             "GEMINI_MODEL", "gemini-3.1-flash-lite"
         ),
@@ -3479,9 +3433,7 @@ class GeminiLmsOcrGateway:
             raise LmsSafetyError("Chưa cấu hình GEMINI_API_KEY.")
 
         client = (
-            self._client_factory(api_key)
-            if self._client_factory
-            else genai.Client(api_key=api_key)
+            self._client_factory(api_key) if self._client_factory else genai.Client(api_key=api_key)
         )
         image = await asyncio.to_thread(self._image_opener, image_path)
         try:
@@ -3494,9 +3446,7 @@ class GeminiLmsOcrGateway:
             response = await client.aio.models.generate_content(
                 model=self._model_provider(),
                 contents=[prompt, image],
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json"
-                ),
+                config=types.GenerateContentConfig(response_mime_type="application/json"),
             )
             if not response.text:
                 raise LmsSafetyError("Gemini không trả về nội dung OCR LMS.")
@@ -3515,9 +3465,7 @@ class GeminiZaloReportClassifierGateway:
     def __init__(
         self,
         *,
-        api_key_provider: Callable[[], str | None] = lambda: _config_value(
-            "GEMINI_API_KEY", None
-        ),
+        api_key_provider: Callable[[], str | None] = lambda: _config_value("GEMINI_API_KEY", None),
         model_provider: Callable[[], str] = lambda: _config_value(
             "GEMINI_MODEL", "gemini-3.1-flash-lite"
         ),
@@ -3580,9 +3528,7 @@ class GeminiZaloReportClassifierGateway:
                 client.aio.models.generate_content(
                     model=self._model_provider(),
                     contents=prompt,
-                    config=types.GenerateContentConfig(
-                        response_mime_type="application/json"
-                    ),
+                    config=types.GenerateContentConfig(response_mime_type="application/json"),
                 ),
                 timeout=self._timeout_seconds,
             )
@@ -3603,7 +3549,7 @@ class GeminiZaloReportClassifierGateway:
             raw_conf = parsed.get("confidence", 0.0)
             try:
                 confidence = max(0.0, min(1.0, float(raw_conf)))
-            except (TypeError, ValueError):
+            except TypeError, ValueError:
                 confidence = 0.0
             reason = str(parsed.get("reason") or "").strip()[:160]
             return {
@@ -3644,6 +3590,426 @@ class PlaywrightLmsQualityGateway:
         )
 
 
+VALID_LMS_AI_COMMENT_CLASSIFICATIONS = frozenset(
+    {
+        "VALID_CONCISE",
+        "SHALLOW_GENERIC",
+        "ATTENDANCE_CONFLICT",
+        "PLACEHOLDER_BYPASS",
+    }
+)
+
+
+class DisabledLmsCommentReviewerGateway:
+    """No-op LMS comment reviewer gateway used when AI check is disabled or isolated."""
+
+    def review_short_comments_sync(
+        self,
+        comments: list[dict[str, Any]],
+        *,
+        class_code: str = "",
+        khoi: str = "",
+        lesson: int | str | None = None,
+        lesson_summary: str = "",
+        comment_kind: str = "SESSION",
+    ) -> dict[str, dict[str, Any]]:
+        _ = (comments, class_code, khoi, lesson, lesson_summary, comment_kind)
+        return {}
+
+    def review_comments(
+        self,
+        comments: list[dict[str, Any]],
+        *,
+        class_code: str = "",
+        khoi: str = "",
+        lesson: int | str | None = None,
+        lesson_summary: str = "",
+        comment_kind: str = "SESSION",
+    ) -> dict[str, dict[str, Any]]:
+        return self.review_short_comments_sync(
+            comments,
+            class_code=class_code,
+            khoi=khoi,
+            lesson=lesson,
+            lesson_summary=lesson_summary,
+            comment_kind=comment_kind,
+        )
+
+    async def review_short_comments(
+        self,
+        comments: list[dict[str, Any]],
+        *,
+        class_code: str = "",
+        khoi: str = "",
+        lesson: int | str | None = None,
+        lesson_summary: str = "",
+        comment_kind: str = "SESSION",
+    ) -> dict[str, dict[str, Any]]:
+        return self.review_short_comments_sync(
+            comments,
+            class_code=class_code,
+            khoi=khoi,
+            lesson=lesson,
+            lesson_summary=lesson_summary,
+            comment_kind=comment_kind,
+        )
+
+
+class GeminiLmsCommentReviewerGateway:
+    """Tier-2 Gemini adapter for evaluating short 1-2 line LMS comments (NOTE-only, PII-scrubbed)."""
+
+    def __init__(
+        self,
+        *,
+        api_key_provider: Callable[[], str | None] = lambda: _config_value("GEMINI_API_KEY", None),
+        model_provider: Callable[[], str] = lambda: (
+            os.getenv("LMS_AI_MODEL") or _config_value("GEMINI_MODEL", "gemini-2.5-flash-lite")
+        ),
+        enabled_provider: Callable[[], bool] | None = None,
+        client_factory: Callable[..., Any] | None = None,
+        timeout_seconds: float | None = None,
+        timeout_ms: int | float | None = None,
+        max_batches: int | None = None,
+        max_batches_per_scan: int | None = None,
+        model: str | None = None,
+    ) -> None:
+        self._api_key_provider = api_key_provider
+        self._model_provider = (lambda: str(model)) if model else model_provider
+        self._enabled_provider = (
+            enabled_provider
+            if enabled_provider is not None
+            else (
+                (lambda: True)
+                if client_factory is not None
+                else (lambda: bool(_config_value("LMS_AI_COMMENT_CHECK", True)))
+            )
+        )
+        self._client_factory = client_factory
+        resolved_timeout = (
+            float(timeout_seconds)
+            if timeout_seconds is not None
+            else (
+                float(timeout_ms) / 1000.0
+                if timeout_ms is not None
+                else float(_config_value("LMS_AI_TIMEOUT_SECONDS", 8.0))
+            )
+        )
+        self._timeout_seconds = max(0.1, resolved_timeout)
+        resolved_max_batches = (
+            max_batches
+            if max_batches is not None
+            else (
+                max_batches_per_scan
+                if max_batches_per_scan is not None
+                else _config_value("LMS_AI_MAX_BATCHES_PER_SCAN", 25)
+            )
+        )
+        self._max_batches = max(1, int(resolved_max_batches))
+        self._batches_used = 0
+        self._verdict_cache: dict[str, dict[str, Any]] = {}
+
+    @property
+    def timeout_seconds(self) -> float:
+        return self._timeout_seconds
+
+    def reset_batch_counter(self) -> None:
+        self._batches_used = 0
+        self._verdict_cache.clear()
+
+    def _make_client(self, api_key: str) -> Any:
+        if self._client_factory is None:
+            return genai.Client(api_key=api_key)
+        try:
+            return self._client_factory(api_key)
+        except TypeError:
+            return self._client_factory()
+
+    @staticmethod
+    def _build_prompt(
+        sanitized_items: list[dict[str, str]],
+        *,
+        class_code: str,
+        khoi: str,
+        lesson: int | str | None,
+        lesson_summary: str,
+        comment_kind: str,
+    ) -> str:
+        items_json = json.dumps(sanitized_items, ensure_ascii=False)
+        return (
+            "Bạn là trợ lý kiểm định chất lượng nhận xét học tập trên LMS MindX (đã ẩn danh học viên thành [HS]).\n"
+            "Hãy phân loại từng nhận xét ngắn (1-2 dòng) trong danh sách dưới đây vào ĐÚNG MỘT trong 4 nhãn:\n"
+            "- VALID_CONCISE: Nhận xét tuy ngắn gọn (1-2 câu) nhưng có thông tin cụ thể về bài học, kỹ năng, sản phẩm, thao tác lập trình/lắp ráp hoặc tiến bộ thực tế của học viên.\n"
+            "- SHALLOW_GENERIC: Nhận xét quá sơ sài, khen chung chung cho có lệ (ví dụ: 'Con học ngoan, tập trung', 'Làm bài tốt', 'Học tốt') mà không nêu được nội dung học tập cụ thể.\n"
+            "- ATTENDANCE_CONFLICT: Nội dung nhận xét ghi rằng học viên nghỉ học / vắng mặt (ví dụ: 'Bạn nghỉ', 'HV nghỉ có phép', 'Hôm nay con vắng').\n"
+            "- PLACEHOLDER_BYPASS: Chỉ chứa ký tự rác/đối phó ('.', '...', 'ok', 'test').\n"
+            "Chỉ trả về JSON hợp lệ theo dạng: "
+            '{"items": [{"id": "<id>", "classification": "VALID_CONCISE|SHALLOW_GENERIC|ATTENDANCE_CONFLICT|PLACEHOLDER_BYPASS", "reason": "ngắn gọn không chứa tên học sinh"}]}\n\n'
+            f"Loại nhận xét: {comment_kind} | Lớp: {class_code} | Khối: {khoi} | Buổi: {lesson or ''}\n"
+            f"Tóm tắt bài học: {str(lesson_summary or '')[:300]}\n"
+            f"Danh sách nhận xét cần phân loại:\n{items_json}"
+        )
+
+    @staticmethod
+    def _parse_response_text(raw_text: str | None) -> dict[str, dict[str, Any]]:
+        if not raw_text:
+            return {}
+        try:
+            parsed = json.loads(raw_text)
+        except TypeError, ValueError:
+            return {}
+        records: list[Any] = []
+        if isinstance(parsed, dict):
+            raw_items = parsed.get("items") or parsed.get("results")
+            if isinstance(raw_items, list):
+                records = raw_items
+            else:
+                for k, v in parsed.items():
+                    if isinstance(v, str):
+                        records.append({"id": str(k), "classification": v})
+                    elif isinstance(v, dict):
+                        records.append({"id": str(k), **v})
+        elif isinstance(parsed, list):
+            records = parsed
+
+        out: dict[str, dict[str, Any]] = {}
+        for entry in records:
+            if not isinstance(entry, dict):
+                continue
+            item_id = str(entry.get("id") or entry.get("item_id") or "").strip()
+            classification = (
+                str(entry.get("classification") or entry.get("label") or "").strip().upper()
+            )
+            if not item_id or classification not in VALID_LMS_AI_COMMENT_CLASSIFICATIONS:
+                continue
+            out[item_id] = {
+                "classification": classification,
+                "reason": str(entry.get("reason") or "").strip()[:160],
+            }
+        return out
+
+    def _prepare_batch(
+        self,
+        comments: list[dict[str, Any]],
+        *,
+        comment_kind: str = "SESSION",
+        known_student_names: Sequence[str] | None = None,
+    ) -> tuple[str | None, list[dict[str, str]], dict[str, dict[str, Any]]]:
+        from services.lms_quality_service import _scrub_comment_for_ai
+
+        kind_key = str(comment_kind or "SESSION").strip().upper() or "SESSION"
+        cached_verdicts: dict[str, dict[str, Any]] = {}
+        sanitized: list[dict[str, str]] = []
+        for item in (comments or [])[:40]:
+            if not isinstance(item, dict):
+                continue
+            item_id = str(item.get("id") or "").strip()
+            raw_text = str(item.get("text") or item.get("comment") or "").strip()
+            if not item_id or not raw_text:
+                continue
+            item_names = item.get("known_student_names") or known_student_names
+            scrubbed = _scrub_comment_for_ai(
+                raw_text,
+                known_student_names=item_names
+                if isinstance(item_names, Sequence) and not isinstance(item_names, (str, bytes))
+                else None,
+            )[:500]
+            if not scrubbed:
+                continue
+            cache_key = hashlib.sha256(f"{kind_key}:{scrubbed}".encode("utf-8")).hexdigest()
+            if cache_key in self._verdict_cache:
+                cached_verdicts[item_id] = dict(self._verdict_cache[cache_key])
+            else:
+                sanitized.append({"id": item_id, "text": scrubbed})
+        if not sanitized:
+            return None, [], cached_verdicts
+        if os.getenv("ZALO_QUALITY_ISOLATED") == "1" and self._client_factory is None:
+            return None, [], cached_verdicts
+        if not self._enabled_provider():
+            return None, [], cached_verdicts
+        if self._batches_used >= self._max_batches:
+            return None, [], cached_verdicts
+        api_key = self._api_key_provider() or (
+            "test-injected-key" if self._client_factory is not None else None
+        )
+        if not api_key:
+            return None, [], cached_verdicts
+        return api_key, sanitized, cached_verdicts
+
+    def review_short_comments_sync(
+        self,
+        comments: list[dict[str, Any]],
+        *,
+        class_code: str = "",
+        khoi: str = "",
+        lesson: int | str | None = None,
+        lesson_summary: str = "",
+        comment_kind: str = "SESSION",
+        known_student_names: Sequence[str] | None = None,
+    ) -> dict[str, dict[str, Any]]:
+        api_key, sanitized, cached_verdicts = self._prepare_batch(
+            comments,
+            comment_kind=comment_kind,
+            known_student_names=known_student_names,
+        )
+        if not api_key or not sanitized:
+            return cached_verdicts
+        from services.lms_quality_service import _scrub_comment_for_ai
+
+        kind_key = str(comment_kind or "SESSION").strip().upper() or "SESSION"
+        self._batches_used += 1
+        try:
+            client = self._make_client(api_key)
+            prompt = self._build_prompt(
+                sanitized,
+                class_code=class_code,
+                khoi=khoi,
+                lesson=lesson,
+                lesson_summary=_scrub_comment_for_ai(
+                    lesson_summary, known_student_names=known_student_names
+                ),
+                comment_kind=comment_kind,
+            )
+            cfg = types.GenerateContentConfig(response_mime_type="application/json")
+            models_api = getattr(client, "models", None)
+            if models_api is not None and hasattr(models_api, "generate_content"):
+                model_name = self._model_provider()
+                executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+                try:
+                    fut = executor.submit(
+                        models_api.generate_content,
+                        model=model_name,
+                        contents=prompt,
+                        config=cfg,
+                    )
+                    response = fut.result(timeout=self._timeout_seconds)
+                finally:
+                    executor.shutdown(wait=False, cancel_futures=True)
+            else:
+                return cached_verdicts
+            fresh = self._parse_response_text(getattr(response, "text", None))
+            text_by_id = {it["id"]: it["text"] for it in sanitized}
+            for item_id, verdict_obj in fresh.items():
+                if item_id in text_by_id:
+                    ck = hashlib.sha256(
+                        f"{kind_key}:{text_by_id[item_id]}".encode("utf-8")
+                    ).hexdigest()
+                    self._verdict_cache[ck] = dict(verdict_obj)
+            return {**cached_verdicts, **fresh}
+        except Exception:
+            return cached_verdicts
+
+    def review_comments(
+        self,
+        comments: list[dict[str, Any]],
+        *,
+        class_code: str = "",
+        khoi: str = "",
+        lesson: int | str | None = None,
+        lesson_summary: str = "",
+        comment_kind: str = "SESSION",
+        known_student_names: Sequence[str] | None = None,
+    ) -> dict[str, dict[str, Any]]:
+        return self.review_short_comments_sync(
+            comments,
+            class_code=class_code,
+            khoi=khoi,
+            lesson=lesson,
+            lesson_summary=lesson_summary,
+            comment_kind=comment_kind,
+            known_student_names=known_student_names,
+        )
+
+    async def review_short_comments(
+        self,
+        comments: list[dict[str, Any]],
+        *,
+        class_code: str = "",
+        khoi: str = "",
+        lesson: int | str | None = None,
+        lesson_summary: str = "",
+        comment_kind: str = "SESSION",
+        known_student_names: Sequence[str] | None = None,
+    ) -> dict[str, dict[str, Any]]:
+        api_key, sanitized, cached_verdicts = self._prepare_batch(
+            comments,
+            comment_kind=comment_kind,
+            known_student_names=known_student_names,
+        )
+        if not api_key or not sanitized:
+            return cached_verdicts
+        from services.lms_quality_service import _scrub_comment_for_ai
+
+        kind_key = str(comment_kind or "SESSION").strip().upper() or "SESSION"
+        self._batches_used += 1
+        try:
+            client = self._make_client(api_key)
+            prompt = self._build_prompt(
+                sanitized,
+                class_code=class_code,
+                khoi=khoi,
+                lesson=lesson,
+                lesson_summary=_scrub_comment_for_ai(
+                    lesson_summary, known_student_names=known_student_names
+                ),
+                comment_kind=comment_kind,
+            )
+            cfg = types.GenerateContentConfig(response_mime_type="application/json")
+            aio_api = getattr(client, "aio", None)
+            aio_models = getattr(aio_api, "models", None) if aio_api is not None else None
+            if aio_models is not None and hasattr(aio_models, "generate_content"):
+                response = await asyncio.wait_for(
+                    aio_models.generate_content(
+                        model=self._model_provider(),
+                        contents=prompt,
+                        config=cfg,
+                    ),
+                    timeout=self._timeout_seconds,
+                )
+            else:
+                models_api = getattr(client, "models", None)
+                if models_api is None or not hasattr(models_api, "generate_content"):
+                    return cached_verdicts
+                gen_fn = models_api.generate_content
+                model_name = self._model_provider()
+                if inspect.iscoroutinefunction(gen_fn):
+                    response = await asyncio.wait_for(
+                        gen_fn(
+                            model=model_name,
+                            contents=prompt,
+                            config=cfg,
+                        ),
+                        timeout=self._timeout_seconds,
+                    )
+                else:
+                    raw_resp = await asyncio.wait_for(
+                        asyncio.to_thread(
+                            gen_fn,
+                            model=model_name,
+                            contents=prompt,
+                            config=cfg,
+                        ),
+                        timeout=self._timeout_seconds,
+                    )
+                    response = (
+                        await asyncio.wait_for(raw_resp, timeout=self._timeout_seconds)
+                        if inspect.iscoroutine(raw_resp)
+                        else raw_resp
+                    )
+            fresh = self._parse_response_text(getattr(response, "text", None))
+            text_by_id = {it["id"]: it["text"] for it in sanitized}
+            for item_id, verdict_obj in fresh.items():
+                if item_id in text_by_id:
+                    ck = hashlib.sha256(
+                        f"{kind_key}:{text_by_id[item_id]}".encode("utf-8")
+                    ).hexdigest()
+                    self._verdict_cache[ck] = dict(verdict_obj)
+            return {**cached_verdicts, **fresh}
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return cached_verdicts
+
+
 @dataclass(slots=True)
 class ExternalGateways:
     browser: BrowserGateway
@@ -3651,16 +4017,28 @@ class ExternalGateways:
     student_ocr_factory: Callable[[], StudentOcrGateway]
     zalo_ai_classifier: ZaloAiReportClassifierGateway | None = None
     lms_quality: LmsQualityGateway | None = None
+    lms_ai_reviewer: LmsAiCommentReviewerGateway | None = None
+    lms_comment_reviewer: LmsAiCommentReviewerGateway | None = None
+
+    def __post_init__(self) -> None:
+        if self.lms_comment_reviewer is None and self.lms_ai_reviewer is not None:
+            self.lms_comment_reviewer = self.lms_ai_reviewer
+        elif self.lms_ai_reviewer is None and self.lms_comment_reviewer is not None:
+            self.lms_ai_reviewer = self.lms_comment_reviewer
 
     @classmethod
     def production(cls, *, profile_path: str | None = None) -> ExternalGateways:
         from googleform_autosubmit.config import Config
 
+        reviewer: LmsAiCommentReviewerGateway = (
+            GeminiLmsCommentReviewerGateway()
+            if Config.LMS_AI_COMMENT_CHECK
+            else DisabledLmsCommentReviewerGateway()
+        )
         return cls(
             browser=PlaywrightBrowserGateway(
                 profile_path=(
-                    profile_path
-                    or str(Path(Config.BROWSER_PROFILE_PATH).expanduser().resolve())
+                    profile_path or str(Path(Config.BROWSER_PROFILE_PATH).expanduser().resolve())
                 ),
                 landing_facts_provider_factory=ZaloAuthReadinessAdapter,
             ),
@@ -3668,4 +4046,6 @@ class ExternalGateways:
             student_ocr_factory=_default_student_ocr_factory,
             zalo_ai_classifier=GeminiZaloReportClassifierGateway(),
             lms_quality=PlaywrightLmsQualityGateway(),
+            lms_ai_reviewer=reviewer,
+            lms_comment_reviewer=reviewer,
         )

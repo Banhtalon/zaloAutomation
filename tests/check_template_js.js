@@ -3020,6 +3020,28 @@ async function checkPhase57FrontendHardening() {
         lms_quality_issues: [{ code: 'LMS_SPCK_NOTE', severity: 'NOTE', text: '[LMS] SPCK Buổi 14 thiếu link YouTube (6/6 HS)' }],
         scan_target: { week: 11, year: 2026, class_code: 'VT-JSB15', lesson: '14', class_date: '15/03/2026', class_date_iso: '2026-03-15' }
       };
+      const commentMissingRow = {
+        group: 'VT-C4K-GA38',
+        person: 'GV SPCK',
+        status: '✅ Đã báo cáo',
+        evidence_state: 'SUBMITTED_VERIFIED',
+        lms_status: '✅ Đã nộp LMS',
+        lms_quality_issues: [{ code: 'LMS_SPCK_COMMENT_MISSING', severity: 'FAIL', text: '[LMS] SPCK chưa có nhận xét (1/2 HS)' }],
+        scan_target: { week: 45, year: 2026, class_code: 'VT-C4K-GA38', lesson: '13', class_date: '08/11/2026', class_date_iso: '2026-11-08' }
+      };
+      const phase65NotesRow = {
+        group: 'VT-C4K-CSA04-HB',
+        person: 'GV Note',
+        status: '✅ Đã báo cáo',
+        evidence_state: 'SUBMITTED_VERIFIED',
+        lms_status: '✅ Đã nộp LMS',
+        lms_quality_issues: [
+          { code: 'LMS_SUMMARY_NOTE', severity: 'NOTE', text: '[LMS] Chưa ghi nội dung bài học' },
+          { code: 'LMS_COMMENT_NOTE', severity: 'NOTE', text: '[LMS] Nhận xét sơ sài (1/4 HS)' },
+          { code: 'LMS_ATTENDANCE_CONFLICT_NOTE', severity: 'NOTE', text: '[LMS] Lỗi điểm danh: tích Đi học/Đến muộn nhưng nhận xét ghi học viên nghỉ (1 HS)' },
+        ],
+        scan_target: { week: 45, year: 2026, class_code: 'VT-C4K-CSA04-HB', lesson: '4', class_date: '07/11/2026', class_date_iso: '2026-11-07' }
+      };
       return {
         failIsFailed: resolveRowIsFailed(failRow),
         failSev: resolveRowIssueSeverity(failRow),
@@ -3027,6 +3049,11 @@ async function checkPhase57FrontendHardening() {
         noteIsFailed: resolveRowIsFailed(noteRow),
         noteSev: resolveRowIssueSeverity(noteRow),
         noteEval: resolveDashboardRowEvaluationStatus(noteRow),
+        commentMissingIsFailed: resolveRowIsFailed(commentMissingRow),
+        commentMissingSev: resolveRowIssueSeverity(commentMissingRow),
+        commentMissingEval: resolveDashboardRowEvaluationStatus(commentMissingRow),
+        phase65NotesIsFailed: resolveRowIsFailed(phase65NotesRow),
+        phase65NotesSev: resolveRowIssueSeverity(phase65NotesRow),
       };
     })()`,
     harness.context,
@@ -3037,8 +3064,13 @@ async function checkPhase57FrontendHardening() {
       spckFrontendCheck.failEval === '❌ Chưa nộp SPCK trên LMS' &&
       spckFrontendCheck.noteIsFailed === false &&
       spckFrontendCheck.noteSev === 'NOTE' &&
-      spckFrontendCheck.noteEval === '✅ Đã hoàn thành nhận xét',
-    'DEC-042: LMS_SPCK_MISSING must resolve to is_failed=true, FAIL, and ❌ Chưa nộp SPCK trên LMS; LMS_SPCK_NOTE must resolve to is_failed=false and NOTE',
+      spckFrontendCheck.noteEval === '✅ Đã hoàn thành nhận xét' &&
+      spckFrontendCheck.commentMissingIsFailed === true &&
+      spckFrontendCheck.commentMissingSev === 'FAIL' &&
+      spckFrontendCheck.commentMissingEval === '❌ SPCK chưa có nhận xét trên LMS' &&
+      spckFrontendCheck.phase65NotesIsFailed === false &&
+      spckFrontendCheck.phase65NotesSev === 'NOTE',
+    'DEC-042 & Phase 6.5: LMS_SPCK_MISSING / LMS_SPCK_COMMENT_MISSING must resolve to FAIL, while LMS_SPCK_NOTE / LMS_SUMMARY_NOTE / LMS_COMMENT_NOTE / LMS_ATTENDANCE_CONFLICT_NOTE must resolve to NOTE',
   );
   const attendanceReportingCheck = vm.runInContext(
     `(() => {

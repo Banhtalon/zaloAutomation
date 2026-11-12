@@ -1049,16 +1049,55 @@
             );
         }
 
+        function hasRowSpckCommentMissingFail(r) {
+            if (!r || typeof r !== 'object') return false;
+            const st = r.scan_target && typeof r.scan_target === 'object' ? r.scan_target : {};
+            const spck = r.lms_spck || st.lms_spck;
+            if (spck && ['NOT_REQUIRED', 'EXEMPT', 'UNVERIFIED', 'MISSING'].includes(spck.status)) {
+                return false;
+            }
+            if (spck && Number.isInteger(spck.missing_comment_count)) {
+                return spck.missing_comment_count > 0;
+            }
+            const spckCommentFailRe = /^\[LMS\]\s*SPCK\s+chưa\s+có\s+nhận\s+xét\b/i;
+            const checkVal = val => {
+                if (!val) return false;
+                if (Array.isArray(val)) return val.some(checkVal);
+                if (typeof val === 'object') {
+                    const code = String(val.code || '').trim().toUpperCase();
+                    const sev = String(val.severity || '').trim().toUpperCase();
+                    const txt = String(val.text || val.message || val.issue || '').trim();
+                    if (code === 'LMS_SPCK_COMMENT_MISSING' && sev !== 'NOTE') return true;
+                    return spckCommentFailRe.test(txt) && sev !== 'NOTE';
+                }
+                const parsed = splitCheckerIssueNoteInJs(String(val));
+                if (parsed.autoIssues.some(seg => spckCommentFailRe.test(seg))) return true;
+                return String(val).split(';').some(seg => spckCommentFailRe.test(seg.trim()));
+            };
+            return (
+                checkVal(r.lms_quality_issues || st.lms_quality_issues)
+                || checkVal(r.quality_issues || st.quality_issues)
+            );
+        }
+
         function resolveRowIssueSeverity(r) {
             if (!r || typeof r !== 'object') return 'FAIL';
-            if (hasRowSpckMissingFail(r)) {
+            if (hasRowSpckMissingFail(r) || hasRowSpckCommentMissingFail(r)) {
                 return 'FAIL';
             }
             if (!resolveRowIsFailed(r)) {
                 return 'NOTE';
             }
             const st = r.scan_target && typeof r.scan_target === 'object' ? r.scan_target : {};
-            const noteCodes = new Set(['LMS_MANUAL_CHECK', 'LMS_SPCK_NOTE', 'ZALO_REPORT_NO_DATE', 'ZALO_REPORT_WRONG_DATE']);
+            const noteCodes = new Set([
+                'LMS_MANUAL_CHECK',
+                'LMS_SPCK_NOTE',
+                'LMS_SUMMARY_NOTE',
+                'LMS_COMMENT_NOTE',
+                'LMS_ATTENDANCE_CONFLICT_NOTE',
+                'ZALO_REPORT_NO_DATE',
+                'ZALO_REPORT_WRONG_DATE',
+            ]);
             const structuredEntries = [];
             const collectStructured = val => {
                 if (!val) return;
@@ -1095,14 +1134,28 @@
             return 'FAIL';
         }
 
+        function isRowSessionDeferred(r) {
+            if (!r || typeof r !== 'object') return false;
+            const st = r.scan_target && typeof r.scan_target === 'object' ? r.scan_target : {};
+            if (r.session_deferred === true || st.session_deferred === true) return true;
+            for (const src of [r, st]) {
+                for (const key of ['deferred_reason', 'eligibility_reason']) {
+                    const val = String(src[key] || '').trim().toUpperCase();
+                    if (val.startsWith('DEFERRED_')) return true;
+                }
+            }
+            return false;
+        }
+
         function resolveRowIsFailed(r) {
             if (!r || typeof r !== 'object') return false;
+            if (isRowSessionDeferred(r)) return false;
             if (typeof r.is_failed === 'boolean') return r.is_failed;
             const category = resolveRowCategory(r);
             if (category === 'MISSING' || category === 'REVIEW') return true;
             const lmsStatus = resolveDashboardRowLmsStatus(r);
             if (lmsStatus.startsWith('❌') || lmsStatus.startsWith('⚠️')) return true;
-            if (hasRowSpckMissingFail(r)) return true;
+            if (hasRowSpckMissingFail(r) || hasRowSpckCommentMissingFail(r)) return true;
             return false;
         }
 
@@ -1224,6 +1277,7 @@
 
         function resolveDashboardRowLmsStatus(r) {
             if (!r || typeof r !== 'object') return 'Chưa quét LMS';
+            if (isRowSessionDeferred(r)) return '⏳ Chưa tới giờ kiểm tra';
             const st = r.scan_target && typeof r.scan_target === 'object' ? r.scan_target : {};
             const comments = r.lms_comments || st.lms_comments;
             const attendance = r.lms_attendance || st.lms_attendance;
@@ -1339,6 +1393,7 @@
 
         function resolveDashboardRowEvaluationStatus(r) {
             if (!r || typeof r !== 'object') return '';
+            if (isRowSessionDeferred(r)) return '⏳ Chưa tới giờ kiểm tra';
             const st = r.scan_target && typeof r.scan_target === 'object' ? r.scan_target : {};
             const category = resolveRowCategory(r);
             let explicitEval = String(r.evaluation_status || st.evaluation_status || '').trim();
@@ -1353,6 +1408,9 @@
             const lmsDone = lmsStatus.startsWith('✅') || lmsStatus.includes('Dry-run LMS') || lmsStatus.includes('Chờ tích BCNB');
             if (zaloDone && hasRowSpckMissingFail(r)) {
                 return '❌ Chưa nộp SPCK trên LMS';
+            }
+            if (zaloDone && hasRowSpckCommentMissingFail(r) && !lmsStatus.startsWith('❌') && !lmsStatus.startsWith('⚠️')) {
+                return '❌ SPCK chưa có nhận xét trên LMS';
             }
             const comments = r.lms_comments || st.lms_comments;
             const spck = r.lms_spck || st.lms_spck;

@@ -236,7 +236,7 @@ class LmsAttendanceQualityTests(unittest.TestCase):
             self.assertEqual(result["issues"], [])
 
     def test_short_complete_ideas_are_review_not_missing_and_reasons_quantified(self):
-        short = "Điểm mạnh: hiểu bài; Cần cải thiện: còn chậm; Lời khuyên: luyện thêm."
+        short = "Điểm mạnh: tốt; Cần cải thiện: còn chậm."
         result = evaluate_lms_student_comments(
             [
                 {"status": "ATTENDED", "comment": short},
@@ -249,9 +249,9 @@ class LmsAttendanceQualityTests(unittest.TestCase):
         self.assertEqual(result["status"], "REVIEW")
         self.assertEqual(result["submitted_count"], 2)
         self.assertEqual(result["missing_count"], 0)
-        self.assertEqual(result["review_reasons"]["nhận xét ngắn"], 2)
+        self.assertEqual(result["review_reasons"]["nhận xét sơ sài"], 2)
         self.assertEqual(issue_severity(result["issues"][0]), SEVERITY_NOTE)
-        self.assertIn("2/2 nhận xét", issue_text(result["issues"][0]))
+        self.assertEqual(issue_text(result["issues"][0]), "[LMS] Nhận xét sơ sài (2/2 HS)")
         self.assertNotIn(short, issue_text(result["issues"][0]))
 
     def test_current_unverified_does_not_reactivate_old_spck_failure(self):

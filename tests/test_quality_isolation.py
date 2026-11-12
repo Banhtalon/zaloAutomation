@@ -65,6 +65,7 @@ class QualityIsolationTests(unittest.TestCase):
         script = (ROOT / "CHECK_QUALITY.ps1").read_text(encoding="utf-8")
         self.assertIn("Isolated", script)
         self.assertIn("ZALO_QUALITY_ISOLATED", script)
+        self.assertIn("LMS_AI_COMMENT_CHECK", script)
         self.assertIn("DATABASE_PATH", script)
         self.assertIn("LogPath", script)
         self.assertIn("Start-Transcript", script)

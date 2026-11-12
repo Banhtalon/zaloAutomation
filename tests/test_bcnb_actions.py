@@ -911,8 +911,7 @@ class BcnbActionTests(unittest.IsolatedAsyncioTestCase):
         }
         expected_note = (
             "GV báo bận | [LMS] Chưa ghi nội dung bài học; "
-            "[LMS] Nhận xét cần xem lại (1/1 nhận xét - nhận xét ngắn: 1/1, "
-            "chưa rõ điểm mạnh: 1/1, chưa rõ điểm cần cải thiện: 1/1, chưa rõ lời khuyên/giải pháp: 1/1)"
+            "[LMS] Nhận xét sơ sài (1/1 HS)"
         )
         page, _, _, _ = self.make_dependencies()
         page.evaluate = AsyncMock(
@@ -2180,6 +2179,194 @@ class BcnbActionTests(unittest.IsolatedAsyncioTestCase):
             proven_auto_issues=proven,
         )
         self.assertEqual(merged, "[LMS] Nhận xét thiếu ý")
+
+    async def test_6_5_2_update_bcnb_reports_skips_future_lesson_14_and_processes_completed_lesson_14(
+        self,
+    ) -> None:
+        from services.zalo_bcnb_service import update_bcnb_reports
+
+        audit_repo = AsyncMock()
+        audit_repo.record_intent.return_value = (
+            {"id": 901, "outcome": "INTENT_RECORDED"},
+            True,
+        )
+        job_repo = AsyncMock()
+        checkbox = AsyncMock()
+        checkbox.count.return_value = 1
+        checkbox.is_checked.return_value = False
+        fake_cell = MagicMock()
+        fake_cell.locator.return_value.first = checkbox
+
+        fake_rows = [
+            {
+                "row": MagicMock(),
+                "cells": [fake_cell] * 12,
+                "week": 46,
+                "year": 2026,
+                "ma_lop": "VT-C4K-GB42-HB",
+                "buoi_so": "14",
+                "ngay_hoc": "11/11/2026",
+                "ngay_hoc_iso": "2026-11-11",
+                "zalo_deadline": "20:00 12/11/2026",
+                "bcnb_session_id": "6901",
+                "khoi": "Coding",
+                "nx_zalo_checked": False,
+                "nx_lms_checked": True,
+                "qc_issue_note": "",
+                "checker_note_unreadable": False,
+            },
+            {
+                "row": MagicMock(),
+                "cells": [fake_cell] * 12,
+                "week": 46,
+                "year": 2026,
+                "ma_lop": "VT-C4K-GI32",
+                "buoi_so": "14",
+                "ngay_hoc": "13/11/2026",
+                "ngay_hoc_iso": "2026-11-13",
+                "zalo_deadline": "20:00 14/11/2026",
+                "bcnb_session_id": "6902",
+                "khoi": "Coding",
+                "nx_zalo_checked": False,
+                "nx_lms_checked": False,
+                "qc_issue_note": "",
+                "checker_note_unreadable": False,
+            },
+        ]
+        exempt_gb42 = {
+            "class_code": "VT-C4K-GB42-HB",
+            "lesson": "14",
+            "class_date": "11/11/2026",
+            "class_date_iso": "2026-11-11",
+            "week": 46,
+            "year": 2026,
+            "target_kind": "EXEMPTION",
+        }
+        deferred_gi32 = {
+            "class_code": "VT-C4K-GI32",
+            "lesson": "14",
+            "class_date": "13/11/2026",
+            "class_date_iso": "2026-11-13",
+            "week": 46,
+            "year": 2026,
+            "target_kind": "EXEMPTION",
+        }
+        scan_results = [
+            {
+                "group": "MindX - VT-C4K-GB42-HB",
+                "person": "GV C",
+                "status": "⚪ Miễn nhận xét Zalo (Buổi 14)",
+                "evidence_state": "LESSON_14_EXEMPTION",
+                "scan_target": exempt_gb42,
+            }
+        ]
+        page, _, _, _ = self.make_dependencies()
+        with (
+            patch(
+                "services.zalo_bcnb_service._read_bcnb_schedule_rows",
+                AsyncMock(return_value=fake_rows),
+            ),
+            patch(
+                "services.zalo_bcnb_service.resolve_report_columns",
+                AsyncMock(return_value=(1, 2, 8)),
+            ),
+            patch(
+                "services.zalo_bcnb_service.execute_verified_checkbox_action",
+                AsyncMock(return_value="VERIFIED"),
+            ) as mock_tick,
+        ):
+            summary = await update_bcnb_reports(
+                page,
+                job_id=901,
+                execution_mode="production",
+                scan_results=scan_results,
+                today=datetime(2026, 11, 12, 10, 0, tzinfo=BUSINESS_TIMEZONE),
+                scan_plan={
+                    "selected_weeks": [{"week": 45, "year": 2026}, {"week": 46, "year": 2026}],
+                    "latest_week": {"week": 46, "year": 2026},
+                    "targets": [],
+                    "exempt_targets": [exempt_gb42],
+                    "deferred_targets": [deferred_gi32],
+                },
+                job_repo=job_repo,
+                audit_repo=audit_repo,
+                period_filter={(46, 2026)},
+            )
+        # Only GB42-HB (11/11) was ticked; GI32 (13/11 future) was skipped!
+        self.assertEqual(mock_tick.await_count, 1)
+        self.assertEqual(mock_tick.await_args.kwargs["class_code"], "VT-C4K-GB42-HB")
+        self.assertEqual(summary["updated_count"], 1)
+
+    def test_phase65_decoupled_comments_and_spck_verification_in_collect_auto_issues(self):
+        from services.zalo_bcnb_service import _collect_row_verifiable_auto_issues
+
+        # Case 1: lms_comments is COMPLETE (teacher added missing comment), lms_spck is UNVERIFIED
+        # Old "[LMS] Chưa nhận xét học viên (1/1 HS)" must NOT be restored from existing_note!
+        item_comments_fixed = {
+            "evidence_state": "SUBMITTED_VERIFIED",
+            "lms_comments": {"status": "COMPLETE"},
+            "lms_spck": {"status": "UNVERIFIED", "reason": "spck_works_incomplete"},
+            "lms_quality_issues": [
+                {
+                    "code": "LMS_MANUAL_CHECK",
+                    "severity": "NOTE",
+                    "text": "[LMS] Chưa kiểm tra được SPCK — danh sách nộp chưa đầy đủ, cần kiểm tra tay",
+                }
+            ],
+            "zalo_content_issues": [],
+        }
+        issues_1, _ = _collect_row_verifiable_auto_issues(
+            item_comments_fixed,
+            lms_slots_by_class={},
+            proven_auto_issues=[
+                "[LMS] Chưa nhận xét học viên (1/1 HS)",
+                "[LMS] Chưa nộp SPCK (1/1 HS)",
+            ],
+            existing_note="[LMS] Chưa nhận xét học viên (1/1 HS); [LMS] Chưa nộp SPCK (1/1 HS)",
+        )
+        self.assertNotIn("[LMS] Chưa nhận xét học viên (1/1 HS)", issues_1)
+        self.assertIn("[LMS] Chưa nộp SPCK (1/1 HS)", issues_1)
+
+        # Case 2: lms_spck is COMPLETE (teacher submitted SPCK), lms_comments is UNVERIFIED
+        # Old "[LMS] Chưa nộp SPCK (1/1 HS)" must NOT be restored, while old comment issue stays preserved
+        item_spck_fixed = {
+            "evidence_state": "SUBMITTED_VERIFIED",
+            "lms_comments": {"status": "UNVERIFIED"},
+            "lms_spck": {"status": "COMPLETE"},
+            "lms_quality_issues": [],
+            "zalo_content_issues": [],
+        }
+        issues_2, _ = _collect_row_verifiable_auto_issues(
+            item_spck_fixed,
+            lms_slots_by_class={},
+            proven_auto_issues=[
+                "[LMS] Chưa nộp SPCK (1/1 HS)",
+                "[LMS] Chưa nhận xét học viên (1/1 HS)",
+            ],
+            existing_note="[LMS] Chưa nộp SPCK (1/1 HS); [LMS] Chưa nhận xét học viên (1/1 HS)",
+        )
+        self.assertNotIn("[LMS] Chưa nộp SPCK (1/1 HS)", issues_2)
+        self.assertIn("[LMS] Chưa nhận xét học viên (1/1 HS)", issues_2)
+
+        # Case 3: Both lms_comments and lms_spck are UNVERIFIED -> both proven issues preserved
+        item_both_unverified = {
+            "evidence_state": "SUBMITTED_VERIFIED",
+            "lms_comments": {"status": "UNVERIFIED"},
+            "lms_spck": {"status": "UNVERIFIED", "reason": "spck_works_incomplete"},
+            "lms_quality_issues": [],
+            "zalo_content_issues": [],
+        }
+        issues_3, _ = _collect_row_verifiable_auto_issues(
+            item_both_unverified,
+            lms_slots_by_class={},
+            proven_auto_issues=[
+                "[LMS] Chưa nộp SPCK (1/1 HS)",
+                "[LMS] Chưa nhận xét học viên (1/1 HS)",
+            ],
+            existing_note="[LMS] Chưa nộp SPCK (1/1 HS); [LMS] Chưa nhận xét học viên (1/1 HS)",
+        )
+        self.assertIn("[LMS] Chưa nộp SPCK (1/1 HS)", issues_3)
+        self.assertIn("[LMS] Chưa nhận xét học viên (1/1 HS)", issues_3)
 
 
 if __name__ == "__main__":

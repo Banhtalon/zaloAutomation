@@ -144,6 +144,24 @@ class RuleClassifierDateTests(unittest.TestCase):
             4,
         )
 
+    def test_next_lesson_section_does_not_leak_lesson_14_into_b13_report(self):
+        from services.zalo_safety import (
+            extract_report_content_lesson_number,
+            extract_report_lesson_number,
+        )
+
+        report_b13 = (
+            "BÁO CÁO BUỔI HỌC SỐ 13 - LỚP VT-C4K-GB42-HB\n"
+            "Nội dung bài học: Hoàn thiện sản phẩm cuối khóa và chạy thử nghiệm.\n"
+            "Nhận xét chung: Các con làm việc nghiêm túc.\n"
+            "Buổi học kế tiếp:\n"
+            "- Thứ 3 ngày 11/11/2026 học Buổi 14 (Bài số 14: Tổng kết & Thuyết trình SPCK).\n"
+            "Chuẩn bị cho buổi sau:\n"
+            "- Các con ôn lại kịch bản thuyết trình cho Buổi 14."
+        )
+        self.assertEqual(extract_report_lesson_number(report_b13), 13)
+        self.assertIsNone(extract_report_content_lesson_number(report_b13))
+
 
 if __name__ == "__main__":
     unittest.main()
