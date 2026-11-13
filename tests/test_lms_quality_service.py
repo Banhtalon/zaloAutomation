@@ -3177,7 +3177,7 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
                 raw_evaluation_status="",
                 row=row_spck_comment_fail,
             ),
-            "❌ SPCK chưa có nhận xét trên LMS",
+            "⚠️ SPCK chưa có nhận xét trên LMS",
         )
         email_pkg = build_failed_classes_email_package(
             week=46,
@@ -3187,9 +3187,10 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
             selected_job_id=None,
             recipients=["owner@example.com"],
         )
-        self.assertIn("color:#b91c1c;font-weight:600;", email_pkg["html_table"])
+        self.assertIn("color:#b45309;font-weight:600;", email_pkg["html_table"])
+        self.assertNotIn("color:#b91c1c;font-weight:600;\">[LMS] SPCK", email_pkg["html_table"])
         self.assertIn("[LMS] SPCK chưa có nhận xét (1/2 HS)", email_pkg["html_table"])
-        self.assertIn("❌ SPCK chưa có nhận xét trên LMS", email_pkg["html_table"])
+        self.assertIn("⚠️ SPCK chưa có nhận xét trên LMS", email_pkg["html_table"])
 
     def test_phase65_attendance_conflict_spck_wording_and_robotics_rules(self) -> None:
         from services.lms_quality_service import evaluate_lms_spck_quality

@@ -30,8 +30,12 @@ from repositories.report_repository import (
     sanitize_csv_cell,
 )
 from services.report_status import (
+    CATEGORY_MISSING,
     ISSUE_CODE_LMS_SPCK_COMMENT_MISSING,
     ISSUE_CODE_LMS_SPCK_MISSING,
+    categorize_row,
+    has_spck_comment_missing_fail,
+    has_spck_missing_fail,
     issue_code,
     resolve_lms_status,
 )
@@ -298,20 +302,42 @@ def _prepare_email_row_fields(idx: int, row: dict[str, Any]) -> dict[str, str]:
     teacher = _clean_single_line(row.get("teacher"), "Chưa phân công")
     lesson = _clean_single_line(row.get("lesson"), "—")
     class_date = _clean_single_line(row.get("class_date"), "—")
+    raw_zalo_val = (
+        row.get("zalo_status") if row.get("zalo_status") is not None else row.get("status")
+    )
     zalo_status = normalize_zalo_status_text(
-        _clean_single_line(row.get("zalo_status"), "Chưa xác định"),
+        _clean_single_line(raw_zalo_val, "Chưa xác định"),
         item=row,
         st=st,
     )
     lms_status = resolve_lms_status(row, _clean_single_line(row.get("lms_status"), "Chưa quét LMS"))
+    row_category = (
+        str(row.get("category") or "").strip()
+        or categorize_row({**row, "zalo_status": zalo_status})
+    )
     raw_eval = str(row.get("evaluation_status") or "").strip()
-    if not raw_eval or "lms_comments" in row or "lms_comments" in st:
+    if (
+        not raw_eval
+        or "lms_comments" in row
+        or "lms_comments" in st
+        or raw_eval
+        in {
+            "❌ Chưa nộp SPCK trên LMS",
+            "❌ SPCK chưa có nhận xét trên LMS",
+            "⚠️ Chưa nộp SPCK trên LMS",
+            "⚠️ SPCK chưa có nhận xét trên LMS",
+        }
+        or row_category == CATEGORY_MISSING
+        or has_spck_missing_fail(row)
+        or has_spck_comment_missing_fail(row)
+    ):
         raw_eval = _resolve_row_evaluation_status(
             zalo_status=zalo_status,
             lms_status=lms_status,
             nx_zalo_checked=row.get("nx_zalo_checked"),
             nx_lms_checked=row.get("nx_lms_checked"),
             row=row,
+            category=row_category,
             raw_evaluation_status=raw_eval,
         )
     evaluation_status = _clean_single_line(raw_eval, "—")
@@ -336,6 +362,7 @@ def _prepare_email_row_fields(idx: int, row: dict[str, Any]) -> dict[str, str]:
         "evaluation_status": evaluation_status,
         "issue_description": issue_description,
         "verified_at": verified_at,
+        "is_zalo_missing": "1" if row_category == CATEGORY_MISSING else "",
     }
 
 
@@ -587,6 +614,7 @@ def build_failed_classes_email_package(
             sanitize_csv_cell(item["evaluation_status"]) or "—",
             sanitize_csv_cell(item["issue_description"]) or "—",
         ]
+        is_zalo_missing = item.get("is_zalo_missing") == "1"
         td_parts: list[str] = []
         for col_i, cell in enumerate(cells):
             extra_style = ""
@@ -597,16 +625,30 @@ def build_failed_classes_email_package(
                 extra_style = "font-weight:700;color:#0f172a;white-space:nowrap;"
             elif col_i in (2, 3):
                 extra_style = "text-align:center;white-space:nowrap;"
+            elif col_i == 5 and is_zalo_missing:
+                extra_style = "color:#b91c1c;font-weight:700;"
+            elif col_i == 7:
+                if is_zalo_missing and cell.startswith("❌"):
+                    extra_style = "color:#b91c1c;font-weight:700;"
+                elif cell.startswith("⚠️"):
+                    extra_style = "color:#b45309;font-weight:600;"
             elif col_i == 8 and cell != "—":
                 extra_style = "color:#334155;font-weight:400;line-height:1.6;"
                 issue_items: list[str] = []
                 for issue in _split_display_issues(cell):
                     issue_style = "margin:0 0 6px;"
-                    if issue_code(issue) in {
+                    code = issue_code(issue)
+                    if re.match(
+                        r"^\[Zalo\]\s*Chưa\s+(?:gửi|nhận\s+xét|báo\s+cáo)",
+                        issue,
+                        flags=re.IGNORECASE,
+                    ):
+                        issue_style += "color:#b91c1c;font-weight:600;"
+                    elif code in {
                         ISSUE_CODE_LMS_SPCK_MISSING,
                         ISSUE_CODE_LMS_SPCK_COMMENT_MISSING,
                     }:
-                        issue_style += "color:#b91c1c;font-weight:600;"
+                        issue_style += "color:#b45309;font-weight:600;"
                     issue_items.append(f'<li style="{issue_style}">{html.escape(issue)}</li>')
                 cell_html = '<ul style="margin:0;padding-left:18px;">' + "".join(issue_items) + "</ul>"
             td_parts.append(

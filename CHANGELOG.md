@@ -4,6 +4,21 @@ Tài liệu này ghi lại toàn bộ quá trình hình thành, phát triển ki
 
 ---
 
+## [2026-11-13] — Phase 6.6: Làm nổi bật lỗi đỏ `❌ Chưa nhận xét` Zalo và chuyển thiếu nộp / thiếu nhận xét SPCK sang cảnh báo vàng `⚠️` trong Email Quản lý (DEC-046)
+
+- **Chưa nhận xét Zalo (`CATEGORY_MISSING`) là lỗi đỏ nặng nhất**:
+  - `repositories/report_repository.py` (`normalize_zalo_status_text`, `_resolve_row_evaluation_status`) và `static/js/jobs.js` (`normalizeZaloStatusDisplay`, `resolveDashboardRowEvaluationStatus`) hiển thị `"❌ Chưa nhận xét"` (giữ tiền tố `[DRY-RUN] ` nếu có) và nâng `Tình trạng đánh giá` thành `"❌ Đã hoàn tất nhận xét LMS, chưa nhận xét Zalo"` khi đã xong LMS (ghi đè trạng thái cũ `⚠️ ... Zalo cần kiểm tra` / `⏳ ...`), hoặc `"❌ Chưa hoàn thành nhận xét"` khi chưa xong LMS; giữ nguyên `⏳` cho `CATEGORY_NOT_SCANNED` và `⚠️` cho `CATEGORY_REVIEW`.
+  - `services/report_email_service.py` tô chữ đỏ đậm (`#b91c1c`) cho cột `NX Zalo`, cột `Tình trạng đánh giá` và dòng `[Zalo] Chưa gửi/nhận xét/báo cáo...` ở cột `Mô tả vấn đề (TE/TF/QC)` trong bảng HTML Email Quản lý, cũng như `text-rose-700` trên Dashboard.
+- **Chưa nộp SPCK (`LMS_SPCK_MISSING`) & SPCK chưa có nhận xét (`LMS_SPCK_COMMENT_MISSING`) hiển thị mức Warning (`⚠️`)**:
+  - Giữ nguyên `is_failed=True` để vẫn gửi trong Email Quản lý, nhưng đổi `Tình trạng đánh giá` sang `"⚠️ Chưa nộp SPCK trên LMS"` và `"⚠️ SPCK chưa có nhận xét trên LMS"` (tự chuẩn hóa cả dữ liệu cache cũ `"❌ ..."` mà không che khuất trạng thái nhận xét LMS `MISSING` / `UNVERIFIED` / `⚠️`).
+  - Trong Email Quản lý HTML (`services/report_email_service.py`), các ô `⚠️` ở cột `Tình trạng đánh giá` và gạch đầu dòng `[LMS] Chưa nộp SPCK` / `[LMS] SPCK chưa có nhận xét` hiển thị màu vàng cam cảnh báo (`#b45309`); trên Dashboard (`static/js/jobs.js`), các dòng chỉ có cảnh báo SPCK đồng bộ `text-amber-700` ở cả `Đánh giá:` và `Vấn đề:`.
+- **Tệp thay đổi (13 files)**: `CHANGELOG.md`, `PROJECT_DECISIONS.md`, `PROJECT_STATE.md`, `UPGRADE_PROGRESS.md`, `repositories/report_repository.py`, `services/report_email_service.py`, `static/js/jobs.js`, `tests/check_template_js.js`, `tests/test_api_routes_unit.py`, `tests/test_attendance_reporting.py`, `tests/test_lms_quality_service.py`, `tests/test_report_issue_display.py`, `tests/test_report_status.py`.
+- **Bằng chứng kiểm chứng (`DEC-040`)**:
+  - Unit tests mục tiêu (5 module, 89 tests): `89/89 PASS` (exit `0`).
+  - Frontend JS contract (`node tests/check_template_js.js`): `template-js-contract-ok scripts=7 handlers=37 behavior=13` (exit `0`).
+  - Full isolated gate (`powershell -ExecutionPolicy Bypass -File .\CHECK_QUALITY.ps1 -Isolated`): `QUALITY GATE PASSED` (exit `0`, Ruff `0`, Mypy `0` trên 78 files, `718/718` regression tests `OK` trong `340.477s`, branch coverage `78.9%`, `secrets=0`).
+  - Independent Review (`codex exec -m gpt-6.1-sol -c model_reasoning_effort="high" -s read-only -`): Round 1 & Round 2 `NEEDS_FIX` (đã xử lý triệt để các ca biên trạng thái LMS thiếu số đếm / cần kiểm tra và đồng bộ màu Dashboard) $\rightarrow$ Round 3 **`VERDICT: PASS`** (session `01a1d348-f2e4-7381-be02-525a25d81e7c`, đối chiếu 143 ca Python/email/CSV/JS).
+
 ## [2026-11-12] — Phase 6.5: Chuẩn hóa quy tắc QC, Phễu 2 tầng AI nhận xét LMS, quy tắc SPCK/Robotics & hoãn buổi học chưa kết thúc (DEC-045)
 
 - **Trích xuất buổi học Zalo & Hoãn buổi học chưa kết thúc**:

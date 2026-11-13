@@ -1232,3 +1232,20 @@
   - Phễu 2 tầng kiểm tra nhận xét LMS (`LMS_AI_COMMENT_CHECK` + `GeminiLmsCommentReviewerGateway`): gỡ bỏ bộ đếm từ khóa 3 ý cứng nhắc, thực hiện khử PII tên học viên theo token-span không chồng lấp ở cả JavaScript trình duyệt và Python (`[HS]`, `[URL]`, `[EMAIL]`, `[PHONE]`), dùng khóa cache SHA-256, gọi Gemini bất đồng bộ không chặn vòng lặp sự kiện với giới hạn batch mỗi lượt quét và fallback tất định (`ISSUE_CODE_LMS_COMMENT_NOTE`, AI không bao giờ tự sinh lỗi `FAIL`).
 - Consequences: Chặn triệt để hành vi điền `"."` đối phó ở nhận xét LMS/SPCK, loại bỏ cảnh báo sớm cho buổi học chưa kết thúc và giảm cảnh báo giả từ bộ đếm từ khóa mà vẫn đảm bảo bảo mật PII và tính tất định khi kiểm định.
 - Supersedes: Cập nhật và tinh chỉnh chi tiết phân loại `FAIL`/`NOTE`, quy tắc SPCK/Robotics và cơ chế đánh giá nhận xét LMS của DEC-041, DEC-042, DEC-043.
+
+## DEC-046 — Phân cấp mức độ hiển thị trong Email Quản lý & Dashboard: Chưa nhận xét Zalo là lỗi đỏ nặng nhất (`❌`), thiếu nộp/nhận xét SPCK là cảnh báo vàng (`⚠️`)
+
+- Date: 2026-11-13.
+- Status: Accepted by Owner, thực hiện và kiểm chứng source/local theo PROJECT_STATE.md.
+- Context: Sau khi đối chiếu bảng Email Quản lý 9 cột thực tế, Owner yêu cầu làm nổi bật lỗi chưa nhận xét Zalo là lỗi nặng nhất (có tích chéo đỏ `❌` và tô đỏ đậm cả chữ), trong khi các lớp đã hoàn tất Zalo và nhận xét buổi học LMS nhưng chưa nộp SPCK (`LMS_SPCK_MISSING`) hoặc SPCK chưa có nhận xét (`LMS_SPCK_COMMENT_MISSING`) vẫn gửi trong Email Quản lý nhưng chỉ hiển thị mức cảnh báo (`⚠️`, màu vàng cam) thay vì tích chéo đỏ `❌`.
+- Decision:
+  - **Chưa nhận xét Zalo (`CATEGORY_MISSING`) là lỗi mức cao nhất**:
+    - `normalize_zalo_status_text` (`repositories/report_repository.py`) và `normalizeZaloStatusDisplay` (`static/js/jobs.js`) chuẩn hóa hiển thị thành `"❌ Chưa nhận xét"` (giữ nguyên tiền tố `[DRY-RUN] ` nếu có).
+    - `_resolve_row_evaluation_status` và `resolveDashboardRowEvaluationStatus` trả `"❌ Đã hoàn tất nhận xét LMS, chưa nhận xét Zalo"` khi `lms_done=True` (ghi đè chuỗi cũ `⚠️ ... Zalo cần kiểm tra` / `⏳ ...` từ Teaching), và trả `"❌ Chưa hoàn thành nhận xét"` (hoặc giữ chuỗi bắt đầu bằng `❌`) khi chưa xong LMS; giữ nguyên `⏳` cho `CATEGORY_NOT_SCANNED` và `⚠️` cho `CATEGORY_REVIEW`.
+    - Trong bảng HTML Email Quản lý (`services/report_email_service.py`), cột `NX Zalo`, cột `Tình trạng đánh giá` (khi `❌`) và gạch đầu dòng `[Zalo] Chưa gửi/nhận xét/báo cáo...` ở cột `Mô tả vấn đề (TE/TF/QC)` đều được tô chữ đỏ đậm (`#b91c1c`).
+  - **Chưa nộp SPCK (`LMS_SPCK_MISSING`) và SPCK chưa có nhận xét (`LMS_SPCK_COMMENT_MISSING`) hiển thị mức Warning (`⚠️`)**:
+    - Giữ nguyên `is_failed=True` để dòng vẫn được đưa vào danh sách gửi Email Quản lý và bộ lọc cần xử lý.
+    - Khi Zalo hoàn tất và nhận xét buổi học LMS không bị thiếu/chờ xác minh/cần kiểm tra, `Tình trạng đánh giá` hiển thị `"⚠️ Chưa nộp SPCK trên LMS"` hoặc `"⚠️ SPCK chưa có nhận xét trên LMS"` (tự động chuyển đổi cả chuỗi cache cũ `"❌ ..."` nhưng xóa cảnh báo SPCK cũ nếu nhận xét LMS đang `MISSING`, `UNVERIFIED` hoặc `⚠️` để không che lấp lỗi nhận xét LMS).
+    - Trong bảng HTML Email Quản lý, ô `Tình trạng đánh giá` mang dấu `⚠️` và các gạch đầu dòng `[LMS] Chưa nộp SPCK` / `[LMS] SPCK chưa có nhận xét` hiển thị màu vàng cam cảnh báo (`#b45309`); trên Dashboard (`static/js/jobs.js`), các dòng chỉ vướng cảnh báo SPCK cũng đồng bộ màu vàng cam (`text-amber-700`) cho cả `Đánh giá:` và `Vấn đề:`.
+- Consequences: Quản lý nhìn vào bảng Email phân biệt tức thì lỗi nặng nhất (chưa báo cáo Zalo — đỏ đậm `❌`) với cảnh báo hoàn thiện SPCK (vàng cam `⚠️`), đồng bộ 100% giữa Email HTML, CSV, API và Dashboard mà không cần quét lại Zalo cho dữ liệu đã lưu.
+- Supersedes: Tinh chỉnh cách hiển thị `Tình trạng đánh giá` và màu sắc Email/Dashboard của `LMS_SPCK_MISSING`, `LMS_SPCK_COMMENT_MISSING` và `CATEGORY_MISSING` trong DEC-042, DEC-045 (giữ nguyên quy tắc tính `is_failed`).

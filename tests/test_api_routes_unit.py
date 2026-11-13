@@ -2653,7 +2653,7 @@ class ApiRoutesUnitTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(row["lms_status"], "✅ Đã nộp LMS")
                 self.assertEqual(
                     row["evaluation_status"],
-                    "⏳ Đã hoàn tất nhận xét LMS, chưa nhận xét Zalo",
+                    "❌ Đã hoàn tất nhận xét LMS, chưa nhận xét Zalo",
                 )
                 self.assertEqual(row["instructor_note"], "Chưa nội dung bài học")
                 self.assertEqual(row["khoi"], "Coding")

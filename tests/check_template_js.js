@@ -2071,7 +2071,7 @@ async function checkWeeklyHistoryAndCsvExport() {
       vm.runInContext(
         `normalizeZaloStatusDisplay('❌ Chưa tìm thấy trong khoảng đã kiểm chứng – Có minh chứng')`,
         harness.context,
-      ) === 'Chưa nhận xét',
+      ) === '❌ Chưa nhận xét',
     'resolveDashboardRowIssueDescription and normalizeZaloStatusDisplay must normalize legacy issue strings and not-found Zalo status',
   );
   const clipboardCopied = await vm.runInContext(
@@ -2272,7 +2272,7 @@ async function checkWeeklyHistoryAndCsvExport() {
   const liveRowStatusTexts = liveRowStatusCell.children.map(ch => ch.textContent || ch.innerText || '').join(' | ');
   assertFrontend(
     liveRowStatusTexts.includes('LMS: ✅ Đã nộp LMS') &&
-      liveRowStatusTexts.includes('Đánh giá: ⏳ Đã hoàn tất nhận xét LMS, chưa nhận xét Zalo') &&
+      liveRowStatusTexts.includes('Đánh giá: ❌ Đã hoàn tất nhận xét LMS, chưa nhận xét Zalo') &&
       liveRowStatusTexts.includes('Vấn đề: [LMS] Chưa ghi nội dung bài học') &&
       liveRowStatusTexts.includes('Giải trình GV: Chưa nội dung bài học'),
     'Dashboard status cell must display LMS status, evaluation_status, issue_description, and instructor_note',
@@ -3061,16 +3061,16 @@ async function checkPhase57FrontendHardening() {
   assertFrontend(
     spckFrontendCheck.failIsFailed === true &&
       spckFrontendCheck.failSev === 'FAIL' &&
-      spckFrontendCheck.failEval === '❌ Chưa nộp SPCK trên LMS' &&
+      spckFrontendCheck.failEval === '⚠️ Chưa nộp SPCK trên LMS' &&
       spckFrontendCheck.noteIsFailed === false &&
       spckFrontendCheck.noteSev === 'NOTE' &&
       spckFrontendCheck.noteEval === '✅ Đã hoàn thành nhận xét' &&
       spckFrontendCheck.commentMissingIsFailed === true &&
       spckFrontendCheck.commentMissingSev === 'FAIL' &&
-      spckFrontendCheck.commentMissingEval === '❌ SPCK chưa có nhận xét trên LMS' &&
+      spckFrontendCheck.commentMissingEval === '⚠️ SPCK chưa có nhận xét trên LMS' &&
       spckFrontendCheck.phase65NotesIsFailed === false &&
       spckFrontendCheck.phase65NotesSev === 'NOTE',
-    'DEC-042 & Phase 6.5: LMS_SPCK_MISSING / LMS_SPCK_COMMENT_MISSING must resolve to FAIL, while LMS_SPCK_NOTE / LMS_SUMMARY_NOTE / LMS_COMMENT_NOTE / LMS_ATTENDANCE_CONFLICT_NOTE must resolve to NOTE',
+    'DEC-042 & Phase 6.5: LMS_SPCK_MISSING / LMS_SPCK_COMMENT_MISSING must resolve to FAIL with ⚠️ warning eval status, while LMS_SPCK_NOTE / LMS_SUMMARY_NOTE / LMS_COMMENT_NOTE / LMS_ATTENDANCE_CONFLICT_NOTE must resolve to NOTE',
   );
   const attendanceReportingCheck = vm.runInContext(
     `(() => {
@@ -3093,13 +3093,51 @@ async function checkPhase57FrontendHardening() {
       row.lms_comments.status = 'UNVERIFIED'; row.lms_spck.status = 'UNVERIFIED';
       const unknown = !resolveRowIsFailed(row) && resolveDashboardRowEvaluationStatus(row).includes('Chờ xác minh');
       row.evidence_state = 'NOT_FOUND_VERIFIED';
-      const missingZalo = resolveRowIsFailed(row);
+      const missingZalo = resolveRowIsFailed(row)
+        && resolveDashboardRowEvaluationStatus({
+          status: '❌ Chưa tìm thấy trong khoảng đã kiểm chứng',
+          evidence_state: 'NOT_FOUND_VERIFIED',
+          lms_status: 'Chưa quét LMS',
+        }) === '❌ Chưa hoàn thành nhận xét';
       row.evidence_state = 'SUBMITTED_VERIFIED'; row.lms_comments.status = 'MISSING';
-      row.evaluation_status = '✅ Đã hoàn thành nhận xét';
+      row.evaluation_status = '❌ Chưa nộp SPCK trên LMS';
       const missingLms = resolveRowIsFailed(row)
-        && resolveDashboardRowEvaluationStatus(row) === '⏳ Đã hoàn tất nhận xét Zalo, chưa nhận xét LMS';
+        && resolveDashboardRowEvaluationStatus(row) === '⏳ Đã hoàn tất nhận xét Zalo, chưa nhận xét LMS'
+        && resolveDashboardRowEvaluationStatus({
+          status: '✅ Đã báo cáo',
+          evidence_state: 'SUBMITTED_VERIFIED',
+          lms_comments: { status: 'MISSING', submitted_count: 2 },
+          lms_spck: { status: 'MISSING', submitted_count: 0, attended_count: 4, exempt_count: 0 },
+          lms_quality_issues: [{ code: 'LMS_SPCK_MISSING', severity: 'FAIL', text: '[LMS] Chưa nộp SPCK (4/4 HS)' }],
+        }) === '⏳ Chờ xác minh điểm danh/nhận xét LMS'
+        && resolveDashboardRowEvaluationStatus({
+          status: '✅ Đã báo cáo',
+          evidence_state: 'SUBMITTED_VERIFIED',
+          lms_status: '⚠️ Cần kiểm tra LMS',
+          evaluation_status: '❌ Chưa nộp SPCK trên LMS',
+        }) === '⚠️ Đã nhận xét Zalo, LMS cần kiểm tra';
+      const searchEl = document.getElementById('searchInput');
+      if (searchEl) searchEl.value = '';
+      renderZaloResults([
+        {
+          group: 'VT-SPCK-WARN-01',
+          person: 'GV SPCK',
+          status: '✅ Đã báo cáo',
+          evidence_state: 'SUBMITTED_VERIFIED',
+          lms_status: '✅ Đã nộp LMS',
+          lms_quality_issues: [
+            { code: 'LMS_SPCK_MISSING', severity: 'FAIL', text: '[LMS] Chưa nộp SPCK (4/4 HS)' },
+          ],
+          scan_target: { week: 42, year: 2026, class_code: 'VT-SPCK-WARN-01', lesson: '12', class_date: '18/10/2026', class_date_iso: '2026-10-18' },
+        },
+      ], true, { snapshotId: 88, periodKey: '2026-W42' });
+      const spckRow = document.getElementById('results-table').children[0];
+      const spckIssueChild = spckRow && spckRow.children[3]
+        ? spckRow.children[3].children.find(ch => String(ch.textContent || '').startsWith('Vấn đề:'))
+        : null;
+      const spckAmberUi = Boolean(spckIssueChild && String(spckIssueChild.className || '').includes('text-amber-700'));
       const manual = !hasRowSpckMissingFail({qc_issue_note: '[LMS] Chưa nộp SPCK (8/8 HS)'});
-      return complete && exempt && unknown && missingZalo && missingLms && manual;
+      return complete && exempt && unknown && missingZalo && missingLms && spckAmberUi && manual;
     })()`,
     harness.context,
   );

@@ -14,6 +14,7 @@ from services.report_status import (
     CATEGORY_DONE,
     CATEGORY_EXEMPT,
     CATEGORY_LATE,
+    CATEGORY_MISSING,
     CATEGORY_NOT_SCANNED,
     CATEGORY_REVIEW,
     LESSON_14_EXEMPTION,
@@ -105,15 +106,24 @@ def normalize_zalo_status_text(
     item: dict[str, Any] | None = None,
     st: dict[str, Any] | None = None,
 ) -> str:
-    """Normalize Zalo status strings, enforcing Lesson 14 exemption, pending deadline (⏳), and concise 'Chưa nhận xét' display."""
+    """Normalize Zalo status strings, enforcing Lesson 14 exemption, pending deadline (⏳), and '❌ Chưa nhận xét' display."""
     if item is not None and is_lesson_14(item, st):
         return LESSON_14_STATUS
     text = " ".join(str(status or "").split()).strip()
-    if text in {
+    m_dry_nf = re.match(
+        r"^(\[(?:DRY-RUN|DRY_RUN)\]\s*)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    nf_prefix = m_dry_nf.group(1) if m_dry_nf else ""
+    nf_rest = text[len(nf_prefix) :].strip() if nf_prefix else text
+    if nf_rest in {
         "❌ Chưa tìm thấy trong khoảng đã kiểm chứng – Có minh chứng",
         "❌ Chưa tìm thấy trong khoảng đã kiểm chứng",
+        "Chưa nhận xét",
+        "❌ Chưa nhận xét",
     }:
-        return "Chưa nhận xét"
+        return f"{nf_prefix}❌ Chưa nhận xét"
     if isinstance(item, dict):
         ev = item.get("evidence")
         ctx = ev.get("date_context") if isinstance(ev, dict) else None
@@ -181,9 +191,21 @@ def build_weekly_summary_csv(
             or "chưa nhận xét zalo" in eval_status.lower()
         ):
             eval_status = ""
-        if (not eval_status or "lms_comments" in row or "lms_comments" in st) and (
-            zalo_status or lms_status
-        ):
+        if (
+            not eval_status
+            or "lms_comments" in row
+            or "lms_comments" in st
+            or eval_status
+            in {
+                "❌ Chưa nộp SPCK trên LMS",
+                "❌ SPCK chưa có nhận xét trên LMS",
+                "⚠️ Chưa nộp SPCK trên LMS",
+                "⚠️ SPCK chưa có nhận xét trên LMS",
+            }
+            or row_category == CATEGORY_MISSING
+            or has_spck_missing_fail(row)
+            or has_spck_comment_missing_fail(row)
+        ) and (zalo_status or lms_status):
             eval_status = _resolve_row_evaluation_status(
                 zalo_status=zalo_status,
                 lms_status=lms_status,
@@ -480,6 +502,10 @@ def _resolve_row_evaluation_status(
     if row is not None:
         lms_status = resolve_lms_status(row, lms_status)
     clean_raw = str(raw_evaluation_status or "").strip()
+    if clean_raw == "❌ Chưa nộp SPCK trên LMS":
+        clean_raw = "⚠️ Chưa nộp SPCK trên LMS"
+    elif clean_raw == "❌ SPCK chưa có nhận xét trên LMS":
+        clean_raw = "⚠️ SPCK chưa có nhận xét trên LMS"
     row_category = category or categorize_row(
         {
             **(dict(row) if isinstance(row, Mapping) else {}),
@@ -492,43 +518,59 @@ def _resolve_row_evaluation_status(
     ):
         clean_raw = ""
     lms_failed_or_warn = lms_status.startswith(("❌", "⚠️"))
+    if lms_failed_or_warn and clean_raw in {
+        "⚠️ Chưa nộp SPCK trên LMS",
+        "⚠️ SPCK chưa có nhận xét trên LMS",
+    }:
+        clean_raw = ""
     zalo_done = row_category in {CATEGORY_DONE, CATEGORY_LATE, CATEGORY_EXEMPT}
-    zalo_review = row_category == CATEGORY_REVIEW and str(zalo_status or "").strip() not in {
-        "",
-        "Chưa xác định",
-    }
+    zalo_review = row_category == CATEGORY_REVIEW and (
+        str(zalo_status or "").strip() not in {"", "Chưa xác định"}
+        or bool(
+            row is not None
+            and str(
+                row.get("evidence_state")
+                or row.get("bcnb_update_state")
+                or row.get("write_status")
+                or ""
+            ).strip()
+        )
+    )
     lms_done = not lms_failed_or_warn and (
         lms_status.startswith("✅")
         or ("Dry-run LMS" in lms_status)
         or ("Chờ tích BCNB" in lms_status)
         or (lms_status in {"", "Chưa quét LMS"} and bool(nx_lms_checked))
     )
-    if row is not None and has_spck_missing_fail(row) and zalo_done:
-        return "❌ Chưa nộp SPCK trên LMS"
-    if (
-        row is not None
-        and has_spck_comment_missing_fail(row)
-        and zalo_done
-        and not lms_failed_or_warn
-    ):
-        return "❌ SPCK chưa có nhận xét trên LMS"
+    if row_category == CATEGORY_MISSING:
+        if lms_done:
+            return "❌ Đã hoàn tất nhận xét LMS, chưa nhận xét Zalo"
+        if clean_raw.startswith("❌"):
+            return clean_raw
+        return "❌ Chưa hoàn thành nhận xét"
     if row is not None and zalo_done:
         raw_st = row.get("scan_target")
         st = raw_st if isinstance(raw_st, Mapping) else {}
         comments = row.get("lms_comments", st.get("lms_comments"))
         spck = row.get("lms_spck", st.get("lms_spck"))
         attendance = row.get("lms_attendance", st.get("lms_attendance"))
-        if isinstance(comments, Mapping):
-            if comments.get("status") == "UNVERIFIED":
-                return "⏳ Chờ xác minh điểm danh/nhận xét LMS"
-            if comments.get("status") == "EXEMPT":
-                if isinstance(attendance, Mapping) and attendance.get("status") == "EXEMPT":
-                    return "✅ Không áp dụng LMS (toàn bộ học viên nghỉ)"
-            if comments.get("status") in {"COMPLETE", "REVIEW", "EXEMPT"}:
-                clean_raw = ""
+        comments_status = comments.get("status") if isinstance(comments, Mapping) else None
+        if comments_status == "UNVERIFIED" or lms_status == "⏳ Chờ xác minh điểm danh/nhận xét LMS":
+            return "⏳ Chờ xác minh điểm danh/nhận xét LMS"
+        if comments_status == "EXEMPT":
+            if isinstance(attendance, Mapping) and attendance.get("status") == "EXEMPT":
+                return "✅ Không áp dụng LMS (toàn bộ học viên nghỉ)"
+        if comments_status in {"COMPLETE", "MISSING", "REVIEW", "EXEMPT"}:
+            clean_raw = ""
+        if comments_status != "MISSING" and not lms_failed_or_warn:
+            if has_spck_missing_fail(row):
+                return "⚠️ Chưa nộp SPCK trên LMS"
+            if has_spck_comment_missing_fail(row):
+                return "⚠️ SPCK chưa có nhận xét trên LMS"
         if (
             isinstance(spck, Mapping)
             and spck.get("status") == "UNVERIFIED"
+            and comments_status != "MISSING"
             and not lms_failed_or_warn
         ):
             return "⏳ Chờ xác minh SPCK trên LMS"

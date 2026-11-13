@@ -124,7 +124,7 @@ class ReportIssueDisplayTests(unittest.TestCase):
         row = report_row("SYNTH-CSA03", issues)
         self.assertEqual(_split_display_issues(_resolve_row_issue_description(row, st={})), issues)
 
-    def test_email_has_one_bullet_per_issue_and_selective_red_emphasis(self):
+    def test_email_has_one_bullet_per_issue_and_selective_warning_or_red_emphasis(self):
         rows = [
             report_row("SYNTH-CSA03", [COMMENT, MISSING]),
             report_row("SYNTH-ROB-ARMI12", PRODUCT_NOTES),
@@ -141,8 +141,111 @@ class ReportIssueDisplayTests(unittest.TestCase):
         parsed.feed(package["html_table"])
         self.assertEqual(parsed.items, [COMMENT, MISSING, *PRODUCT_NOTES])
         red_items = [item for item, style in zip(parsed.items, parsed.styles) if "#b91c1c" in style]
-        self.assertEqual(red_items, [MISSING])
+        warn_items = [item for item, style in zip(parsed.items, parsed.styles) if "#b45309" in style]
+        self.assertEqual(red_items, [])
+        self.assertEqual(warn_items, [MISSING])
         self.assertNotIn("background:#fef2f2", package["html_table"])
+
+    def test_zalo_missing_is_red_error_while_spck_missing_and_comment_missing_are_warnings_in_email(
+        self,
+    ):
+        spck_missing_row = {
+            "class_code": "SYNTH-CSA03",
+            "teacher": "Giảng viên A",
+            "lesson": "12",
+            "class_date": "08/11/2026",
+            "zalo_status": "✅ Đã nộp – Có minh chứng",
+            "lms_status": "✅ Đã nhận xét 4/4 HS đi học",
+            "lms_quality_issues": [
+                {
+                    "code": "LMS_SPCK_MISSING",
+                    "severity": "FAIL",
+                    "text": "[LMS] Chưa nộp SPCK (4/4 HS)",
+                }
+            ],
+        }
+        spck_comment_missing_row = {
+            "class_code": "SYNTH-GB42-HB",
+            "teacher": "Giảng viên B",
+            "lesson": "13",
+            "class_date": "04/11/2026",
+            "zalo_status": "✅ Đã nộp – Có minh chứng",
+            "lms_status": "✅ Đã nhận xét 4/4 HS đi học · 1 HS nghỉ miễn",
+            "lms_quality_issues": [
+                {
+                    "code": "LMS_SUMMARY_NOTE",
+                    "severity": "NOTE",
+                    "text": "[LMS] Chưa ghi nội dung bài học",
+                },
+                {
+                    "code": "LMS_SPCK_COMMENT_MISSING",
+                    "severity": "FAIL",
+                    "text": "[LMS] SPCK chưa có nhận xét (4/4 HS)",
+                },
+            ],
+        }
+        zalo_missing_and_spck_row = {
+            "class_code": "SYNTH-ROB-ARMI12",
+            "teacher": "Giảng viên C",
+            "lesson": "13",
+            "class_date": "06/11/2026",
+            "zalo_status": "❌ Chưa tìm thấy trong khoảng đã kiểm chứng – Có minh chứng",
+            "lms_status": "✅ Đã nhận xét 4/4 HS đi học",
+            "evaluation_status": "⚠️ Đã hoàn tất nhận xét LMS, Zalo cần kiểm tra",
+            "lms_quality_issues": [
+                {
+                    "code": "LMS_SUMMARY_NOTE",
+                    "severity": "NOTE",
+                    "text": "[LMS] Chưa ghi nội dung bài học",
+                },
+                {
+                    "code": "LMS_SPCK_COMMENT_MISSING",
+                    "severity": "FAIL",
+                    "text": "[LMS] SPCK chưa có nhận xét (4/4 HS)",
+                },
+                "[Zalo] Chưa gửi báo cáo nhận xét trên nhóm Zalo",
+            ],
+        }
+        f1 = _prepare_email_row_fields(1, spck_missing_row)
+        f2 = _prepare_email_row_fields(2, spck_comment_missing_row)
+        f3 = _prepare_email_row_fields(3, zalo_missing_and_spck_row)
+        self.assertEqual(f1["evaluation_status"], "⚠️ Chưa nộp SPCK trên LMS")
+        self.assertEqual(f2["evaluation_status"], "⚠️ SPCK chưa có nhận xét trên LMS")
+        self.assertEqual(f3["zalo_status"], "❌ Chưa nhận xét")
+        self.assertEqual(f3["evaluation_status"], "❌ Đã hoàn tất nhận xét LMS, chưa nhận xét Zalo")
+
+        package = build_failed_classes_email_package(
+            week=45,
+            year=2026,
+            failed_rows=[spck_missing_row, spck_comment_missing_row, zalo_missing_and_spck_row],
+            total_rows_count=46,
+            selected_job_id=501,
+            recipients=["quangda@mindx.net.vn"],
+        )
+        html_tbl = package["html_table"]
+        self.assertIn("color:#b91c1c;font-weight:700;\">❌ Chưa nhận xét</td>", html_tbl)
+        self.assertIn(
+            "color:#b91c1c;font-weight:700;\">❌ Đã hoàn tất nhận xét LMS, chưa nhận xét Zalo</td>",
+            html_tbl,
+        )
+        self.assertIn("color:#b45309;font-weight:600;\">⚠️ Chưa nộp SPCK trên LMS</td>", html_tbl)
+        self.assertIn(
+            "color:#b45309;font-weight:600;\">⚠️ SPCK chưa có nhận xét trên LMS</td>",
+            html_tbl,
+        )
+        parsed = IssueListParser()
+        parsed.feed(html_tbl)
+        red_items = [item for item, style in zip(parsed.items, parsed.styles) if "#b91c1c" in style]
+        warn_items = [item for item, style in zip(parsed.items, parsed.styles) if "#b45309" in style]
+        self.assertEqual(red_items, ["[Zalo] Chưa gửi báo cáo nhận xét trên nhóm Zalo"])
+        self.assertEqual(
+            warn_items,
+            [
+                "[LMS] Chưa nộp SPCK (4/4 HS)",
+                "[LMS] SPCK chưa có nhận xét (4/4 HS)",
+                "[LMS] SPCK chưa có nhận xét (4/4 HS)",
+            ],
+        )
 
     def test_html_escapes_user_text_and_handles_empty_issues(self):
         row = report_row("SYNTH-CSA03", [])

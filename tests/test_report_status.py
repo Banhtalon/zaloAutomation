@@ -1077,8 +1077,8 @@ class ReportStatusSingleSourceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(should_sync_outage)
         self.assertEqual(effective_outage, [d2_note])
 
-        # DEC-042: LMS_SPCK_MISSING (0/N) is FAIL (is_failed=True, evaluation_status='❌ Chưa nộp SPCK trên LMS');
-        # LMS_SPCK_NOTE (partial / sub-component reminder) is NOTE (is_failed=False)
+        # DEC-042 / DEC-046: LMS_SPCK_MISSING (0/N) stays included in manager email (is_failed=True)
+        # as a warning ('⚠️ Chưa nộp SPCK trên LMS'); LMS_SPCK_NOTE is NOTE (is_failed=False)
         from repositories.report_repository import _resolve_row_evaluation_status
         from services.report_status import (
             ISSUE_CODE_LMS_SPCK_MISSING,
@@ -1114,7 +1114,7 @@ class ReportStatusSingleSourceTests(unittest.IsolatedAsyncioTestCase):
                 row=row_spck_fail,
                 category=CATEGORY_EXEMPT,
             ),
-            "❌ Chưa nộp SPCK trên LMS",
+            "⚠️ Chưa nộp SPCK trên LMS",
         )
 
         row_spck_note = {

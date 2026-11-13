@@ -1,7 +1,7 @@
 # KẾ HOẠCH CHI TIẾT & TIẾN ĐỘ NÂNG CẤP DỰ ÁN (UPGRADE PLAN & PROGRESS)
 
-**Cập nhật lần cuối:** `2026-11-12 21:55 +07:00`
-**Trạng thái hiện tại:** Đã hoàn tất **Phase 0 → Phase 3.2 (`45/45` ✅)**, hoàn tất **Wave 4 (Phase 4.0 → Phase 4.4: `25/25` ✅ — Kiểm định chất lượng nội dung LMS/Zalo, Tự động ghi `Mô tả vấn đề` lên Teaching & Bảng Email Quản lý 9 cột)**, hoàn tất **Wave 5 (Phase 5.0 → 5.8: `59/59` ✅ — Hardening toàn diện luồng kiểm tra báo cáo)**, hoàn tất **Phase 6.1 (`7/7` ✅ — Kiểm định Nộp Sản Phẩm Cuối Khóa SPCK Buổi 12, 13, 14 & Hotfix GraphQL/PII `DEC-042`)**, hoàn tất **Phase 6.2 → 6.4 (`14/14` ✅ Source/local đạt kiểm chứng)**, và hoàn tất **Phase 6.5 (`6/6` ✅ Source/local đạt kiểm chứng — Chuẩn hóa quy tắc QC `FAIL` vs `NOTE`, Phễu 2 tầng AI nhận xét LMS khử PII, làm rõ SPCK/Robotics & hoãn buổi học chưa kết thúc `DEC-045`)**.
+**Cập nhật lần cuối:** `2026-11-13 12:10 +07:00`
+**Trạng thái hiện tại:** Đã hoàn tất **Phase 0 → Phase 3.2 (`45/45` ✅)**, hoàn tất **Wave 4 (Phase 4.0 → Phase 4.4: `25/25` ✅ — Kiểm định chất lượng nội dung LMS/Zalo, Tự động ghi `Mô tả vấn đề` lên Teaching & Bảng Email Quản lý 9 cột)**, hoàn tất **Wave 5 (Phase 5.0 → 5.8: `59/59` ✅ — Hardening toàn diện luồng kiểm tra báo cáo)**, hoàn tất **Phase 6.1 (`7/7` ✅ — Kiểm định Nộp Sản Phẩm Cuối Khóa SPCK Buổi 12, 13, 14 & Hotfix GraphQL/PII `DEC-042`)**, hoàn tất **Phase 6.2 → 6.5 (`20/20` ✅ Source/local đạt kiểm chứng)**, và hoàn tất **Phase 6.6 (`4/4` ✅ Source/local đạt kiểm chứng — Phân cấp lỗi đỏ `❌ Chưa nhận xét` Zalo & cảnh báo vàng `⚠️` SPCK trong Email Quản lý / Dashboard `DEC-046`)**.
 
 ---
 
@@ -36,6 +36,7 @@
 | **Phase 6.3** | **Miễn SPCK khóa PTB/CSB buổi 12–14, DEC-044** | P1 | ✅ Source/local đạt kiểm chứng | `4/4` |
 | **Phase 6.4** | **Loại cảnh báo lặp và làm gọn mô tả vấn đề trong email/báo cáo** | P1 | ✅ Source/local đạt kiểm chứng | `4/4` |
 | **Phase 6.5** | **Chuẩn hóa quy tắc QC (`FAIL` vs `NOTE`), Phễu 2 tầng AI nhận xét LMS, làm rõ SPCK & hoãn buổi học tương lai** | P0 | ✅ Source/local đạt kiểm chứng | `6/6` |
+| **Phase 6.6** | **Phân cấp lỗi đỏ `❌ Chưa nhận xét` Zalo & cảnh báo vàng `⚠️` SPCK trong Email Quản lý (`DEC-046`)** | P1 | ✅ Source/local đạt kiểm chứng | `4/4` |
 
 ### Kế hoạch & Tiến độ 6.5 (AI tự động tích `[x]` khi xong từng phần)
 

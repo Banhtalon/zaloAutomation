@@ -150,7 +150,7 @@ class AttendanceReportingTests(unittest.TestCase):
         row["lms_spck"]["status"] = "MISSING"
         self.assertTrue(is_failed(row))
         evaluation = _resolve_row_evaluation_status(zalo_status=row["status"], lms_status=row["lms_status"], row=row)
-        self.assertEqual(evaluation, "❌ Chưa nộp SPCK trên LMS")
+        self.assertEqual(evaluation, "⚠️ Chưa nộp SPCK trên LMS")
 
     def test_unknown_spck_does_not_hide_a_verified_missing_comment(self):
         row = completed_row()
@@ -160,6 +160,59 @@ class AttendanceReportingTests(unittest.TestCase):
         evaluation = _resolve_row_evaluation_status(zalo_status=row["status"], lms_status=row["lms_status"], row=row)
         self.assertIn("chưa nhận xét LMS", evaluation)
         self.assertNotIn("Chờ xác minh SPCK", evaluation)
+        for stale_spck_eval in (
+            "❌ Chưa nộp SPCK trên LMS",
+            "❌ SPCK chưa có nhận xét trên LMS",
+            "⚠️ Chưa nộp SPCK trên LMS",
+            "⚠️ SPCK chưa có nhận xét trên LMS",
+        ):
+            stale_row = dict(row, evaluation_status=stale_spck_eval)
+            self.assertEqual(
+                _prepare_email_row_fields(1, stale_row)["evaluation_status"],
+                "⏳ Đã hoàn tất nhận xét Zalo, chưa nhận xét LMS",
+            )
+            self.assertIn(
+                "⏳ Đã hoàn tất nhận xét Zalo, chưa nhận xét LMS",
+                build_weekly_summary_csv([stale_row]),
+            )
+
+        incomplete_counts_row = {
+            "class_code": "VT-CSA03",
+            "lesson": "12",
+            "class_date": "08/11/2026",
+            "teacher": "Nguyễn Văn Mơ",
+            "status": "✅ Đã báo cáo",
+            "evidence_state": "SUBMITTED_VERIFIED",
+            "lms_comments": {"status": "MISSING", "submitted_count": 2},
+            "lms_spck": {"status": "MISSING", "submitted_count": 0, "attended_count": 4, "exempt_count": 0},
+            "lms_quality_issues": [{"code": "LMS_SPCK_MISSING", "severity": "FAIL", "text": "[LMS] Chưa nộp SPCK (4/4 HS)"}],
+        }
+        self.assertEqual(
+            _resolve_row_evaluation_status(
+                zalo_status=incomplete_counts_row["status"],
+                lms_status="Chưa quét LMS",
+                row=incomplete_counts_row,
+            ),
+            "⏳ Chờ xác minh điểm danh/nhận xét LMS",
+        )
+        self.assertEqual(
+            _prepare_email_row_fields(1, incomplete_counts_row)["evaluation_status"],
+            "⏳ Chờ xác minh điểm danh/nhận xét LMS",
+        )
+        warn_lms_row = {
+            "class_code": "VT-CSA03",
+            "lesson": "12",
+            "class_date": "08/11/2026",
+            "teacher": "Nguyễn Văn Mơ",
+            "status": "✅ Đã báo cáo",
+            "evidence_state": "SUBMITTED_VERIFIED",
+            "lms_status": "⚠️ Cần kiểm tra LMS",
+            "evaluation_status": "❌ Chưa nộp SPCK trên LMS",
+        }
+        self.assertEqual(
+            _prepare_email_row_fields(1, warn_lms_row)["evaluation_status"],
+            "⚠️ Đã nhận xét Zalo, LMS cần kiểm tra",
+        )
 
     def test_sanitizer_transports_current_counts_but_never_invents_fallback_counts(self):
         row = completed_row()
