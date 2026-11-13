@@ -4,6 +4,15 @@ Tài liệu này ghi lại toàn bộ quá trình hình thành, phát triển ki
 
 ---
 
+## [2026-11-13] — Chuẩn hóa nhánh `main` trên GitHub & Viết lại `README.md` chuẩn đẹp
+
+- **Chuẩn hóa nhánh mặc định `main`**:
+  - Đổi tên nhánh mặc định từ `chore/adopt-qq-ai-workflow-v9` sang `main` đồng bộ trên cả GitHub (`origin/main`, `origin/HEAD -> origin/main`) và máy cục bộ.
+- **Nâng cấp toàn diện `README.md`**:
+  - Cập nhật trang chủ repository trên GitHub với huy hiệu kỹ thuật (Python 3.14, FastAPI, Playwright, SQLite, Gemini, `719` tests, `78.9%` branch coverage), tổng quan 4 luồng tính năng mới nhất (Quét Zalo + Kiểm định LMS/SPCK khử PII, Báo cáo & Email Quản lý, Tick LMS, Google Form), sơ đồ kiến trúc `mermaid`, cấu trúc thư mục, hướng dẫn khởi chạy nhanh và nguyên tắc an toàn Fail-Closed (tuyệt đối không chứa dữ liệu nội bộ/nhạy cảm).
+- **Tệp thay đổi (3 files)**: `CHANGELOG.md`, `PROJECT_STATE.md`, `README.md`.
+- **Bằng chứng kiểm chứng (`[FAST-TRACK]`)**: `git diff --check` exit `0`, `scripts.phase9a_audit` exit `0` (`secrets=0`), kiểm tra allowlist 3 file sạch (`outside-mismatch=0`).
+
 ## [2026-11-13] — Tinh gọn tài liệu điều phối & snapshot trạng thái dự án (AGENTS.md, GEMINI.md, HANDOFF.md, PROJECT_STATE.md)
 
 - **Loại bỏ mục lỗi thời & trùng lặp (`AGENTS.md`, `GEMINI.md`, `HANDOFF.md`)**:

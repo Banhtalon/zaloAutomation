@@ -13,13 +13,13 @@
 | Kiểm định chất lượng LMS, SPCK & Ghi chú QC Teaching | Đã triển khai: Tier-1 Bulk GraphQL + Phễu 2 tầng AI nhận xét LMS khử PII, kiểm định SPCK Buổi 12–14 theo điểm danh (miễn PTB/CSB `DEC-044`, quy tắc Robotics `DEC-045`), tự động hợp nhất & ghi `Mô tả vấn đề (TE/TF/QC)` có read-back (`DEC-038`) |
 | Báo cáo tuần, Xuất CSV lỗi & Email Quản lý | Đã triển khai: bảng 9 cột, lỗi thiếu Zalo mức đỏ nặng nhất (`❌ Chưa nhận xét`, `#dc2626` bọc `<span>` tương thích Webmail BizFly Cloud), cảnh báo vàng `⚠️` (`#b45309`) cho SPCK thiếu nộp/thiếu nhận xét (`DEC-046`), khóa cứng `MANAGER_EMAIL_ALLOWLIST` |
 | Tick LMS tự động & Nộp Google Form | Đã triển khai: quét Web LMS lập kế hoạch chọn từng lớp (`selection_digest`), lấy học viên trực tiếp từ LMS cho Google Form kèm idempotency & ảnh bằng chứng ẩn danh |
-| Quy trình điều phối AI & Đồng bộ mã nguồn | Cơ chế 2 luồng `[FAST-TRACK]` / `[FULL GATE]` (`DEC-047`), GitHub (`origin`) là Source of Truth (`DEC-040`) |
+| Quy trình điều phối AI & Đồng bộ mã nguồn | Cơ chế 2 luồng `[FAST-TRACK]` / `[FULL GATE]` (`DEC-047`), nhánh chính chuẩn hóa `main` (`origin/main`) làm Source of Truth (`DEC-040`) |
 
 ## Các mốc cập nhật gần nhất
 
-- **2026-11-13 (Tinh gọn tài liệu & Áp dụng Cơ chế 2 Luồng AI — `DEC-047`, `[FAST-TRACK]`)**:
-  - Phân tách **Luồng Nhanh (`[FAST-TRACK]`)** cho chỉnh sửa nhỏ rủi ro thấp (UI, màu sắc, câu chữ, định dạng Email/CSV, tài liệu) và **Luồng Đầy đủ (`[FULL GATE]`)** cho thay đổi trình duyệt, ghi ngoài, DB schema, bảo mật/PII hoặc nghiệp vụ cốt lõi.
-  - Dọn bỏ các khối hướng dẫn cũ mâu thuẫn (`2026-10-03`) và nội dung lặp trong `AGENTS.md`, `GEMINI.md`, `HANDOFF.md`; rút gọn `PROJECT_STATE.md` đúng chuẩn snapshot ngắn (toàn bộ lịch sử trước đó được lưu giữ đầy đủ trong `CHANGELOG.md` và `PROJECT_DECISIONS.md`).
+- **2026-11-13 (Chuẩn hóa nhánh `main`, nâng cấp `README.md` & Tinh gọn tài liệu — `DEC-047`, `[FAST-TRACK]`)**:
+  - Đổi nhánh mặc định trên cả GitHub (`origin/main`) và máy cục bộ sang `main`, đồng thời viết lại `README.md` chuẩn GitHub (badges, 4 luồng tính năng hiện hành, sơ đồ kiến trúc Mermaid, cây thư mục, hướng dẫn cài đặt & an toàn vận hành không lộ dữ liệu nhạy cảm).
+  - Phân tách **Luồng Nhanh (`[FAST-TRACK]`)** và **Luồng Đầy đủ (`[FULL GATE]`)**; dọn sạch nội dung cũ mâu thuẫn trong `AGENTS.md`, `GEMINI.md`, `HANDOFF.md` và rút gọn `PROJECT_STATE.md` đúng vai trò snapshot ngắn.
 - **2026-11-13 (Phase 6.6 & Hotfix — Phân cấp lỗi đỏ Zalo `❌` vs cảnh báo vàng SPCK `⚠️`, `DEC-046`, `[FULL GATE]`)**:
   - Thiếu nhận xét Zalo (`CATEGORY_MISSING`) là lỗi đỏ cao nhất (`❌ Chưa nhận xét`, `❌ Đã hoàn tất nhận xét LMS, chưa nhận xét Zalo`); giữ `CATEGORY_MISSING` cho `NOT_FOUND_VERIFIED` kèm `write_status="FAILED_BEFORE_WRITE"` (`EVIDENCE_NOT_READY`), và bọc `<span style="color:#dc2626;font-weight:700;">` / `<span style="color:#b45309;font-weight:600;">` để hiển thị chuẩn trên BizFly Cloud Webmail (đã kiểm chứng trên `Job #500`, `719/719 PASS`, `Sol 6.1 high` `VERDICT: PASS`).
 - **2026-11-12 (Phase 6.5 — Chuẩn hóa FAIL/NOTE QC, Phễu 2 tầng AI nhận xét LMS khử PII & Hoãn buổi chưa kết thúc, `DEC-045`, `[FULL GATE]`)**:
