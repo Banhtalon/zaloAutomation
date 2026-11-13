@@ -4,6 +4,16 @@ Tài liệu này ghi lại toàn bộ quá trình hình thành, phát triển ki
 
 ---
 
+## [2026-11-13] — Thiết lập `.graphifyignore` chặn dữ liệu thật/session, ẩn `graphify-out/` & quét bản đồ AST `--code-only`
+
+- **Chặn dữ liệu thật, phiên trình duyệt & tạo tác runtime (`.graphifyignore`, `.gitignore`)**:
+  - Tạo `.graphifyignore` chặn độc lập toàn bộ `.env*`, `zalo_session/`, `*session*/`, `.locks/`, `*.db*`/`*.sqlite*`, `*_dump.json`, `.backups/`, `runtime/`, `evidence/`, `static/screenshots/`, `googleform_autosubmit/uploads/`, `temp_lms/`, `scratch/`, `.workflow-local/`, `venv/`, `.venv/` và `graphify-out/` (đạt `0` rò rỉ kể cả khi kiểm thử với `gitignore=False`).
+  - Bổ sung `graphify-out/` vào `.gitignore` (chuẩn hóa LF theo `.gitattributes`) để ẩn hoàn toàn kết quả quét cục bộ khỏi Git.
+- **Quét bản đồ mã nguồn cục bộ (`GRAPHIFY_BACKEND=none`, `--code-only`)**:
+  - Chạy `graphify extract . --code-only` và `graphify cluster-only .` với `GRAPHIFY_BACKEND=none` (`0` token LLM): lập chỉ mục AST `225` file mã nguồn (`4,847` nodes, `14,514` edges, `168` communities), xuất `graph.json`, `GRAPH_REPORT.md` và `graph.html` trong `graphify-out/`.
+- **Tệp thay đổi (4 files)**: `.gitignore`, `.graphifyignore`, `CHANGELOG.md`, `PROJECT_STATE.md`.
+- **Bằng chứng kiểm chứng (`[FAST-TRACK]`)**: `git diff --check` exit `0`, `venv\Scripts\python.exe -m scripts.phase9a_audit` exit `0` (`secrets=0`), `venv\Scripts\python.exe -m unittest tests.test_phase9a_audit` exit `0`, kiểm chứng `0` đường dẫn nhạy cảm/session trong `graphify-out/graph.json` & `manifest.json`.
+
 ## [2026-11-13] — Chuẩn hóa nhánh `main` trên GitHub & Viết lại `README.md` chuẩn đẹp
 
 - **Chuẩn hóa nhánh mặc định `main`**:

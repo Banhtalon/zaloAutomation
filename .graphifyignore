@@ -1,0 +1,65 @@
+# Secrets, credentials & environment files
+.env
+.env.*
+deploy/staging/.env
+*.bak
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cert
+*cookies*.json
+*cookies*.txt
+*storage_state*
+
+# Browser sessions, persistent profiles & inter-process locks
+zalo_session/
+*session*/
+.locks/
+*.lock
+
+# Live SQLite databases, WAL/SHM journals, dumps & local backups
+/database.db*
+/database.sqlite*
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+groups_dump.json
+jobs_dump.json
+*_dump.json
+.backups/
+
+# Runtime artifacts, student uploads, screenshots, evidence & scratch data
+runtime/
+evidence/
+static/screenshots/
+googleform_autosubmit/uploads/
+**/uploads/
+temp_lms/
+scratch/
+.workflow-local/
+*.log
+*.csv
+
+# Virtual environments, build/test caches & Graphify output
+graphify-out/
+venv/
+.venv/
+node_modules/
+__pycache__/
+*.py[cod]
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+coverage*.json
+htmlcov/
+.agents/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

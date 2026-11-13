@@ -17,6 +17,8 @@
 
 ## Các mốc cập nhật gần nhất
 
+- **2026-11-13 (Bản đồ mã nguồn Graphify cục bộ & chặn dữ liệu thật — `[FAST-TRACK]`)**:
+  - Thêm `.graphifyignore` chặn sạch session/DB/runtime/upload/secret, ẩn `graphify-out/` trong `.gitignore`, và dựng bản đồ AST cục bộ (`GRAPHIFY_BACKEND=none`, `--code-only`: `225` code files, `4,847` nodes, `14,514` edges, `168` communities, `0` rò rỉ dữ liệu thật).
 - **2026-11-13 (Chuẩn hóa nhánh `main`, nâng cấp `README.md` & Tinh gọn tài liệu — `DEC-047`, `[FAST-TRACK]`)**:
   - Đổi nhánh mặc định trên cả GitHub (`origin/main`) và máy cục bộ sang `main`, đồng thời viết lại `README.md` chuẩn GitHub (badges, 4 luồng tính năng hiện hành, sơ đồ kiến trúc Mermaid, cây thư mục, hướng dẫn cài đặt & an toàn vận hành không lộ dữ liệu nhạy cảm).
   - Phân tách **Luồng Nhanh (`[FAST-TRACK]`)** và **Luồng Đầy đủ (`[FULL GATE]`)**; dọn sạch nội dung cũ mâu thuẫn trong `AGENTS.md`, `GEMINI.md`, `HANDOFF.md` và rút gọn `PROJECT_STATE.md` đúng vai trò snapshot ngắn.
