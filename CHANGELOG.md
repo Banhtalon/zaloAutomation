@@ -4,6 +4,14 @@ Tài liệu này ghi lại toàn bộ quá trình hình thành, phát triển ki
 
 ---
 
+## [2026-11-13] — Quy trình AI: Áp dụng Cơ chế 2 Luồng Nhanh (`FAST-TRACK`) / Đầy đủ (`FULL GATE`) theo mức độ rủi ro (DEC-047)
+
+- **Tách quy trình kiểm chứng thành 2 luồng (`AGENTS.md`, `GEMINI.md`, `HANDOFF.md`, `PROJECT_DECISIONS.md`)**:
+  - **Luồng Nhanh (`FAST-TRACK`)**: Dành cho chỉnh sửa nhỏ về UI/CSS/HTML, màu sắc, câu chữ/nhãn hiển thị, định dạng Email/CSV, tài liệu hoặc fix cục bộ rủi ro thấp $\rightarrow$ chạy unit test mục tiêu + `node tests/check_template_js.js` (nếu chạm JS/HTML) + `ruff check` & `mypy` trên file thay đổi + `git diff --check`, miễn cổng `.\CHECK_QUALITY.ps1 -Isolated` đầy đủ và miễn Review độc lập `gpt-6.1-sol`.
+  - **Luồng Đầy đủ (`FULL GATE`)**: Giữ nguyên `.\CHECK_QUALITY.ps1 -Isolated` + Review độc lập `gpt-6.1-sol` đạt `PASS` đối với thay đổi tự động hóa trình duyệt (Zalo/LMS/Teaching/Form), ghi BCNB/Teaching, DB schema, bảo mật/PII, concurrency hoặc logic nghiệp vụ cốt lõi liên module.
+- **Tệp thay đổi (6 files)**: `AGENTS.md`, `CHANGELOG.md`, `GEMINI.md`, `HANDOFF.md`, `PROJECT_DECISIONS.md`, `PROJECT_STATE.md`.
+- **Bằng chứng kiểm chứng (`[FAST-TRACK]`)**: `git diff --check` exit `0`, kiểm tra allowlist 6 file tài liệu sạch (`outside-mismatch=0`).
+
 ## [2026-11-13] — Hotfix Phase 6.6: Giữ `CATEGORY_MISSING` cho `NOT_FOUND_VERIFIED` kèm `FAILED_BEFORE_WRITE` (`EVIDENCE_NOT_READY`) & bọc `<span>` màu đỏ `#dc2626` tương thích BizFly Cloud Webmail (DEC-046)
 
 - **Phân loại đúng `CATEGORY_MISSING` cho dữ liệu thật `Job #500` (`services/report_status.py`, `repositories/report_repository.py`, `services/report_email_service.py`, `static/js/jobs.js`)**:

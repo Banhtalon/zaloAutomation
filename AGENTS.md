@@ -60,12 +60,13 @@ mâu thuẫn, phải xác minh lại và nêu rõ tài liệu nào đã cũ.
   yêu cầu rõ ràng.
 - Với thay đổi có rủi ro lên dữ liệu/cấu hình, tạo backup phù hợp và kiểm tra
   khả năng khôi phục trước khi sửa.
-- Sau khi sửa, review diff và chạy gate tương xứng với rủi ro.
-- **GitHub là Source of Truth (`DEC-040`)**: Khi hoàn tất một tính năng hoặc
-  bản sửa lỗi và đã vượt qua đầy đủ các cổng kiểm chứng (`.\CHECK_QUALITY.ps1 -Isolated`
-  + Independent Review `PASS`), bắt buộc cập nhật `CHANGELOG.md` rõ ràng,
-  commit các file thuộc phạm vi task (tuyệt đối không stage `.env`, `database.db`,
-  secret hay dữ liệu nhạy cảm) và `git push` lên GitHub (`origin`).
+- Sau khi sửa, review diff và chạy gate tương xứng với rủi ro theo cơ chế **2 luồng (`DEC-047`)**.
+- **GitHub là Source of Truth (`DEC-040` & `DEC-047`)**: Khi hoàn tất một tính năng hoặc
+  bản sửa lỗi và đã vượt qua cổng kiểm chứng tương ứng của luồng đang áp dụng
+  (**Luồng Nhanh**: targeted tests + `check_template_js.js` + Ruff/Mypy; **Luồng Đầy đủ**:
+  `.\CHECK_QUALITY.ps1 -Isolated` + Independent Review `PASS`), bắt buộc cập nhật
+  `CHANGELOG.md` rõ ràng, commit các file thuộc phạm vi task (tuyệt đối không stage
+  `.env`, `database.db`, secret hay dữ liệu nhạy cảm) và `git push` lên GitHub (`origin`).
 
 ### Browser, external action hoặc production
 
@@ -114,8 +115,9 @@ Không dùng “toàn bộ test đã xanh” làm bằng chứng duy nhất cho 
 4. Chỉ append `PROJECT_DECISIONS.md` khi có quyết định kiến trúc, nghiệp vụ,
    an toàn hoặc quy trình có giá trị lâu dài.
 5. Không tuyên bố hoàn thành nếu còn tiêu chí `Done when` chưa đạt.
-6. Sau khi toàn bộ gate và review độc lập đạt `PASS`, commit rõ ràng các file
-   trong allowlist và `git push` lên GitHub (`origin`) theo `DEC-040`.
+6. Sau khi các gate của luồng áp dụng (`FAST-TRACK` hoặc `FULL GATE` theo `DEC-047`)
+   đạt `PASS`, commit rõ ràng các file trong allowlist và `git push` lên GitHub
+   (`origin`) theo `DEC-040`.
 
 ## Flow AI hiện hành — chuyển đổi 2026-10-03
 
@@ -127,10 +129,17 @@ Không dùng “toàn bộ test đã xanh” làm bằng chứng duy nhất cho 
 - Đây là cài đặt source/local; chưa có bằng chứng gọi Gemini/Luna thật hay nghiệm thu production. Không tạo task từ HEAD cũ khi workspace còn thay đổi chưa commit; giữ nguyên công việc đó và báo điều kiện còn thiếu. Commit/push vẫn cần yêu cầu rõ ràng của Owner.
 
 
-## Flow AI hiện hành — cập nhật 2026-11-04 (DEC-036 & DEC-040: Lead Thực Thi + Sol 6.1 Review + Changelog & Đồng Bộ GitHub + Báo Cáo Chuẩn Hàng Không)
+## Flow AI hiện hành — cập nhật 2026-11-13 (DEC-036, DEC-040 & DEC-047: Cơ Chế 2 Luồng Nhanh / Đầy Đủ + Đồng Bộ GitHub + Báo Cáo Chuẩn Hàng Không)
 
-1. **Điều phối & Thực thi (Lead)**: Lead tự thực hiện từng hạng mục trong phạm vi `allowlist` đã khóa.
-2. **Test**: Chạy unit test mục tiêu + `node tests/check_template_js.js` + `.\CHECK_QUALITY.ps1 -Isolated`.
-3. **Review độc lập (`Sol 6.1 high/xhigh`)**: Gọi `"<prompt>" | codex exec -m gpt-6.1-sol -c model_reasoning_effort="high" -s read-only -`. Nếu `NEEDS_FIX` -> sửa & re-verify cho tới `PASS`.
-4. **Changelog & GitHub Source of Truth (`DEC-040`)**: Cập nhật `CHANGELOG.md` và `PROJECT_STATE.md` rõ ràng, commit các file thuộc phạm vi task và `git push` lên GitHub (`origin`).
-5. **Báo cáo**: Phong cách "Chuẩn Hàng Không" (điện tín/telegram, súc tích, tối ưu token tối đa).
+1. **Phân loại luồng thực thi ngay đầu task (`DEC-047`)**:
+   - **Luồng Nhanh (`FAST-TRACK`)** — Áp dụng cho chỉnh sửa nhỏ, rủi ro thấp: giao diện (UI/CSS/HTML), màu sắc, câu chữ/nhãn hiển thị, định dạng Email/CSV, tài liệu, hoặc sửa nhỏ cục bộ không đụng vào điều khiển trình duyệt, ghi BCNB/Teaching, DB schema hay bảo mật/PII:
+     1. Lead tự sửa trong phạm vi `allowlist`.
+     2. Chạy gate mục tiêu nhanh: unit test liên quan + `node tests/check_template_js.js` (khi chạm JS/HTML) + `ruff check` & `mypy` trên các file Python thay đổi + `git diff --check`.
+     3. **Miễn** `.\CHECK_QUALITY.ps1 -Isolated` đầy đủ và **miễn** Review độc lập `gpt-6.1-sol` (trừ khi Owner yêu cầu riêng).
+   - **Luồng Đầy đủ (`FULL GATE`)** — Áp dụng cho thay đổi lớn hoặc rủi ro cao: tự động hóa trình duyệt (Zalo/LMS/Teaching/Form), thao tác ghi BCNB/Teaching, SQLite schema/migration, bảo mật/xác thực/khử PII, concurrency/lock, hoặc thay đổi logic nghiệp vụ cốt lõi liên module:
+     1. Lead tự sửa trong phạm vi `allowlist` (hoặc điều phối subagent khi Owner chỉ định).
+     2. Chạy đầy đủ: unit test mục tiêu + `node tests/check_template_js.js` + `.\CHECK_QUALITY.ps1 -Isolated` (`exit 0`).
+     3. Review độc lập (`Sol 6.1 high/xhigh`): Gọi `"<prompt>" | codex exec -m gpt-6.1-sol -c model_reasoning_effort="high" -s read-only -`. Nếu `NEEDS_FIX` -> sửa & re-verify cho tới `PASS`.
+   - Khi ranh giới rủi ro chưa rõ hoặc phát hiện ảnh hưởng sang luồng ghi/bảo mật, tự động nâng lên **Luồng Đầy đủ**.
+2. **Changelog & GitHub Source of Truth (`DEC-040`)**: Sau khi đạt gate của luồng tương ứng, cập nhật `CHANGELOG.md` và `PROJECT_STATE.md` rõ ràng, commit các file thuộc phạm vi task (tuyệt đối không stage `.env`, `database.db`, secret hay dữ liệu nhạy cảm) và `git push` lên GitHub (`origin`).
+3. **Báo cáo**: Phong cách "Chuẩn Hàng Không" (điện tín/telegram, súc tích, ghi rõ `[FAST-TRACK]` hay `[FULL GATE]`, tối ưu token tối đa).

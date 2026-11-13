@@ -50,9 +50,8 @@ kết quả tiếng Việt; Owner quyết định sản phẩm, chi phí, tài k
 nghiệm thu và phát hành.
 
 
-## Cập nhật Flow 2026-10-22 (DEC-036 — Chuẩn Hàng Không)
+## Cập nhật Flow 2026-11-13 (DEC-036, DEC-040 & DEC-047 — Cơ Chế 2 Luồng Chuẩn Hàng Không)
 
-1. **Lead** trực tiếp code từng hạng mục trong `UPGRADE_PROGRESS.md`.
-2. **Test**: Chạy unit test mục tiêu + `node tests/check_template_js.js` + `.\CHECK_QUALITY.ps1 -Isolated`.
-3. **Review độc lập**: `"<prompt>" | codex exec -m gpt-6.1-sol -c model_reasoning_effort="xhigh" -s read-only -`.
-4. **Báo cáo**: Phong cách điện tín / chuẩn hàng không (ngắn gọn, tối ưu token tối đa).
+1. **Luồng Nhanh (`FAST-TRACK`)** — Chỉnh sửa nhỏ (UI/CSS/HTML, màu sắc, câu chữ, định dạng Email/CSV, tài liệu, fix nhỏ cục bộ không chạm trình duyệt/ghi ngoài/DB/PII): chạy unit test mục tiêu + `node tests/check_template_js.js` (nếu có JS/HTML) + `ruff check` & `mypy` phạm vi hẹp; **miễn** `.\CHECK_QUALITY.ps1 -Isolated` và **miễn** review độc lập `gpt-6.1-sol`.
+2. **Luồng Đầy đủ (`FULL GATE`)** — Thay đổi lõi/rủi ro cao (trình duyệt Zalo/LMS/Teaching/Form, ghi BCNB, DB schema, bảo mật/PII, concurrency, nghiệp vụ lớn nhiều module): chạy unit test mục tiêu + `node tests/check_template_js.js` + `.\CHECK_QUALITY.ps1 -Isolated` + review độc lập `"<prompt>" | codex exec -m gpt-6.1-sol -c model_reasoning_effort="high" -s read-only -` đạt `PASS`.
+3. **Đồng bộ & Báo cáo**: Cập nhật `CHANGELOG.md` + `PROJECT_STATE.md`, commit trong `allowlist`, `git push` lên GitHub (`DEC-040`), và báo cáo phong cách điện tín / chuẩn hàng không (`[FAST-TRACK]` hoặc `[FULL GATE]`).
