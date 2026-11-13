@@ -1,57 +1,19 @@
 # Bàn giao hiện hành — Zalo Automation
 
-[Canonical v10](.ai-workflow/V10_CANONICAL_SPEC.md) là nguồn quy tắc flow AI.
-Yêu cầu hiện tại của Owner và ranh giới an toàn dự án trong [AGENTS.md](AGENTS.md)
-được ưu tiên. Đọc PROJECT_SUMMARY.md, PROJECT_STATE.md và PROJECT_DECISIONS.md
-trước source. DEC-027 là lịch sử gỡ flow; Owner yêu cầu chuyển lại ngày 2026-10-03.
+Điểm vào điều phối hiện hành của dự án tuân theo **[AGENTS.md](AGENTS.md)** (`DEC-036`, `DEC-040`, `DEC-047`), với yêu cầu trực tiếp của Owner và ranh giới an toàn Zalo/BCNB/LMS/Form luôn có độ ưu tiên cao nhất.
 
-## Trạng thái cài đặt
+## Thứ tự đọc khi bắt đầu phiên mới
 
-- Nguồn main: 3056879dc47d9a3b2846b99c1178b9fd8b553b8f; canonical 10.1.0-rc.9.
-- Project profile: [.ai-workflow/PROJECT_PROFILE.json](.ai-workflow/PROJECT_PROFILE.json).
-- Bộ công cụ đã nhập; trạng thái thực thi/capability và kiểm tra mới xem PROJECT_STATE.md.
-- Không có packet lịch sử được chuyển. .workflow-local/ là dữ liệu cục bộ bị Git bỏ qua.
-- Chưa khởi tạo task trên repo thật: mã đang sửa chưa được commit và Owner cấm commit
-  trong đợt chuyển đổi này. Không coi HEAD cũ là bản chứa công việc hiện tại.
-- Các model trong template là yêu cầu cấu hình, không chứng minh đã gọi hay còn quota.
+1. `AGENTS.md`: quy tắc an toàn dữ liệu, ranh giới thao tác ngoài và cơ chế 2 luồng kiểm chứng (`[FAST-TRACK]` / `[FULL GATE]`).
+2. `PROJECT_SUMMARY.md`: kiến trúc và hợp đồng nghiệp vụ tổng quan.
+3. `PROJECT_STATE.md`: snapshot ngắn của trạng thái đã kiểm chứng gần nhất (lịch sử chi tiết xem tại `CHANGELOG.md`).
+4. `PROJECT_DECISIONS.md`: sổ quyết định kiến trúc & quy trình ghi nối tiếp (`DEC-001` → hiện tại).
 
-## Luồng việc mới
+## Môi trường Python & Kiểm chứng
 
-Gemini thực hiện → controller chạy gate → Luna Max review độc lập → Product Check
-nếu áp dụng → Owner nghiệm thu → chờ quyền gộp/phát hành riêng.
-Đọc [Direct](.ai-workflow/DIRECT_GEMINI.md) và dùng ngoại lệ ASSISTED theo canonical
-trước dispatch nếu Direct đã biết không phù hợp. Check/review vẫn chỉ đọc.
-
-Lead soạn contract và scope riêng cho đúng công việc, khai báo gate source đã đọc,
-giới hạn read/write và các dữ liệu thật phải loại trừ. Không gọi worker/reviewer
-hoặc chạy Zalo/BCNB/Form/LMS thật trong việc cài bộ flow này.
-Candidate chưa rõ, trùng, thiếu hoặc không khớp phải giữ review theo contract Zalo.
-
-## Môi trường và kiểm tra
-
-Ứng dụng tiếp tục dùng venv/Scripts/python.exe và requirements.txt.
-Flow dùng .venv/Scripts/python.exe và requirements-workflow.txt riêng.
-Hướng dẫn MIGRATION.md của bộ mẫu được thích nghi ở đây để giữ nguyên dependency
-ứng dụng; không cài flow vào Python toàn máy hoặc venv của ứng dụng.
-
-Cấu hình Direct theo dự án: [.ai-workflow/BRIDGE_CONFIG.zalo.direct.example.json](.ai-workflow/BRIDGE_CONFIG.zalo.direct.example.json).
-Đây là template, chưa phải task runnable: Lead thay write_paths/gate_paths bằng
-đúng file của nhiệm vụ và tạo contract mới; không mở quyền cả repository.
-local_trial_root ở ngoài repo; không chép auth/settings hay browser profile sang đó.
-
-Các gate source/local: node --test scripts/lib/*.test.mjs; Python flow chạy
-mcp/test_antigravity_server.py; powershell -NoProfile -ExecutionPolicy Bypass
--File scripts/provisioning-safety.test.ps1; gate ứng dụng CHECK_QUALITY.ps1 -Isolated.
-Gate đủ của ứng dụng không thay bằng test flow. Product Check cần tiêu chí và
-fixture riêng khi có thay đổi nhìn thấy được, không suy ra acceptance từ test xanh.
-
-Owner xem [bắt đầu nhanh](OWNER_QUICKSTART.md). Lead vận hành công cụ và trình bày
-kết quả tiếng Việt; Owner quyết định sản phẩm, chi phí, tài khoản, dữ liệu thật,
-nghiệm thu và phát hành.
-
-
-## Cập nhật Flow 2026-11-13 (DEC-036, DEC-040 & DEC-047 — Cơ Chế 2 Luồng Chuẩn Hàng Không)
-
-1. **Luồng Nhanh (`FAST-TRACK`)** — Chỉnh sửa nhỏ (UI/CSS/HTML, màu sắc, câu chữ, định dạng Email/CSV, tài liệu, fix nhỏ cục bộ không chạm trình duyệt/ghi ngoài/DB/PII): chạy unit test mục tiêu + `node tests/check_template_js.js` (nếu có JS/HTML) + `ruff check` & `mypy` phạm vi hẹp; **miễn** `.\CHECK_QUALITY.ps1 -Isolated` và **miễn** review độc lập `gpt-6.1-sol`.
-2. **Luồng Đầy đủ (`FULL GATE`)** — Thay đổi lõi/rủi ro cao (trình duyệt Zalo/LMS/Teaching/Form, ghi BCNB, DB schema, bảo mật/PII, concurrency, nghiệp vụ lớn nhiều module): chạy unit test mục tiêu + `node tests/check_template_js.js` + `.\CHECK_QUALITY.ps1 -Isolated` + review độc lập `"<prompt>" | codex exec -m gpt-6.1-sol -c model_reasoning_effort="high" -s read-only -` đạt `PASS`.
-3. **Đồng bộ & Báo cáo**: Cập nhật `CHANGELOG.md` + `PROJECT_STATE.md`, commit trong `allowlist`, `git push` lên GitHub (`DEC-040`), và báo cáo phong cách điện tín / chuẩn hàng không (`[FAST-TRACK]` hoặc `[FULL GATE]`).
+- **Ứng dụng chính**: dùng `venv/Scripts/python.exe` và `requirements.txt` (không dùng Python toàn máy).
+- **Công cụ workflow phụ trợ (`.ai-workflow/`)**: tách riêng ở `.venv/Scripts/python.exe` và `requirements-workflow.txt` (dữ liệu cục bộ `.workflow-local/` được Git bỏ qua).
+- **Cổng kiểm chứng**:
+  - **Luồng Nhanh (`[FAST-TRACK]`)**: unit test mục tiêu + `node tests/check_template_js.js` (nếu chạm JS/HTML) + `ruff check` & `mypy` phạm vi hẹp + `git diff --check`.
+  - **Luồng Đầy đủ (`[FULL GATE]`)**: unit test mục tiêu + `node tests/check_template_js.js` + `.\CHECK_QUALITY.ps1 -Isolated` (`exit 0`) + Review độc lập `gpt-6.1-sol` (`read-only`) đạt `PASS`.
+- **Đồng bộ**: Cập nhật `CHANGELOG.md` + `PROJECT_STATE.md`, commit các tệp trong `allowlist` (không bao giờ stage `.env`, `database.db`, browser profile hay dữ liệu nhạy cảm) và `git push` lên GitHub (`origin`).

@@ -4,6 +4,16 @@ Tài liệu này ghi lại toàn bộ quá trình hình thành, phát triển ki
 
 ---
 
+## [2026-11-13] — Tinh gọn tài liệu điều phối & snapshot trạng thái dự án (AGENTS.md, GEMINI.md, HANDOFF.md, PROJECT_STATE.md)
+
+- **Loại bỏ mục lỗi thời & trùng lặp (`AGENTS.md`, `GEMINI.md`, `HANDOFF.md`)**:
+  - Xóa khối hướng dẫn cũ `2026-10-03` (Luna Max, cấm commit) vốn đã bị thay thế và mâu thuẫn với cơ chế hiện hành (`DEC-036`, `DEC-040`, `DEC-047`), hợp nhất quy tắc môi trường Python (`venv` cho ứng dụng, `.venv` cho `.ai-workflow/`) và khử lặp 3 lần quy tắc commit/push để giảm token nạp vào System Prompt mỗi lượt.
+  - Làm gọn `GEMINI.md` và viết lại `HANDOFF.md` ngắn gọn, trỏ trực tiếp về `AGENTS.md`.
+- **Thu gọn `PROJECT_STATE.md` đúng vai trò snapshot ngắn**:
+  - Rút gọn `PROJECT_STATE.md` từ `779` dòng xuống bản snapshot hiện hành (`78` source files, `719` tests, `78.9%` branch coverage, các mốc `2026-11-12` → `2026-11-13` và ranh giới vận hành mở), bảo toàn nguyên vẹn lịch sử chi tiết trong `CHANGELOG.md` và `PROJECT_DECISIONS.md`.
+- **Tệp thay đổi (5 files)**: `AGENTS.md`, `CHANGELOG.md`, `GEMINI.md`, `HANDOFF.md`, `PROJECT_STATE.md`.
+- **Bằng chứng kiểm chứng (`[FAST-TRACK]`)**: `git diff --check` exit `0`, kiểm tra allowlist 5 file tài liệu sạch (`outside-mismatch=0`).
+
 ## [2026-11-13] — Quy trình AI: Áp dụng Cơ chế 2 Luồng Nhanh (`FAST-TRACK`) / Đầy đủ (`FULL GATE`) theo mức độ rủi ro (DEC-047)
 
 - **Tách quy trình kiểm chứng thành 2 luồng (`AGENTS.md`, `GEMINI.md`, `HANDOFF.md`, `PROJECT_DECISIONS.md`)**:

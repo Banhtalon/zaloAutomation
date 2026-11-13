@@ -60,13 +60,8 @@ mâu thuẫn, phải xác minh lại và nêu rõ tài liệu nào đã cũ.
   yêu cầu rõ ràng.
 - Với thay đổi có rủi ro lên dữ liệu/cấu hình, tạo backup phù hợp và kiểm tra
   khả năng khôi phục trước khi sửa.
-- Sau khi sửa, review diff và chạy gate tương xứng với rủi ro theo cơ chế **2 luồng (`DEC-047`)**.
-- **GitHub là Source of Truth (`DEC-040` & `DEC-047`)**: Khi hoàn tất một tính năng hoặc
-  bản sửa lỗi và đã vượt qua cổng kiểm chứng tương ứng của luồng đang áp dụng
-  (**Luồng Nhanh**: targeted tests + `check_template_js.js` + Ruff/Mypy; **Luồng Đầy đủ**:
-  `.\CHECK_QUALITY.ps1 -Isolated` + Independent Review `PASS`), bắt buộc cập nhật
-  `CHANGELOG.md` rõ ràng, commit các file thuộc phạm vi task (tuyệt đối không stage
-  `.env`, `database.db`, secret hay dữ liệu nhạy cảm) và `git push` lên GitHub (`origin`).
+- Sau khi sửa, review diff, chạy gate theo cơ chế **2 luồng (`DEC-047`)** và đồng bộ
+  `CHANGELOG.md`, `PROJECT_STATE.md`, GitHub (`origin`) theo mục **Flow AI hiện hành** bên dưới (`DEC-040`).
 
 ### Browser, external action hoặc production
 
@@ -115,21 +110,9 @@ Không dùng “toàn bộ test đã xanh” làm bằng chứng duy nhất cho 
 4. Chỉ append `PROJECT_DECISIONS.md` khi có quyết định kiến trúc, nghiệp vụ,
    an toàn hoặc quy trình có giá trị lâu dài.
 5. Không tuyên bố hoàn thành nếu còn tiêu chí `Done when` chưa đạt.
-6. Sau khi các gate của luồng áp dụng (`FAST-TRACK` hoặc `FULL GATE` theo `DEC-047`)
-   đạt `PASS`, commit rõ ràng các file trong allowlist và `git push` lên GitHub
-   (`origin`) theo `DEC-040`.
+6. Đồng bộ GitHub theo mục **Flow AI hiện hành** bên dưới (`DEC-040`).
 
-## Flow AI hiện hành — chuyển đổi 2026-10-03
-
-- Nguồn: QQ AI Workflow 10.1.0-rc.9, main commit `3056879dc47d9a3b2846b99c1178b9fd8b553b8f`.
-- [Canonical](.ai-workflow/V10_CANONICAL_SPEC.md) là nguồn quy tắc điều phối AI; [HANDOFF](HANDOFF.md) là điểm vào, [project profile](.ai-workflow/PROJECT_PROFILE.json) ghi thông tin dự án. Các yêu cầu hiện tại của Owner và ranh giới an toàn Zalo ở trên vẫn có ưu tiên.
-- Owner đã yêu cầu chuyển lại sang flow hiện hành; DEC-027 giữ nguyên như lịch sử gỡ flow trước đây. Trạng thái mới nằm trong PROJECT_STATE.md. Không khôi phục packet, tài khoản hoặc receipt cũ.
-- Việc mới dùng Direct theo canonical: Gemini thực hiện, controller kiểm tra, Luna Max review độc lập, kiểm tra sản phẩm nếu áp dụng, Owner nghiệm thu. Ngoại lệ ASSISTED chỉ theo canonical trước dispatch và có lý do được ghi. Tác vụ check vẫn chỉ đọc.
-- Bộ flow dùng requirements-workflow.txt và .venv/Scripts/python.exe riêng; ứng dụng giữ requirements.txt và venv/Scripts/python.exe. Không dùng Python toàn máy để gọi worker.
-- Đây là cài đặt source/local; chưa có bằng chứng gọi Gemini/Luna thật hay nghiệm thu production. Không tạo task từ HEAD cũ khi workspace còn thay đổi chưa commit; giữ nguyên công việc đó và báo điều kiện còn thiếu. Commit/push vẫn cần yêu cầu rõ ràng của Owner.
-
-
-## Flow AI hiện hành — cập nhật 2026-11-13 (DEC-036, DEC-040 & DEC-047: Cơ Chế 2 Luồng Nhanh / Đầy Đủ + Đồng Bộ GitHub + Báo Cáo Chuẩn Hàng Không)
+## Flow AI hiện hành (DEC-036, DEC-040 & DEC-047)
 
 1. **Phân loại luồng thực thi ngay đầu task (`DEC-047`)**:
    - **Luồng Nhanh (`FAST-TRACK`)** — Áp dụng cho chỉnh sửa nhỏ, rủi ro thấp: giao diện (UI/CSS/HTML), màu sắc, câu chữ/nhãn hiển thị, định dạng Email/CSV, tài liệu, hoặc sửa nhỏ cục bộ không đụng vào điều khiển trình duyệt, ghi BCNB/Teaching, DB schema hay bảo mật/PII:
@@ -141,5 +124,6 @@ Không dùng “toàn bộ test đã xanh” làm bằng chứng duy nhất cho 
      2. Chạy đầy đủ: unit test mục tiêu + `node tests/check_template_js.js` + `.\CHECK_QUALITY.ps1 -Isolated` (`exit 0`).
      3. Review độc lập (`Sol 6.1 high/xhigh`): Gọi `"<prompt>" | codex exec -m gpt-6.1-sol -c model_reasoning_effort="high" -s read-only -`. Nếu `NEEDS_FIX` -> sửa & re-verify cho tới `PASS`.
    - Khi ranh giới rủi ro chưa rõ hoặc phát hiện ảnh hưởng sang luồng ghi/bảo mật, tự động nâng lên **Luồng Đầy đủ**.
-2. **Changelog & GitHub Source of Truth (`DEC-040`)**: Sau khi đạt gate của luồng tương ứng, cập nhật `CHANGELOG.md` và `PROJECT_STATE.md` rõ ràng, commit các file thuộc phạm vi task (tuyệt đối không stage `.env`, `database.db`, secret hay dữ liệu nhạy cảm) và `git push` lên GitHub (`origin`).
-3. **Báo cáo**: Phong cách "Chuẩn Hàng Không" (điện tín/telegram, súc tích, ghi rõ `[FAST-TRACK]` hay `[FULL GATE]`, tối ưu token tối đa).
+2. **Môi trường Python**: Ứng dụng dùng `venv/Scripts/python.exe` (`requirements.txt`); bộ công cụ `.ai-workflow/` dùng `.venv/Scripts/python.exe` (`requirements-workflow.txt`). Không dùng Python toàn máy.
+3. **Changelog & GitHub Source of Truth (`DEC-040`)**: Sau khi đạt gate của luồng tương ứng, cập nhật `CHANGELOG.md` và `PROJECT_STATE.md` rõ ràng, commit các file thuộc phạm vi task (tuyệt đối không stage `.env`, `database.db`, secret hay dữ liệu nhạy cảm) và `git push` lên GitHub (`origin`).
+4. **Báo cáo**: Phong cách "Chuẩn Hàng Không" (điện tín/telegram, súc tích, ghi rõ `[FAST-TRACK]` hay `[FULL GATE]`, tối ưu token tối đa).
