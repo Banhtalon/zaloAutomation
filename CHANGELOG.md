@@ -4,6 +4,20 @@ Tài liệu này ghi lại toàn bộ quá trình hình thành, phát triển ki
 
 ---
 
+## [2026-11-13] — Hotfix Phase 6.6: Giữ `CATEGORY_MISSING` cho `NOT_FOUND_VERIFIED` kèm `FAILED_BEFORE_WRITE` (`EVIDENCE_NOT_READY`) & bọc `<span>` màu đỏ `#dc2626` tương thích BizFly Cloud Webmail (DEC-046)
+
+- **Phân loại đúng `CATEGORY_MISSING` cho dữ liệu thật `Job #500` (`services/report_status.py`, `repositories/report_repository.py`, `services/report_email_service.py`, `static/js/jobs.js`)**:
+  - Khắc phục hiện tượng bản ghi `evidence_state = "NOT_FOUND_VERIFIED"` đi kèm `write_status = "FAILED_BEFORE_WRITE"` và `error_code = "EVIDENCE_NOT_READY"` (trạng thái bình thường khi không tích BCNB do thiếu báo cáo Zalo) bị xếp nhầm vào `CATEGORY_REVIEW` (`⚠️ ... Zalo cần kiểm tra`).
+  - Kiểm tra độc lập cả `bcnb_update_state` và `write_status` trên Python lẫn JavaScript; tự động cập nhật lại cache `category = "REVIEW"` cũ trên dòng `NOT_FOUND_VERIFIED` sang `MISSING` (buổi thường), `EXEMPT` (Buổi 14) hoặc `DONE` (`manual_approved=True`, xóa cảnh báo Zalo cũ), trong khi bảo toàn `CATEGORY_REVIEW` cho mọi lỗi ghi/quét thật (`OUTCOME_UNKNOWN`, `CONFLICT_AFTER_WRITE`, `BLOCKED_BATCH_HALT`, `FAILED`, `BCNB_WRITE_FAILED`, ...).
+- **Tương thích trình đọc Webmail (`services/report_email_service.py`)**:
+  - Bọc nội dung đã `html.escape` trong `<span style="color:#dc2626;font-weight:700;">` (cho lỗi đỏ `❌ Chưa nhận xét` / `❌ Đã hoàn tất nhận xét LMS, chưa nhận xét Zalo`) và `<span style="color:#b45309;font-weight:600;">` (cho cảnh báo vàng `⚠️` SPCK), đồng bộ màu `#dc2626` ở cột `Mô tả vấn đề` để không bị stylesheet của BizFly Cloud Webmail ghi đè màu chữ `<td>`.
+- **Tệp thay đổi (10 files)**: `CHANGELOG.md`, `PROJECT_DECISIONS.md`, `PROJECT_STATE.md`, `repositories/report_repository.py`, `services/report_email_service.py`, `services/report_status.py`, `static/js/jobs.js`, `tests/check_template_js.js`, `tests/test_report_issue_display.py`, `tests/test_report_status.py`.
+- **Bằng chứng kiểm chứng (`DEC-040`)**:
+  - Unit tests mục tiêu (4 module, 67 tests): `67/67 PASS` (exit `0`).
+  - Frontend JS contract (`node tests/check_template_js.js`): `template-js-contract-ok scripts=7 handlers=37 behavior=13` (exit `0`).
+  - Full isolated gate (`powershell -ExecutionPolicy Bypass -File .\CHECK_QUALITY.ps1 -Isolated`): `QUALITY GATE PASSED` (exit `0`, Ruff `0`, Mypy `0` trên 78 files, `719/719` regression tests `OK` trong `356.666s`, branch coverage `78.9%`, `secrets=0`).
+  - Independent Review (`codex exec -m gpt-6.1-sol -c model_reasoning_effort="high" -s read-only -`): Round 1 `NEEDS_FIX` $\rightarrow$ Round 2 **`VERDICT: PASS`** (session `01a1d3e6-b342-7c22-be78-0513fca56b86`).
+
 ## [2026-11-13] — Phase 6.6: Làm nổi bật lỗi đỏ `❌ Chưa nhận xét` Zalo và chuyển thiếu nộp / thiếu nhận xét SPCK sang cảnh báo vàng `⚠️` trong Email Quản lý (DEC-046)
 
 - **Chưa nhận xét Zalo (`CATEGORY_MISSING`) là lỗi đỏ nặng nhất**:

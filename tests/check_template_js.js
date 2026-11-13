@@ -3098,7 +3098,56 @@ async function checkPhase57FrontendHardening() {
           status: '❌ Chưa tìm thấy trong khoảng đã kiểm chứng',
           evidence_state: 'NOT_FOUND_VERIFIED',
           lms_status: 'Chưa quét LMS',
-        }) === '❌ Chưa hoàn thành nhận xét';
+        }) === '❌ Chưa hoàn thành nhận xét'
+        && resolveRowCategory({
+          status: '❌ Chưa tìm thấy trong khoảng đã kiểm chứng – Có minh chứng',
+          evidence_state: 'NOT_FOUND_VERIFIED',
+          scan_status: 'VERIFIED',
+          write_status: 'FAILED_BEFORE_WRITE',
+          bcnb_update_state: 'FAILED_BEFORE_WRITE',
+          error_code: 'EVIDENCE_NOT_READY',
+          category: 'REVIEW',
+          lesson: '13',
+        }) === 'MISSING'
+        && resolveRowCategory({
+          status: '❌ Chưa tìm thấy trong khoảng đã kiểm chứng – Có minh chứng',
+          evidence_state: 'NOT_FOUND_VERIFIED',
+          scan_status: 'VERIFIED',
+          write_status: 'FAILED_BEFORE_WRITE',
+          bcnb_update_state: 'FAILED_BEFORE_WRITE',
+          error_code: 'EVIDENCE_NOT_READY',
+          category: 'REVIEW',
+          manual_approved: true,
+          lesson: '13',
+        }) === 'DONE'
+        && resolveRowCategory({
+          status: '❌ Chưa tìm thấy trong khoảng đã kiểm chứng – Có minh chứng',
+          evidence_state: 'NOT_FOUND_VERIFIED',
+          scan_status: 'VERIFIED',
+          write_status: 'FAILED_BEFORE_WRITE',
+          bcnb_update_state: 'FAILED_BEFORE_WRITE',
+          error_code: 'EVIDENCE_NOT_READY',
+          category: 'REVIEW',
+          lesson: '14',
+        }) === 'EXEMPT'
+        && resolveRowCategory({
+          status: '❌ Chưa tìm thấy trong khoảng đã kiểm chứng – Có minh chứng',
+          evidence_state: 'NOT_FOUND_VERIFIED',
+          scan_status: 'VERIFIED',
+          bcnb_update_state: 'FAILED_BEFORE_WRITE',
+          write_status: 'OUTCOME_UNKNOWN',
+          error_code: 'EVIDENCE_NOT_READY',
+          category: 'REVIEW',
+          lesson: '13',
+        }) === 'REVIEW'
+        && resolveRowCategory({
+          status: '❌ Chưa tìm thấy trong khoảng đã kiểm chứng – Có minh chứng',
+          evidence_state: 'NOT_FOUND_VERIFIED',
+          scan_status: 'VERIFIED',
+          write_status: 'FAILED_BEFORE_WRITE',
+          error_code: 'BCNB_WRITE_FAILED',
+          lesson: '13',
+        }) === 'REVIEW';
       row.evidence_state = 'SUBMITTED_VERIFIED'; row.lms_comments.status = 'MISSING';
       row.evaluation_status = '❌ Chưa nộp SPCK trên LMS';
       const missingLms = resolveRowIsFailed(row)

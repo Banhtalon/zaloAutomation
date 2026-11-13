@@ -140,7 +140,7 @@ class ReportIssueDisplayTests(unittest.TestCase):
         parsed = IssueListParser()
         parsed.feed(package["html_table"])
         self.assertEqual(parsed.items, [COMMENT, MISSING, *PRODUCT_NOTES])
-        red_items = [item for item, style in zip(parsed.items, parsed.styles) if "#b91c1c" in style]
+        red_items = [item for item, style in zip(parsed.items, parsed.styles) if "#dc2626" in style]
         warn_items = [item for item, style in zip(parsed.items, parsed.styles) if "#b45309" in style]
         self.assertEqual(red_items, [])
         self.assertEqual(warn_items, [MISSING])
@@ -190,6 +190,12 @@ class ReportIssueDisplayTests(unittest.TestCase):
             "lesson": "13",
             "class_date": "06/11/2026",
             "zalo_status": "❌ Chưa tìm thấy trong khoảng đã kiểm chứng – Có minh chứng",
+            "evidence_state": "NOT_FOUND_VERIFIED",
+            "scan_status": "VERIFIED",
+            "write_status": "FAILED_BEFORE_WRITE",
+            "bcnb_update_state": "FAILED_BEFORE_WRITE",
+            "error_code": "EVIDENCE_NOT_READY",
+            "category": "REVIEW",
             "lms_status": "✅ Đã nhận xét 4/4 HS đi học",
             "evaluation_status": "⚠️ Đã hoàn tất nhận xét LMS, Zalo cần kiểm tra",
             "lms_quality_issues": [
@@ -213,6 +219,38 @@ class ReportIssueDisplayTests(unittest.TestCase):
         self.assertEqual(f2["evaluation_status"], "⚠️ SPCK chưa có nhận xét trên LMS")
         self.assertEqual(f3["zalo_status"], "❌ Chưa nhận xét")
         self.assertEqual(f3["evaluation_status"], "❌ Đã hoàn tất nhận xét LMS, chưa nhận xét Zalo")
+        self.assertEqual(f3["is_zalo_missing"], "1")
+        self.assertIn(
+            "❌ Đã hoàn tất nhận xét LMS, chưa nhận xét Zalo",
+            build_weekly_summary_csv([zalo_missing_and_spck_row]),
+        )
+        l14_stale_review = {
+            **zalo_missing_and_spck_row,
+            "lesson": "14",
+            "lms_quality_issues": [],
+        }
+        self.assertEqual(
+            _prepare_email_row_fields(4, l14_stale_review)["evaluation_status"],
+            "✅ Đã hoàn thành nhận xét",
+        )
+        self.assertIn(
+            "✅ Đã hoàn thành nhận xét",
+            build_weekly_summary_csv([l14_stale_review]),
+        )
+        manual_stale_review = {
+            **zalo_missing_and_spck_row,
+            "manual_approved": True,
+            "zalo_status": "✅ Đã duyệt tay & Tích BCNB",
+            "lms_quality_issues": [],
+        }
+        self.assertEqual(
+            _prepare_email_row_fields(5, manual_stale_review)["evaluation_status"],
+            "✅ Đã hoàn thành nhận xét",
+        )
+        self.assertIn(
+            "✅ Đã hoàn thành nhận xét",
+            build_weekly_summary_csv([manual_stale_review]),
+        )
 
         package = build_failed_classes_email_package(
             week=45,
@@ -223,19 +261,25 @@ class ReportIssueDisplayTests(unittest.TestCase):
             recipients=["quangda@mindx.net.vn"],
         )
         html_tbl = package["html_table"]
-        self.assertIn("color:#b91c1c;font-weight:700;\">❌ Chưa nhận xét</td>", html_tbl)
         self.assertIn(
-            "color:#b91c1c;font-weight:700;\">❌ Đã hoàn tất nhận xét LMS, chưa nhận xét Zalo</td>",
+            'color:#dc2626;font-weight:700;"><span style="color:#dc2626;font-weight:700;">❌ Chưa nhận xét</span></td>',
             html_tbl,
         )
-        self.assertIn("color:#b45309;font-weight:600;\">⚠️ Chưa nộp SPCK trên LMS</td>", html_tbl)
         self.assertIn(
-            "color:#b45309;font-weight:600;\">⚠️ SPCK chưa có nhận xét trên LMS</td>",
+            'color:#dc2626;font-weight:700;"><span style="color:#dc2626;font-weight:700;">❌ Đã hoàn tất nhận xét LMS, chưa nhận xét Zalo</span></td>',
+            html_tbl,
+        )
+        self.assertIn(
+            'color:#b45309;font-weight:600;"><span style="color:#b45309;font-weight:600;">⚠️ Chưa nộp SPCK trên LMS</span></td>',
+            html_tbl,
+        )
+        self.assertIn(
+            'color:#b45309;font-weight:600;"><span style="color:#b45309;font-weight:600;">⚠️ SPCK chưa có nhận xét trên LMS</span></td>',
             html_tbl,
         )
         parsed = IssueListParser()
         parsed.feed(html_tbl)
-        red_items = [item for item, style in zip(parsed.items, parsed.styles) if "#b91c1c" in style]
+        red_items = [item for item, style in zip(parsed.items, parsed.styles) if "#dc2626" in style]
         warn_items = [item for item, style in zip(parsed.items, parsed.styles) if "#b45309" in style]
         self.assertEqual(red_items, ["[Zalo] Chưa gửi báo cáo nhận xét trên nhóm Zalo"])
         self.assertEqual(

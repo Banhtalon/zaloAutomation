@@ -30,9 +30,13 @@ from repositories.report_repository import (
     sanitize_csv_cell,
 )
 from services.report_status import (
+    CATEGORY_DONE,
+    CATEGORY_EXEMPT,
     CATEGORY_MISSING,
+    CATEGORY_REVIEW,
     ISSUE_CODE_LMS_SPCK_COMMENT_MISSING,
     ISSUE_CODE_LMS_SPCK_MISSING,
+    NOT_FOUND_VERIFIED,
     categorize_row,
     has_spck_comment_missing_fail,
     has_spck_missing_fail,
@@ -311,13 +315,18 @@ def _prepare_email_row_fields(idx: int, row: dict[str, Any]) -> dict[str, str]:
         st=st,
     )
     lms_status = resolve_lms_status(row, _clean_single_line(row.get("lms_status"), "Chưa quét LMS"))
-    row_category = (
-        str(row.get("category") or "").strip()
-        or categorize_row({**row, "zalo_status": zalo_status})
+    computed_category = categorize_row({**row, "zalo_status": zalo_status})
+    raw_cat = str(row.get("category") or "").strip()
+    is_stale_not_found_review = (
+        raw_cat == CATEGORY_REVIEW
+        and str(row.get("evidence_state") or "").strip().upper() == NOT_FOUND_VERIFIED
+        and computed_category in {CATEGORY_MISSING, CATEGORY_EXEMPT, CATEGORY_DONE}
     )
+    row_category = computed_category if is_stale_not_found_review else (raw_cat or computed_category)
     raw_eval = str(row.get("evaluation_status") or "").strip()
     if (
         not raw_eval
+        or is_stale_not_found_review
         or "lms_comments" in row
         or "lms_comments" in st
         or raw_eval
@@ -626,12 +635,15 @@ def build_failed_classes_email_package(
             elif col_i in (2, 3):
                 extra_style = "text-align:center;white-space:nowrap;"
             elif col_i == 5 and is_zalo_missing:
-                extra_style = "color:#b91c1c;font-weight:700;"
+                extra_style = "color:#dc2626;font-weight:700;"
+                cell_html = f'<span style="color:#dc2626;font-weight:700;">{cell_html}</span>'
             elif col_i == 7:
                 if is_zalo_missing and cell.startswith("❌"):
-                    extra_style = "color:#b91c1c;font-weight:700;"
+                    extra_style = "color:#dc2626;font-weight:700;"
+                    cell_html = f'<span style="color:#dc2626;font-weight:700;">{cell_html}</span>'
                 elif cell.startswith("⚠️"):
                     extra_style = "color:#b45309;font-weight:600;"
+                    cell_html = f'<span style="color:#b45309;font-weight:600;">{cell_html}</span>'
             elif col_i == 8 and cell != "—":
                 extra_style = "color:#334155;font-weight:400;line-height:1.6;"
                 issue_items: list[str] = []
@@ -643,7 +655,7 @@ def build_failed_classes_email_package(
                         issue,
                         flags=re.IGNORECASE,
                     ):
-                        issue_style += "color:#b91c1c;font-weight:600;"
+                        issue_style += "color:#dc2626;font-weight:600;"
                     elif code in {
                         ISSUE_CODE_LMS_SPCK_MISSING,
                         ISSUE_CODE_LMS_SPCK_COMMENT_MISSING,

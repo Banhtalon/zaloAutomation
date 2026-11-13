@@ -19,6 +19,7 @@ from services.report_status import (
     CATEGORY_REVIEW,
     LESSON_14_EXEMPTION,
     LESSON_14_STATUS,
+    NOT_FOUND_VERIFIED,
     categorize_row,
     has_spck_comment_missing_fail,
     has_spck_missing_fail,
@@ -185,14 +186,25 @@ def build_weekly_summary_csv(
             zalo_status = f"[{dry_badge}] {zalo_status}" if zalo_status else f"[{dry_badge}]"
         lms_status = resolve_lms_status(row, str(row.get("lms_status") or "").strip())
         eval_status = str(row.get("evaluation_status") or "").strip()
-        row_category = str(row.get("category") or "").strip() or categorize_row(row)
-        if row_category == CATEGORY_EXEMPT and (
+        computed_cat = categorize_row({**row, "zalo_status": zalo_status})
+        raw_cat = str(row.get("category") or "").strip()
+        is_stale_not_found_review = (
+            raw_cat == CATEGORY_REVIEW
+            and str(row.get("evidence_state") or "").strip().upper() == NOT_FOUND_VERIFIED
+            and computed_cat in {CATEGORY_MISSING, CATEGORY_EXEMPT, CATEGORY_DONE}
+        )
+        row_category = computed_cat if is_stale_not_found_review else (raw_cat or computed_cat)
+        if (
+            row_category == CATEGORY_EXEMPT
+            or (row_category == CATEGORY_DONE and bool(row.get("manual_approved")))
+        ) and (
             "zalo cần kiểm tra" in eval_status.lower()
             or "chưa nhận xét zalo" in eval_status.lower()
         ):
             eval_status = ""
         if (
             not eval_status
+            or is_stale_not_found_review
             or "lms_comments" in row
             or "lms_comments" in st
             or eval_status
@@ -513,7 +525,10 @@ def _resolve_row_evaluation_status(
             "nx_zalo_checked": nx_zalo_checked,
         }
     )
-    if row_category == CATEGORY_EXEMPT and (
+    if (
+        row_category == CATEGORY_EXEMPT
+        or (row_category == CATEGORY_DONE and bool(row and row.get("manual_approved")))
+    ) and (
         "zalo cần kiểm tra" in clean_raw.lower() or "chưa nhận xét zalo" in clean_raw.lower()
     ):
         clean_raw = ""

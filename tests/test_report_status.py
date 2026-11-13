@@ -1620,6 +1620,33 @@ class ReportStatusSingleSourceTests(unittest.IsolatedAsyncioTestCase):
                 replan_row.get("scan_target") or {},
             )
 
+    def test_not_found_verified_with_failed_before_write_stays_missing_unless_write_failed_or_manual(
+        self,
+    ) -> None:
+        armi_row = {
+            "class_code": "VT-ROB-ARMI12",
+            "lesson": "13",
+            "status": "❌ Chưa tìm thấy trong khoảng đã kiểm chứng – Có minh chứng",
+            "evidence_state": NOT_FOUND_VERIFIED,
+            "scan_status": "VERIFIED",
+            "write_status": "FAILED_BEFORE_WRITE",
+            "bcnb_update_state": "FAILED_BEFORE_WRITE",
+            "error_code": "EVIDENCE_NOT_READY",
+        }
+        self.assertEqual(categorize_row(armi_row), CATEGORY_MISSING)
+        self.assertEqual(
+            categorize_row({**armi_row, "manual_approved": True}),
+            CATEGORY_DONE,
+        )
+        self.assertEqual(
+            categorize_row({**armi_row, "error_code": "BCNB_WRITE_FAILED"}),
+            CATEGORY_REVIEW,
+        )
+        self.assertEqual(
+            categorize_row({**armi_row, "lesson": "14"}),
+            CATEGORY_EXEMPT,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

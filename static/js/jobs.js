@@ -991,18 +991,40 @@
         function resolveRowCategory(r) {
             if (!r || typeof r !== 'object') return 'NOT_SCANNED';
             const explicit = String(r.category || '').trim().toUpperCase();
-            if (['DONE', 'LATE', 'MISSING', 'REVIEW', 'EXEMPT', 'NOT_SCANNED'].includes(explicit)) {
-                return explicit;
-            }
             const evState = String(r.evidence_state || '').trim().toUpperCase();
-            const bcnbWriteState = String(r.bcnb_update_state || r.write_status || '').trim().toUpperCase();
+            const bcnbState = String(r.bcnb_update_state || '').trim().toUpperCase();
+            const writeStatusVal = String(r.write_status || '').trim().toUpperCase();
+            const scanStatus = String(r.scan_status || '').trim().toUpperCase();
+            const errCode = String(r.error_code || '').trim().toUpperCase();
+            const failedWriteStates = ['FAILED', 'FAILED_BEFORE_WRITE', 'OUTCOME_UNKNOWN', 'BLOCKED_BATCH_HALT', 'CONFLICT_AFTER_WRITE'];
             const st = r.scan_target && typeof r.scan_target === 'object' ? r.scan_target : {};
             const ev = r.evidence && typeof r.evidence === 'object' ? r.evidence : {};
             const ctx = ev.date_context && typeof ev.date_context === 'object' ? ev.date_context : {};
             const rawLesson = String(
                 st.lesson != null ? st.lesson : (ctx.target_lesson != null ? ctx.target_lesson : (r.lesson != null ? r.lesson : ''))
             ).trim().replace(/^buổi\s*/i, '').replace(/^0+/, '');
-            if (['FAILED_BEFORE_WRITE', 'OUTCOME_UNKNOWN', 'BLOCKED_BATCH_HALT', 'CONFLICT_AFTER_WRITE'].includes(bcnbWriteState)) {
+            const expectedNotFoundNoWrite = (
+                evState === 'NOT_FOUND_VERIFIED'
+                && ['', 'FAILED_BEFORE_WRITE'].includes(bcnbState)
+                && ['', 'FAILED_BEFORE_WRITE'].includes(writeStatusVal)
+                && !['FAILED', 'CANCELLED'].includes(scanStatus)
+                && ['', 'EVIDENCE_NOT_READY', 'LESSON_REPORT_ABSENT'].includes(errCode)
+            );
+            if (
+                ['DONE', 'LATE', 'MISSING', 'REVIEW', 'EXEMPT', 'NOT_SCANNED'].includes(explicit)
+                && !(explicit === 'REVIEW' && expectedNotFoundNoWrite)
+            ) {
+                return explicit;
+            }
+            if (
+                !expectedNotFoundNoWrite
+                && (
+                    failedWriteStates.includes(bcnbState)
+                    || failedWriteStates.includes(writeStatusVal)
+                    || ['FAILED', 'CANCELLED'].includes(scanStatus)
+                    || Boolean(errCode)
+                )
+            ) {
                 return 'REVIEW';
             }
             if (evState === 'LESSON_14_EXEMPTION' || rawLesson === '14') return 'EXEMPT';
@@ -1408,7 +1430,7 @@
                 explicitEval = '⚠️ SPCK chưa có nhận xét trên LMS';
             }
             if (
-                category === 'EXEMPT'
+                (category === 'EXEMPT' || (category === 'DONE' && r.manual_approved === true))
                 && (/zalo\s+cần\s+kiểm\s+tra/i.test(explicitEval) || /chưa\s+nhận\s+xét\s+zalo/i.test(explicitEval))
             ) {
                 explicitEval = '';

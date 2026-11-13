@@ -528,8 +528,16 @@ def categorize_row(row: Any) -> str:
         "BLOCKED_BATCH_HALT",
     }
     scan_status = str(row.get("scan_status") or "").strip().upper()
-    error_code = str(row.get("error_code") or "").strip()
-    if (
+    error_code = str(row.get("error_code") or "").strip().upper()
+    ev_state = str(row.get("evidence_state") or "").strip().upper()
+    expected_not_found_no_write = (
+        ev_state == NOT_FOUND_VERIFIED
+        and bcnb_state in {"", "FAILED_BEFORE_WRITE"}
+        and write_status_val in {"", "FAILED_BEFORE_WRITE"}
+        and scan_status not in {"FAILED", "CANCELLED"}
+        and error_code in {"", "EVIDENCE_NOT_READY", "LESSON_REPORT_ABSENT"}
+    )
+    if not expected_not_found_no_write and (
         bcnb_state in failed_write_states
         or write_status_val in failed_write_states
         or scan_status in {"FAILED", "CANCELLED"}
@@ -540,7 +548,6 @@ def categorize_row(row: Any) -> str:
     if is_lesson_14(row):
         return CATEGORY_EXEMPT
 
-    ev_state = str(row.get("evidence_state") or "").strip().upper()
     status_raw = _strip_dry_run_prefix(
         str(row.get("zalo_status") or row.get("status") or "")
     )
