@@ -4,6 +4,15 @@ Tài liệu này ghi lại toàn bộ quá trình hình thành, phát triển ki
 
 ---
 
+## [2026-11-14] — Bổ sung quy tắc bắt buộc tự động dùng Graphify Offline 100% cho AI (`.agents/rules/graphify.md`, `AGENTS.md`, `GEMINI.md`)
+
+- **Thiết lập Always-On Rule cho Antigravity & các Agent (`.agents/rules/graphify.md`, `AGENTS.md`, `GEMINI.md`)**:
+  - Tạo `.agents/rules/graphify.md` với frontmatter `trigger: always_on` và bổ sung quy tắc đồng bộ ngắn gọn vào `AGENTS.md` + `GEMINI.md` (chuẩn hóa LF theo `.gitattributes`).
+  - Yêu cầu AI và mọi subagent luôn tra cứu `graphify query`, `graphify explain`, `graphify path` trên `graphify-out/graph.json` trước khi grep diện rộng hoặc đọc tràn lan tệp code, và chạy `$env:GRAPHIFY_BACKEND="none"; graphify update .` sau khi sửa code.
+  - Khóa cứng ranh giới an toàn: giữ nguyên `.graphifyignore`, ép chế độ offline 100% (`$env:GRAPHIFY_BACKEND="none"`, `--code-only`), tuyệt đối không gọi API bên ngoài qua Graphify.
+- **Tệp thay đổi (5 files)**: `.agents/rules/graphify.md`, `AGENTS.md`, `CHANGELOG.md`, `GEMINI.md`, `PROJECT_STATE.md`.
+- **Bằng chứng kiểm chứng (`[FAST-TRACK]`)**: `git diff --check` exit `0`, `venv\Scripts\python.exe -m scripts.phase9a_audit` exit `0` (`secrets=0`), `.graphifyignore` giữ nguyên SHA-256 (`5285E81D...`), kiểm tra allowlist 5 file sạch (`outside-mismatch=0`).
+
 ## [2026-11-13] — Thiết lập `.graphifyignore` chặn dữ liệu thật/session, ẩn `graphify-out/` & quét bản đồ AST `--code-only`
 
 - **Chặn dữ liệu thật, phiên trình duyệt & tạo tác runtime (`.graphifyignore`, `.gitignore`)**:

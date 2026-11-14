@@ -20,6 +20,12 @@ vi thư mục đó.
 6. Kiểm tra source, `git status` và artifact hiện tại. Không mặc định tài liệu
    trạng thái vẫn còn mới.
 
+## Bản đồ mã nguồn Graphify (Offline 100%)
+
+- **Tra cứu trước khi đọc tràn lan code**: Khi `graphify-out/graph.json` tồn tại, luôn chạy `graphify query "<question>"`, `graphify explain "<symbol>"` hoặc `graphify path "<A>" "<B>"` để khoanh vùng đúng file/hàm trước khi grep diện rộng hoặc đọc nhiều tệp mã nguồn (áp dụng cho cả subagent).
+- **Đồng bộ sau khi sửa code**: Sau khi sửa tệp mã nguồn, bắt buộc chạy `$env:GRAPHIFY_BACKEND="none"; graphify update .` trước khi kết thúc task (khi cần quét mới toàn bộ: `$env:GRAPHIFY_BACKEND="none"; graphify extract . --code-only; graphify cluster-only .`).
+- **Ranh giới bắt buộc**: Giữ nguyên `.graphifyignore`; luôn chạy chế độ offline 100% (`$env:GRAPHIFY_BACKEND="none"`, `--code-only`), tuyệt đối không gọi API bên ngoài qua Graphify (chi tiết tại `.agents/rules/graphify.md`).
+
 ## Vai trò tài liệu
 
 - `PROJECT_SUMMARY.md`: specification và kiến trúc tổng quan.

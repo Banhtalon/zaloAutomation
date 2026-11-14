@@ -1,6 +1,6 @@
 # PROJECT STATE — Zalo Automation
 
-> Snapshot trạng thái hiện hành, cập nhật **2026-11-13**. Source/runtime kiểm chứng mới có độ tin cậy cao hơn tài liệu. Không dùng file này làm quyền chạy thao tác thật trên hệ thống ngoài. Toàn bộ lịch sử phát triển theo thời gian xem tại [CHANGELOG.md](CHANGELOG.md); các quyết định kiến trúc & quy trình xem tại [PROJECT_DECISIONS.md](PROJECT_DECISIONS.md).
+> Snapshot trạng thái hiện hành, cập nhật **2026-11-14**. Source/runtime kiểm chứng mới có độ tin cậy cao hơn tài liệu. Không dùng file này làm quyền chạy thao tác thật trên hệ thống ngoài. Toàn bộ lịch sử phát triển theo thời gian xem tại [CHANGELOG.md](CHANGELOG.md); các quyết định kiến trúc & quy trình xem tại [PROJECT_DECISIONS.md](PROJECT_DECISIONS.md).
 
 ## Tổng quan kiểm chứng & năng lực hiện hành
 
@@ -17,6 +17,8 @@
 
 ## Các mốc cập nhật gần nhất
 
+- **2026-11-14 (Quy tắc tự động tra cứu & đồng bộ Graphify Offline 100% — `[FAST-TRACK]`)**:
+  - Tạo `.agents/rules/graphify.md` (`trigger: always_on`) và cập nhật `AGENTS.md`, `GEMINI.md`: bắt buộc tra cứu `graphify query`/`explain`/`path` trước khi đọc code tràn lan, chạy `graphify update .` sau khi sửa code, bảo toàn `.graphifyignore` và khóa cứng chế độ offline 100% (`$env:GRAPHIFY_BACKEND="none"`, `--code-only`, cấm gọi API ngoài).
 - **2026-11-13 (Bản đồ mã nguồn Graphify cục bộ & chặn dữ liệu thật — `[FAST-TRACK]`)**:
   - Thêm `.graphifyignore` chặn sạch session/DB/runtime/upload/secret, ẩn `graphify-out/` trong `.gitignore`, và dựng bản đồ AST cục bộ (`GRAPHIFY_BACKEND=none`, `--code-only`: `225` code files, `4,847` nodes, `14,514` edges, `168` communities, `0` rò rỉ dữ liệu thật).
 - **2026-11-13 (Chuẩn hóa nhánh `main`, nâng cấp `README.md` & Tinh gọn tài liệu — `DEC-047`, `[FAST-TRACK]`)**:
