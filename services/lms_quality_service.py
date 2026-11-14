@@ -15,7 +15,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 import concurrent.futures
 import copy
-from datetime import date, datetime
+from datetime import date, datetime, time as dt_time, timedelta
 import asyncio
 import base64
 import contextlib
@@ -61,7 +61,7 @@ from services.zalo_target_eligibility import (
     DEFERRED_INVALID_TARGET,
     READY_PREVIOUS_WEEK,
     evaluate_scan_target,
-    parse_group_end_time,
+    resolve_session_time_window,
 )
 
 MAX_LMS_QUALITY_CLASSES_PER_BATCH = 60
@@ -4465,6 +4465,129 @@ def _extract_lms_slot_date_iso(slot: Mapping[str, Any]) -> str | None:
     return next(iter(parsed_dates))
 
 
+_SLOT_HM_RE = re.compile(r"^\s*([01]?\d|2[0-3]):([0-5]\d)(?::([0-5]\d)(?:\.(\d+))?)?\s*$")
+
+
+def _round_slot_time_ceiling(
+    hour: int, minute: int, second: int, *, has_subsecond: bool
+) -> dt_time | None:
+    if not has_subsecond:
+        return dt_time(hour, minute, second)
+    total_sec = hour * 3600 + minute * 60 + second + 1
+    if total_sec >= 86400:
+        return None
+    return dt_time(total_sec // 3600, (total_sec % 3600) // 60, total_sec % 60)
+
+
+def _parse_slot_datetime_or_time_hcm(
+    raw_val: Any,
+    *,
+    ceiling_subsecond: bool = False,
+) -> tuple[date | None, dt_time | None]:
+    """Convert an aware ISO timestamp or explicit HH:MM[:SS] string into `(date, time)` in Asia/Ho_Chi_Minh."""
+    if isinstance(raw_val, datetime):
+        if raw_val.tzinfo is None:
+            return None, None
+        local_dt = raw_val.astimezone(BUSINESS_TIMEZONE)
+        if ceiling_subsecond and local_dt.microsecond > 0:
+            shifted_dt = (local_dt + timedelta(seconds=1)).replace(microsecond=0)
+            if shifted_dt.date() != local_dt.date():
+                return None, None
+            local_dt = shifted_dt
+        else:
+            local_dt = local_dt.replace(microsecond=0)
+        return local_dt.date(), local_dt.time()
+    if isinstance(raw_val, dt_time):
+        t_val = _round_slot_time_ceiling(
+            raw_val.hour,
+            raw_val.minute,
+            raw_val.second,
+            has_subsecond=ceiling_subsecond and raw_val.microsecond > 0,
+        )
+        return None, t_val
+    if not isinstance(raw_val, str):
+        return None, None
+    text = raw_val.strip()
+    if not text:
+        return None, None
+    hm_match = _SLOT_HM_RE.fullmatch(text)
+    if hm_match:
+        frac = hm_match.group(4) or ""
+        has_subsec = bool(frac and int(frac) > 0)
+        try:
+            t_val = _round_slot_time_ceiling(
+                int(hm_match.group(1)),
+                int(hm_match.group(2)),
+                int(hm_match.group(3) or 0),
+                has_subsecond=ceiling_subsecond and has_subsec,
+            )
+            return None, t_val
+        except ValueError:
+            return None, None
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+        return None, None
+    iso_text = text[:-1] + "+00:00" if text.endswith(("Z", "z")) else text
+    try:
+        parsed_dt = datetime.fromisoformat(iso_text)
+    except ValueError:
+        return None, None
+    if parsed_dt.tzinfo is None:
+        return None, None
+    local_dt = parsed_dt.astimezone(BUSINESS_TIMEZONE)
+    if ceiling_subsecond and local_dt.microsecond > 0:
+        shifted_dt = (local_dt + timedelta(seconds=1)).replace(microsecond=0)
+        if shifted_dt.date() != local_dt.date():
+            return None, None
+        local_dt = shifted_dt
+    else:
+        local_dt = local_dt.replace(microsecond=0)
+    return local_dt.date(), local_dt.time()
+
+
+def _format_slot_time_value(value: dt_time) -> str:
+    return value.strftime("%H:%M:%S") if value.second else value.strftime("%H:%M")
+
+
+def extract_lms_slot_time_range(slot: Mapping[str, Any]) -> tuple[dt_time | None, dt_time | None]:
+    """Return `(start_time, end_time)` in Asia/Ho_Chi_Minh for a single same-day ClassSlot, or `(None, None)`."""
+    if not isinstance(slot, Mapping):
+        return None, None
+    start_raw = slot.get("startTime") if slot.get("startTime") is not None else slot.get("start_time")
+    end_raw = slot.get("endTime") if slot.get("endTime") is not None else slot.get("end_time")
+    start_d, start_t = _parse_slot_datetime_or_time_hcm(start_raw, ceiling_subsecond=False)
+    end_d, end_t = _parse_slot_datetime_or_time_hcm(end_raw, ceiling_subsecond=True)
+    if start_t is None or end_t is None:
+        return None, None
+    observed_dates: set[date] = set()
+    for d_key in ("date", "class_date_iso", "slot_date"):
+        raw_d = slot.get(d_key)
+        if raw_d is not None:
+            converted_iso = _slot_timestamp_to_hcm_date_iso(raw_d)
+            if converted_iso is None:
+                return None, None
+            observed_dates.add(date.fromisoformat(converted_iso))
+    if start_d is not None:
+        observed_dates.add(start_d)
+    if end_d is not None:
+        observed_dates.add(end_d)
+    for alias_key in ("startTime", "start_time", "endTime", "end_time"):
+        raw_alias = slot.get(alias_key)
+        if raw_alias is not None:
+            alias_d, alias_t = _parse_slot_datetime_or_time_hcm(
+                raw_alias,
+                ceiling_subsecond=alias_key.lower().startswith("end"),
+            )
+            if alias_t is None:
+                return None, None
+            if alias_d is not None:
+                observed_dates.add(alias_d)
+    if len(observed_dates) > 1:
+        return None, None
+    if end_t <= start_t:
+        return None, None
+    return start_t, end_t
+
+
 def _extract_lms_slot_lesson_number(slot: Mapping[str, Any]) -> tuple[bool, int | None]:
     """Return (has_lesson_field, 1-based lesson number) for a ClassSlot."""
     if "index" in slot and slot.get("index") is not None:
@@ -4748,6 +4871,60 @@ def inspect_and_attach_quality_issues(
         raw_ctx = ev_dict.get("date_context")
         ctx: dict[str, Any] = raw_ctx if isinstance(raw_ctx, dict) else {}
         early_target_date_iso = _resolve_target_class_date_iso(result, st_dict, ctx)
+        class_code = normalize_class_code(
+            (st_dict.get("class_code") if st_dict else "")
+            or ctx.get("target_class_code")
+            or result.get("class_code")
+            or ""
+        )
+        lesson_str = str(
+            (st_dict.get("lesson") if st_dict else "")
+            or ctx.get("target_lesson")
+            or result.get("lesson")
+            or ""
+        ).strip()
+        khoi_str = str(result.get("khoi") or (st_dict.get("khoi") if st_dict else "") or "").strip()
+        lesson_num = _parse_lesson_number(lesson_str)
+        if has_lms_map and class_code and lesson_num is not None and early_target_date_iso:
+            early_slots = slots_map.get(class_code)
+            if isinstance(early_slots, list) and early_slots:
+                first_early = early_slots[0] if isinstance(early_slots[0], dict) else {}
+                if not any(
+                    first_early.get(flag)
+                    for flag in (
+                        "overflow_class_limit",
+                        "duplicate_class",
+                        "missing_class",
+                        "fetch_error",
+                    )
+                ):
+                    early_matched_slot, _ = select_matching_lms_slot(
+                        early_slots,
+                        target_date_iso=early_target_date_iso,
+                        lesson_num=lesson_num,
+                    )
+                    if early_matched_slot is not None:
+                        slot_start_t, slot_end_t = extract_lms_slot_time_range(early_matched_slot)
+                        if slot_start_t is not None and slot_end_t is not None:
+                            start_exact = _format_slot_time_value(slot_start_t)
+                            end_exact = _format_slot_time_value(slot_end_t)
+                            start_hm = slot_start_t.strftime("%H:%M")
+                            end_hm = slot_end_t.strftime("%H:%M")
+                            result["lms_start_time"] = start_exact
+                            result["lms_end_time"] = end_exact
+                            result["lms_start_time_hm"] = start_hm
+                            result["lms_end_time_hm"] = end_hm
+                            if st_dict is not None:
+                                st_dict["lms_start_time"] = start_exact
+                                st_dict["lms_end_time"] = end_exact
+                                st_dict["lms_start_time_hm"] = start_hm
+                                st_dict["lms_end_time_hm"] = end_hm
+        lms_start_val = result.get("lms_start_time") or (
+            st_dict.get("lms_start_time") if st_dict else None
+        )
+        lms_end_val = result.get("lms_end_time") or (
+            st_dict.get("lms_end_time") if st_dict else None
+        )
         group_name_val = str(
             (st_dict.get("group_name") if st_dict else "")
             or result.get("group_name")
@@ -4777,6 +4954,8 @@ def inspect_and_attach_quality_issues(
                 "class_date": (st_dict.get("class_date") if st_dict else None)
                 or result.get("class_date"),
                 "group_name": group_name_val,
+                "lms_start_time": lms_start_val,
+                "lms_end_time": lms_end_val,
             }
             elig = evaluate_scan_target(
                 candidate_target,
@@ -4808,11 +4987,15 @@ def inspect_and_attach_quality_issues(
             if early_target_date_iso > current_business_date.isoformat():
                 should_defer_target = True
             elif early_target_date_iso == current_business_date.isoformat():
-                end_time = parse_group_end_time(group_name_val)
                 target_day = date.fromisoformat(early_target_date_iso)
-                if end_time is None or current_business < datetime.combine(
-                    target_day, end_time, tzinfo=BUSINESS_TIMEZONE
-                ):
+                window = resolve_session_time_window(
+                    target_day,
+                    lms_start_time=lms_start_val,
+                    lms_end_time=lms_end_val,
+                    group_name=group_name_val,
+                    now=current_business,
+                )
+                if not window["is_ended"]:
                     should_defer_target = True
         if should_defer_target:
             result["session_deferred"] = True
@@ -4830,20 +5013,6 @@ def inspect_and_attach_quality_issues(
         result.pop("session_deferred", None)
         if st_dict is not None:
             st_dict.pop("session_deferred", None)
-        class_code = normalize_class_code(
-            (st_dict.get("class_code") if st_dict else "")
-            or ctx.get("target_class_code")
-            or result.get("class_code")
-            or ""
-        )
-        lesson_str = str(
-            (st_dict.get("lesson") if st_dict else "")
-            or ctx.get("target_lesson")
-            or result.get("lesson")
-            or ""
-        ).strip()
-        khoi_str = str(result.get("khoi") or (st_dict.get("khoi") if st_dict else "") or "").strip()
-        lesson_num = _parse_lesson_number(lesson_str)
         if is_lesson_14(result, st_dict):
             has_l14_lms_data = (
                 (has_lms_map and bool(class_code) and class_code in slots_map)

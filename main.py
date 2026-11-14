@@ -17,6 +17,7 @@ from api.health_routes import router as health_router
 from api.landing_probe_routes import router as landing_probe_router
 from api.job_routes import router as job_router
 from api.lms_routes import router as lms_router
+from api.today_routes import router as today_router
 from api.upload_routes import router as upload_router
 from api.view_routes import router as view_router
 from api.zalo_routes import router as zalo_router
@@ -219,6 +220,7 @@ def create_app(
     application.include_router(auth_router)
     application.include_router(evidence_router)
     application.include_router(zalo_router)
+    application.include_router(today_router)
     application.include_router(googleform_router)
     application.include_router(lms_router)
     application.include_router(job_router)

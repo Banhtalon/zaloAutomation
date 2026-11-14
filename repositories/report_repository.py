@@ -59,6 +59,7 @@ ACTIVE_WEEK_MUTATION_JOB_TYPES: tuple[str, ...] = (
     "ZALO_SCAN",
     "LMS_AUTOMATION",
     "ZALO_MANUAL_APPROVE",
+    "TODAY_REALTIME_SYNC",
 )
 
 _SQL_ZALO_JOB_EXEC_MODE = """(
@@ -70,6 +71,21 @@ _SQL_ZALO_JOB_EXEC_MODE = """(
         ELSE 'dry-run'
     END
 )"""
+
+_SQL_ZALO_OR_TODAY_SYNC_JOB = """(
+    job_type = 'ZALO_SCAN'
+    OR (
+        job_type = 'TODAY_REALTIME_SYNC'
+        AND (
+            NOT json_valid(request_payload)
+            OR COALESCE(json_extract(request_payload, '$.check_only'), 0) != 1
+        )
+    )
+)"""
+
+_SQL_SJ_ZALO_OR_TODAY_SYNC_JOB = _SQL_ZALO_OR_TODAY_SYNC_JOB.replace(
+    "job_type", "sj.job_type"
+).replace("request_payload", "sj.request_payload")
 
 
 class WeeklySummaryError(ValueError):
@@ -1197,7 +1213,16 @@ class ReportRepository:
                 """
                 SELECT id, job_type, status, request_payload, results
                 FROM scan_jobs
-                WHERE job_type IN ('ZALO_SCAN', 'LMS_AUTOMATION', 'LMS_ANALYSIS', 'ZALO_MANUAL_APPROVE')
+                WHERE (
+                    job_type IN ('ZALO_SCAN', 'LMS_AUTOMATION', 'LMS_ANALYSIS', 'ZALO_MANUAL_APPROVE')
+                    OR (
+                        job_type = 'TODAY_REALTIME_SYNC'
+                        AND (
+                            NOT json_valid(request_payload)
+                            OR COALESCE(json_extract(request_payload, '$.check_only'), 0) != 1
+                        )
+                    )
+                )
                   AND status IN ('PENDING', 'QUEUED', 'RUNNING', 'CLAIMED')
                 ORDER BY id DESC
                 LIMIT ?
@@ -1324,6 +1349,12 @@ class ReportRepository:
             j_type = str(row[1] or "")
             j_status = str(row[2] or "")
             req_obj = _parse_json(row[3], {})
+            if (
+                j_type == "TODAY_REALTIME_SYNC"
+                and isinstance(req_obj, dict)
+                and bool(req_obj.get("check_only"))
+            ):
+                continue
             res_obj = _parse_json(row[4], {})
             job_periods = set(periods_by_job.get(j_id, set()))
             _collect_periods_from_obj(req_obj, job_periods)
@@ -1372,6 +1403,7 @@ class ReportRepository:
             fallback_targets: list[dict[str, Any]] | None = None,
         ) -> dict[str, Any]:
             j_id = int(row[0])
+            j_type = str(row[1] or "")
             j_status = str(row[2] or "")
             j_created = str(row[3] or "") or None
             j_started = str(row[4] or "") or None
@@ -1392,7 +1424,9 @@ class ReportRepository:
             scan_plan_raw = req_payload.get("scan_plan") if isinstance(req_payload, dict) else None
             scan_plan: dict[str, Any] = scan_plan_raw if isinstance(scan_plan_raw, dict) else {}
             selective_rescan = bool(
-                envelope.get("selective_rescan") or scan_plan.get("selective_rescan")
+                j_type == "TODAY_REALTIME_SYNC"
+                or envelope.get("selective_rescan")
+                or scan_plan.get("selective_rescan")
             )
             snapshot_id = (
                 envelope.get("snapshot_id")
@@ -1519,6 +1553,7 @@ class ReportRepository:
             )
             return {
                 "job_id": j_id,
+                "job_type": j_type,
                 "status": j_status,
                 "execution_mode": exec_mode,
                 "selective_rescan": selective_rescan,
@@ -1561,9 +1596,9 @@ class ReportRepository:
                         code="JOB_NOT_FOUND",
                         status_code=404,
                     )
-                if str(explicit_meta_row[1] or "") != "ZALO_SCAN":
+                if str(explicit_meta_row[1] or "") not in {"ZALO_SCAN", "TODAY_REALTIME_SYNC"}:
                     raise WeeklySummaryError(
-                        "Job được chọn phải là job quét Zalo (ZALO_SCAN).",
+                        "Job được chọn phải là job quét Zalo (ZALO_SCAN hoặc TODAY_REALTIME_SYNC).",
                         code="INVALID_SCAN_JOB",
                         status_code=409,
                     )
@@ -1584,6 +1619,17 @@ class ReportRepository:
                     (int(job_id),),
                 ) as cursor:
                     explicit_job_row = await cursor.fetchone()
+                if (
+                    explicit_job_row is not None
+                    and str(explicit_job_row[1] or "") == "TODAY_REALTIME_SYNC"
+                ):
+                    explicit_req = _parse_json(explicit_job_row[7], {})
+                    if isinstance(explicit_req, dict) and bool(explicit_req.get("check_only")):
+                        raise WeeklySummaryError(
+                            "Job kiểm tra chỉ đọc (check_only) không dùng làm nguồn Báo Cáo Tuần.",
+                            code="INVALID_SCAN_JOB",
+                            status_code=409,
+                        )
                 explicit_parsed_job = _parse_single_zalo_job_row(explicit_job_row)
                 if explicit_parsed_job["status"] not in FINISHED_ZALO_SCAN_STATUSES:
                     raise WeeklySummaryError(
@@ -1619,7 +1665,7 @@ class ReportRepository:
                     LEFT JOIN scan_jobs sj ON sj.id = bt.job_id
                     WHERE sj.id IS NULL
                        OR (
-                           sj.job_type = 'ZALO_SCAN'
+                           {_SQL_SJ_ZALO_OR_TODAY_SYNC_JOB}
                            AND sj.status IN ('SUCCESS', 'PARTIAL_SUCCESS')
                            AND {_SQL_ZALO_JOB_EXEC_MODE.replace("request_payload", "sj.request_payload").replace("mutates_external", "sj.mutates_external")} = ?
                        )
@@ -1627,7 +1673,7 @@ class ReportRepository:
                     SELECT CAST(json_extract(results, '$.required_week.week') AS INTEGER) AS w,
                            CAST(json_extract(results, '$.required_week.year') AS INTEGER) AS y
                     FROM scan_jobs
-                    WHERE job_type = 'ZALO_SCAN'
+                    WHERE {_SQL_ZALO_OR_TODAY_SYNC_JOB}
                       AND status IN ('SUCCESS', 'PARTIAL_SUCCESS')
                       AND {_SQL_ZALO_JOB_EXEC_MODE} = ?
                       AND json_valid(results)
@@ -1635,7 +1681,7 @@ class ReportRepository:
                     SELECT CAST(json_extract(request_payload, '$.scan_plan.required_week.week') AS INTEGER) AS w,
                            CAST(json_extract(request_payload, '$.scan_plan.required_week.year') AS INTEGER) AS y
                     FROM scan_jobs
-                    WHERE job_type = 'ZALO_SCAN'
+                    WHERE {_SQL_ZALO_OR_TODAY_SYNC_JOB}
                       AND status IN ('SUCCESS', 'PARTIAL_SUCCESS')
                       AND {_SQL_ZALO_JOB_EXEC_MODE} = ?
                       AND json_valid(request_payload)
@@ -1650,7 +1696,7 @@ class ReportRepository:
                                  ELSE '[]'
                              END
                          ) sw
-                    WHERE job_type = 'ZALO_SCAN'
+                    WHERE {_SQL_ZALO_OR_TODAY_SYNC_JOB}
                       AND status IN ('SUCCESS', 'PARTIAL_SUCCESS')
                       AND {_SQL_ZALO_JOB_EXEC_MODE} = ?
                     UNION
@@ -1664,7 +1710,7 @@ class ReportRepository:
                                  ELSE '[]'
                              END
                          ) sw
-                    WHERE job_type = 'ZALO_SCAN'
+                    WHERE {_SQL_ZALO_OR_TODAY_SYNC_JOB}
                       AND status IN ('SUCCESS', 'PARTIAL_SUCCESS')
                       AND {_SQL_ZALO_JOB_EXEC_MODE} = ?
                     UNION
@@ -1692,7 +1738,7 @@ class ReportRepository:
                                  ELSE '[]'
                              END
                          ) it
-                    WHERE job_type = 'ZALO_SCAN'
+                    WHERE {_SQL_ZALO_OR_TODAY_SYNC_JOB}
                       AND status IN ('SUCCESS', 'PARTIAL_SUCCESS')
                       AND {_SQL_ZALO_JOB_EXEC_MODE} = ?
                     UNION
@@ -1890,7 +1936,7 @@ class ReportRepository:
                            ELSE 0
                        END AS items_len
                 FROM scan_jobs
-                WHERE job_type = 'ZALO_SCAN'
+                WHERE {_SQL_ZALO_OR_TODAY_SYNC_JOB}
                   AND status IN ('SUCCESS', 'PARTIAL_SUCCESS')
                   AND {_SQL_ZALO_JOB_EXEC_MODE} = ?
                   AND (
@@ -2257,7 +2303,7 @@ class ReportRepository:
                            ) AS snap_id
                     FROM scan_jobs
                     WHERE id IN ({ma_placeholders})
-                      AND job_type = 'ZALO_SCAN'
+                      AND {_SQL_ZALO_OR_TODAY_SYNC_JOB}
                     """,
                     tuple(sorted(missing_ma_src_ids)),
                 ) as cursor:
@@ -2961,6 +3007,13 @@ class ReportRepository:
             )
             period_manual_approvals[k] = v_copy
 
+        def _norm_lesson_token(raw_lesson: Any) -> str:
+            txt = str(raw_lesson or "").strip()
+            if not txt:
+                return ""
+            m = re.search(r"0*(\d+)", txt)
+            return str(int(m.group(1))) if m else txt.upper()
+
         def _item_session_id(candidate_item: dict[str, Any]) -> str:
             st_cand = candidate_item.get("scan_target")
             st_cand_dict = st_cand if isinstance(st_cand, dict) else {}
@@ -3136,31 +3189,143 @@ class ReportRepository:
                         )
                 selected_raw_items.append(entry)
         elif matching_jobs_chronological:
-            # Enforce same-snapshot boundary when merging selective rescans onto a baseline
+            # Enforce same-snapshot boundary for selective ZALO_SCAN, while allowing
+            # TODAY_REALTIME_SYNC to overlay compatible rows on top of the latest baseline.
             latest_job = matching_jobs_chronological[-1]
             active_snapshot_id = latest_job["snapshot_id"]
-            if not latest_job["selective_rescan"] or active_snapshot_id is None:
+            if not latest_job["selective_rescan"] or (
+                active_snapshot_id is None
+                and latest_job.get("job_type") != "TODAY_REALTIME_SYNC"
+            ):
                 jobs_to_merge = [latest_job]
             else:
-                contiguous_same_snapshot: list[dict[str, Any]] = []
+                chain: list[dict[str, Any]] = []
+                required_zalo_scan_snap: Any = None
                 for j in reversed(matching_jobs_chronological):
-                    if j["snapshot_id"] != active_snapshot_id:
-                        break
-                    contiguous_same_snapshot.append(j)
-                    if not j["selective_rescan"] and j["status"] in {
+                    is_today_sync = j.get("job_type") == "TODAY_REALTIME_SYNC"
+                    if is_today_sync:
+                        if (
+                            required_zalo_scan_snap is not None
+                            and j["snapshot_id"] != required_zalo_scan_snap
+                        ):
+                            break
+                        chain.append(j)
+                        continue
+                    if required_zalo_scan_snap is not None:
+                        if j["snapshot_id"] != required_zalo_scan_snap:
+                            break
+                        chain.append(j)
+                        if not j["selective_rescan"] and j["status"] in {
+                            "SUCCESS",
+                            "PARTIAL_SUCCESS",
+                        }:
+                            break
+                    elif not j["selective_rescan"] and j["status"] in {
                         "SUCCESS",
                         "PARTIAL_SUCCESS",
                     }:
+                        chain.append(j)
                         break
-                contiguous_same_snapshot.reverse()
-                jobs_to_merge = contiguous_same_snapshot
+                    else:
+                        if j["snapshot_id"] is None:
+                            break
+                        required_zalo_scan_snap = j["snapshot_id"]
+                        chain.append(j)
+                chain.reverse()
+                jobs_to_merge = chain or [latest_job]
+
+            active_snap_prefix = (
+                f"snap_{active_snapshot_id}_"
+                if active_snapshot_id is not None
+                else ""
+            )
+            active_snap_has_period_meta = bool(
+                active_snap_prefix
+                and any(
+                    any(
+                        str(s).startswith(active_snap_prefix)
+                        for s in (m.get("_sources") or ())
+                    )
+                    for (m_w, m_y, _), meta_list in bcnb_meta_by_code_rows.items()
+                    if (m_w, m_y) == (sel_week, sel_year)
+                    for m in meta_list
+                )
+            )
+
+            def _is_compatible_with_active_snapshot(cand_item: dict[str, Any]) -> bool:
+                if not active_snap_has_period_meta:
+                    return True
+                c_code = _extract_item_class_code(cand_item)
+                raw_st_obj = cand_item.get("scan_target")
+                raw_st = raw_st_obj if isinstance(raw_st_obj, dict) else {}
+                raw_ev = cand_item.get("evidence")
+                raw_ctx_obj = (
+                    raw_ev.get("date_context") if isinstance(raw_ev, dict) else None
+                )
+                raw_ctx = raw_ctx_obj if isinstance(raw_ctx_obj, dict) else {}
+                lesson_str = str(
+                    raw_st.get("lesson")
+                    or raw_ctx.get("target_lesson")
+                    or cand_item.get("lesson")
+                    or ""
+                ).strip()
+                date_iso = _normalize_date_iso(
+                    raw_st.get("class_date_iso")
+                    or raw_st.get("class_date")
+                    or raw_ctx.get("target_class_date")
+                    or cand_item.get("class_date_iso")
+                    or cand_item.get("class_date")
+                    or ""
+                )
+                item_sid = _item_session_id(cand_item)
+                norm_l = _norm_lesson_token(lesson_str)
+                all_code_entries = bcnb_meta_by_code_rows.get(
+                    (sel_week, sel_year, c_code), []
+                )
+                snap_candidates = [
+                    m
+                    for m in all_code_entries
+                    if any(
+                        str(s).startswith(active_snap_prefix)
+                        for s in (m.get("_sources") or ())
+                    )
+                    and (
+                        str(m.get("_lesson") or "").strip() == lesson_str
+                        or (
+                            norm_l
+                            and _norm_lesson_token(str(m.get("_lesson") or "")) == norm_l
+                        )
+                    )
+                ]
+                if not snap_candidates:
+                    return False
+                for cand in snap_candidates:
+                    cand_date = str(cand.get("_class_date_iso") or "").strip()
+                    cand_sid = str(cand.get("bcnb_session_id") or "").strip()
+                    if date_iso and cand_date and cand_date != date_iso:
+                        continue
+                    if not item_sid or not cand_sid or cand_sid != item_sid:
+                        continue
+                    return True
+                return False
 
             has_full_baseline = any(
                 not j["selective_rescan"] and j["status"] in {"SUCCESS", "PARTIAL_SUCCESS"}
                 for j in jobs_to_merge
             )
             selected_snapshot_id = active_snapshot_id
-            baseline_snapshot_id = active_snapshot_id
+            baseline_snapshot_id = (
+                active_snapshot_id
+                if active_snap_has_period_meta
+                else next(
+                    (
+                        j["snapshot_id"]
+                        for j in reversed(jobs_to_merge)
+                        if not j["selective_rescan"] and j["snapshot_id"] is not None
+                    ),
+                    active_snapshot_id,
+                )
+            )
             is_selective_only = not has_full_baseline
 
             merged_by_key: dict[str, tuple[int, str, dict[str, Any]]] = {}
@@ -3174,6 +3339,11 @@ class ReportRepository:
                     rk = _extract_item_row_key(it, sel_week, sel_year)
                     r_key_counts_in_job[rk] = r_key_counts_in_job.get(rk, 0) + 1
                 for item in job_items:
+                    if (
+                        j["snapshot_id"] != active_snapshot_id
+                        and not _is_compatible_with_active_snapshot(item)
+                    ):
+                        continue
                     r_key = _extract_item_row_key(item, sel_week, sel_year)
                     item_sid = _item_session_id(item)
                     merge_key = f"{r_key}|sid:{item_sid}" if item_sid else r_key
@@ -3190,9 +3360,12 @@ class ReportRepository:
                     elif r_key in merged_by_key:
                         prev_job_id, _, prev_item = merged_by_key[r_key]
                         prev_sid = _item_session_id(prev_item)
+                        has_split_sid_keys = any(
+                            k.startswith(f"{r_key}|sid:") for k in merged_by_key
+                        )
                         if (
                             prev_job_id != j["job_id"]
-                            and item_sid == prev_sid
+                            and (item_sid == prev_sid or (not prev_sid and not has_split_sid_keys))
                             and r_key_counts_in_job.get(r_key, 0) == 1
                         ):
                             merge_key = r_key
@@ -3211,6 +3384,12 @@ class ReportRepository:
                         j["timestamp"],
                         item_with_snap,
                     )
+
+            merged_origin_snapshots = {
+                v[2].get("_origin_snapshot_id") for v in merged_by_key.values()
+            }
+            if merged_origin_snapshots - {active_snapshot_id}:
+                selected_snapshot_id = None
 
             # Reconcile verified production manual approvals across all scans of the week
             for ma_key, app_info in period_manual_approvals.items():
@@ -3368,13 +3547,6 @@ class ReportRepository:
         preview_to_tick_set: set[str] = set()
         preview_missing_set: set[str] = set()
         preview_missing_checked_set: set[str] = set()
-
-        def _norm_lesson_token(raw_lesson: Any) -> str:
-            txt = str(raw_lesson or "").strip()
-            if not txt:
-                return ""
-            m = re.search(r"0*(\d+)", txt)
-            return str(int(m.group(1))) if m else txt.upper()
 
         def _match_session_entry(
             entries: list[tuple[str, str, str]],

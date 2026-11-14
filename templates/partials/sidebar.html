@@ -26,6 +26,15 @@
                 </span>
                 <span class="sidebar-badge w-2 h-2 rounded-full bg-blue-300 shrink-0" aria-hidden="true"></span>
             </button>
+            <button type="button" onclick="switchTab('today')" id="btn-today"
+                class="tab-btn w-full flex items-center justify-between px-3.5 py-3 rounded-xl font-bold"
+                role="tab" aria-selected="false" aria-controls="tab-today" title="Lớp Hôm Nay">
+                <span class="flex items-center gap-2.5">
+                    <i class="fa-solid fa-calendar-day w-5 shrink-0 text-slate-400" aria-hidden="true"></i>
+                    <span class="nav-label whitespace-nowrap text-[13.5px]">Lớp Hôm Nay</span>
+                </span>
+                <span class="px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-400/30 text-[10px] font-extrabold uppercase tracking-wider shrink-0">Live</span>
+            </button>
             <button type="button" onclick="switchTab('googleform')" id="btn-googleform"
                 class="tab-btn w-full flex items-center justify-between px-3.5 py-3 rounded-xl font-semibold"
                 role="tab" aria-selected="false" aria-controls="tab-googleform" title="Nộp Google Form">

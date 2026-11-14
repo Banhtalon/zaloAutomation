@@ -1266,3 +1266,26 @@
   - Khi ranh giới rủi ro chưa rõ hoặc phát hiện ảnh hưởng sang luồng ghi/bảo mật, tự động nâng lên **Luồng Đầy đủ**. Cả hai luồng đều giữ nguyên nguyên tắc cập nhật `CHANGELOG.md` + `PROJECT_STATE.md`, kiểm tra `allowlist` (không stage `.env`, `database.db`, secret, dữ liệu thật), đồng bộ GitHub (`DEC-040`) và báo cáo ngắn gọn "Chuẩn Hàng Không" kèm nhãn `[FAST-TRACK]` hoặc `[FULL GATE]`.
 - Consequences: Các chỉnh sửa nhỏ về hiển thị/giao diện/câu chữ chỉ mất ~15–30 giây để kiểm chứng và đồng bộ GitHub, trong khi các thay đổi rủi ro cao vẫn giữ nguyên lớp bảo vệ nghiêm ngặt của cổng cô lập và review độc lập.
 - Supersedes: Bổ sung cơ chế phân tầng cổng kiểm chứng cho `DEC-036` và `DEC-040`.
+
+## DEC-048 — Wave 7: Trang riêng `Lớp Hôm Nay (Live)`, spotlight SPCK Coding B12–14 & đồng bộ BCNB 2 tuần
+
+- Date: 2026-11-15.
+- Status: Accepted by Owner.
+- Context: Chủ sở hữu cần một màn hình chuyên biệt theo ngày hiện tại để theo dõi thời gian thực các lớp diễn ra hôm nay theo khung giờ (`Chưa diễn ra` / `Đang diễn ra` / `Đã kết thúc`), trạng thái báo cáo Zalo (kèm ảnh chụp chứng cứ `2x`), điểm danh & nhận xét LMS, tiến độ SPCK Coding Buổi 12–14 (miễn `PTB`/`CSB`), và tick 2 cột `NX Zalo` + `NX LMS` trên BCNB đúng tuần mà không làm xáo trộn luồng batch `/run-scan` hay `Dashboard` tuần hiện có.
+- Decision:
+  - **Backend tổng hợp & đồng bộ theo ngày (`services/today_ops_service.py`, `api/today_routes.py`)**: Cung cấp `GET /api/today/overview` và `POST /api/today/sync` (job `TODAY_REALTIME_SYNC`), gom tối đa 2 tuần liên quan (`required_week` của buổi học + `latest_week`), tính `phase` (`UPCOMING`/`ONGOING`/`ENDED`), tái sử dụng `zalo_target_eligibility` cho các lớp đủ điều kiện giờ học, chụp ảnh chứng cứ tỷ lệ `capture_scale=2.0`, và khóa ghi an toàn qua `bcnb_update_lock` + `job_dispatcher`.
+  - **Quy chuẩn SPCK & phân loại LMS đồng bộ backend–frontend**: Tái sử dụng `report_status.classify_course_track` cho Coding vs Robotics vs `PTB`/`CSB` (`spck_exempt_course=True`, fallback `"⚪ Miễn SPCK (PTB/CSB)"` khi chưa quét/`NOT_REQUIRED`), tách hàm `isTodaySpckComplete` trong `static/js/today.js`, và chỉ tính thiếu nhận xét LMS/SPCK sau khi `phase === 'ENDED'`.
+  - **Giao diện tách biệt hoàn toàn (`#btn-today` / `#tab-today`)**: Thêm `templates/partials/today.html`, `static/js/today.js` và style `#tab-today` trong `static/css/app.css` với 6 bộ lọc, panel spotlight SPCK B12–14, hộp thoại bằng chứng và nút sao chép danh sách nhắc giáo viên; bảo toàn nguyên trạng các tab `Dashboard` tuần và giữ ranh giới fail-closed (`BCNB_DRY_RUN` / `confirm` / target matching của `DEC-032`, `DEC-044`).
+- Consequences: Vận hành theo ngày có công cụ kiểm tra và đối chiếu tức thì, giảm bỏ sót báo cáo Zalo/LMS/SPCK B12–14 trước hạn cuối ngày nhưng vẫn tách biệt hoàn toàn với chu kỳ quét tuần.
+
+## DEC-049 — Đổi Review độc lập luồng `[FULL GATE]` sang `Argon High` (`gemini-4-argon-high`) qua Swarm read-only
+
+- Date: 2026-11-15.
+- Status: Accepted by Owner.
+- Context: Trong quá trình triển khai Wave 7, việc gọi review độc lập ngoài qua Codex CLI (`gpt-6.1-sol`) gặp giới hạn quota giữa chừng (`02:21 AM` reset), gây nghẽn chuỗi xác minh `#2`, `#3` và `#4`; Owner chỉ đạo chuyển sang `Argon High` để tiếp tục tiêu chuẩn review độc lập chất lượng cao.
+- Decision:
+  - **Mô hình review chuẩn mới**: Thay `gpt-6.1-sol` bằng **`Argon High` (`gemini-4-argon-high`)** cho bước Review độc lập bắt buộc của luồng **Đầy đủ (`FULL GATE`)** trong `AGENTS.md` và `HANDOFF.md`.
+  - **Cô lập ngữ cảnh qua `swarm` read-only**: Khởi tạo verifier riêng bằng `swarm` (`action="add"`, `model="gemini-4-argon-high"`, `workspace="inherit"`, không truyền `fork`) để người review bắt đầu hoàn toàn độc lập với hội thoại Lead, tự đọc diff/mã nguồn/test ở chế độ chỉ đọc và trả về `VERDICT: PASS` hoặc `NEEDS_FIX` kèm vị trí dòng cụ thể cho đến khi mọi điểm `[P0]/[P1]/[P2]` được khắc phục và tái xác minh đạt `PASS`.
+  - **Vận hành swarm gọn sạch**: Sau khi hoàn tất, Lead post `[done] ...` không gắn `@` để monitor tự nghỉ và `kill` các worker review đã hoàn thành.
+- Consequences: Quy trình `[FULL GATE]` duy trì được tính độc lập hai cặp mắt mà không phụ thuộc tiến trình Codex CLI bên ngoài và thống nhất hạ tầng điều phối trên `swarm`.
+- Supersedes: Cập nhật công cụ Review độc lập trong `DEC-036`, `DEC-040` và `DEC-047`.

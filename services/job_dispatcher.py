@@ -199,6 +199,15 @@ class JobDispatcher:
                 mode_from_job(job),
                 **lms_kwargs,
             )
+        elif job_type == "TODAY_REALTIME_SYNC":
+            from services.today_ops_service import run_today_realtime_sync
+
+            await run_today_realtime_sync(
+                job_id,
+                payload,
+                mode_from_job(job),
+                runtime=self.worker_runtime,
+            )
         else:
             raise ValueError(f"Không có worker cho loại job {job_type}.")
 

@@ -4,6 +4,23 @@ Tài liệu này ghi lại toàn bộ quá trình hình thành, phát triển ki
 
 ---
 
+## [2026-11-15] — Wave 7: Trang riêng `Lớp Hôm Nay` (Live LMS/Zalo, SPCK Coding B12–14, Tick BCNB đúng tuần) & Đổi Review độc lập sang `Argon High` (`DEC-048`, `DEC-049`)
+
+- **Backend theo dõi lớp trong ngày & đồng bộ BCNB đúng tuần (`services/today_ops_service.py`, `api/today_routes.py`, `services/job_dispatcher.py`, `repositories/report_repository.py`)**:
+  - Thêm API `GET /api/today/overview` và `POST /api/today/sync` (`api/today_routes.py`, gắn vào `main.py`, chuẩn hóa lỗi qua `public_error` không rò rỉ `str(exc)`).
+  - Thêm dịch vụ `services/today_ops_service.py` (`build_today_overview`, `run_today_realtime_sync`) và job `TODAY_REALTIME_SYNC`: gom lớp diễn ra trong ngày xuyên tối đa 2 tuần BCNB (`required_week` + `latest_week`), lấy khung giờ + điểm danh + nhận xét + SPCK live từ LMS (`lms_quality_service.py`), xác định pha `UPCOMING` / `ONGOING` / `ENDED` qua `max(group_end, lms_end)` (`zalo_target_eligibility.py`), quét Zalo kèm ảnh chụp Retina `2x` cho ca đủ điều kiện và đồng bộ kết quả về `Báo Cáo Tuần` khi `check_only=False`.
+  - Hỗ trợ `check_only` (100% chỉ đọc, không click/ghi BCNB hay ghi đè `zalo_batch_targets`) và nâng cấp `update_bcnb_reports` / `bcnb_actions.py` / `bcnb_safety.py` để tick an toàn cả `NX Zalo` + `NX LMS` (`is_lms_ready_for_bcnb_tick`) định danh đúng dòng theo `(class_code, lesson, class_date_iso, session_id)` với exception khử PII.
+  - Chuẩn hóa quy tắc SPCK theo khối trong `services/report_status.py` và `services/today_ops_service.py`: Coding B12–14 theo dõi SPCK, Robotics chỉ kiểm tra nhận xét buổi học, khóa miễn `PTB`/`CSB` bổ sung fallback `"⚪ Miễn SPCK (PTB/CSB)"` khi chưa quét/`NOT_REQUIRED`.
+- **Giao diện Trang riêng `Lớp Hôm Nay` (`templates/partials/today.html`, `static/js/today.js`, `templates/partials/sidebar.html`, `templates/index.html`, `static/js/state.js`, `static/js/jobs.js`, `static/css/app.css`)**:
+  - Bổ sung tab `#btn-today` / `#tab-today` tách biệt hoàn toàn với `Dashboard` tuần: chọn ngày, 5 thẻ KPI, panel spotlight **SPCK Buổi 12–14 Coding / Robotics**, 8 bộ lọc nhanh + tìm kiếm, bảng Timeline 7 cột theo dõi `NX Zalo` & `NX LMS`, modal xem ảnh minh chứng `2x`, và nút sao chép danh sách nhắc giảng viên thiếu Zalo / LMS / SPCK (đánh dấu thiếu LMS/SPCK sau khi `phase === 'ENDED'`, dùng chung `isTodaySpckComplete`).
+- **Quy trình Review độc lập `Argon High` (`DEC-049`, `AGENTS.md`, `HANDOFF.md`)**:
+  - Chuyển reviewer độc lập luồng `[FULL GATE]` từ Codex CLI `gpt-6.1-sol` sang **`Argon High` (`gemini-4-argon-high`)** chạy trên `swarm` read-only không `fork`.
+- **Tệp thay đổi (25 file mã nguồn/test/config + 6 tài liệu = 31 files)**: `api/today_routes.py`, `main.py`, `repositories/report_repository.py`, `services/{bcnb_actions,bcnb_safety,job_dispatcher,lms_quality_service,report_status,today_ops_service,zalo_bcnb_service,zalo_target_eligibility}.py`, `static/css/app.css`, `static/js/{jobs,state,today}.js`, `templates/{index.html,partials/sidebar.html,partials/today.html}`, `tests/{check_app_smoke,check_phase3_quality,check_template_js.js,test_today_eligibility_and_bcnb,test_today_ops_service,test_today_routes}.py`, `AGENTS.md`, `CHANGELOG.md`, `HANDOFF.md`, `PROJECT_DECISIONS.md`, `PROJECT_STATE.md`, `README.md`, `UPGRADE_PROGRESS.md`.
+- **Bằng chứng kiểm chứng (`[FULL GATE]`)**:
+  - `.\CHECK_QUALITY.ps1 -Isolated`: `exit 0` (`QUALITY GATE PASSED`), `749/749` regression tests `OK` (`326.261s`), branch coverage `79.4%` (`api/today_routes.py` `82.2%`, `services/today_ops_service.py` `77.5%`), Ruff `0`, Mypy `0` lỗi trên `80` source files, Phase 3/4/5/6/7/8/9/9B + `check_app_smoke` PASS, `migrations=[1, 2, 3, 4]`, `secrets=0`.
+  - `node tests/check_template_js.js` -> `template-js-contract-ok scripts=8 handlers=46 behavior=14`; offline `graphify update .` -> `5089` nodes, `15379` edges, `183` communities.
+  - Review độc lập: Gate #1 `gpt-6.1-sol (high)` PASS; Gate #2 `Argon High` (`reviewer-72` `#37`/`#41`) `VERDICT: PASS`; Gate #3 `Argon High` (`reviewer-73` `#42`) `VERDICT: PASS`; Gate #4 tổng thể `Argon High` (`reviewer-74` `#44`) `VERDICT: PASS` (`[P0]=0, [P1]=0, [P2]=0`). Chưa chạy quét/tick BCNB thật trên production.
+
 ## [2026-11-14] — Bổ sung quy tắc bắt buộc tự động dùng Graphify Offline 100% cho AI (`.agents/rules/graphify.md`, `AGENTS.md`, `GEMINI.md`)
 
 - **Thiết lập Always-On Rule cho Antigravity & các Agent (`.agents/rules/graphify.md`, `AGENTS.md`, `GEMINI.md`)**:

@@ -694,6 +694,11 @@ input::placeholder {
     overflow-y: visible !important;
 }
 
+#tab-today .table-scroll {
+    flex: 1 0 auto !important;
+    overflow-y: visible !important;
+}
+
 .data-table {
     min-width: 900px;
     color: #0F172A !important;

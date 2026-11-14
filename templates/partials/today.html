@@ -1,0 +1,190 @@
+<!-- TAB 2: LỚP HÔM NAY (REAL-TIME DAILY OPERATIONS) -->
+<div id="tab-today" class="tab-content hidden shrink-0 flex-col space-y-3.5" role="tabpanel" aria-labelledby="btn-today">
+    <!-- 5 KPI SUMMARY CARDS -->
+    <div class="metrics-grid grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 shrink-0">
+        <div class="metric-card glass-panel glow-card-blue flex items-center justify-between">
+            <div class="flex items-center min-w-0">
+                <div class="metric-card__icon rounded-xl bg-blue-600 text-white border-2 border-blue-800 border-b-4 flex items-center justify-center text-lg shadow-sm mr-3.5 shrink-0">
+                    <i class="fa-solid fa-calendar-check" aria-hidden="true"></i>
+                </div>
+                <div class="min-w-0">
+                    <p class="metric-card__label uppercase">Tổng lớp hôm nay</p>
+                    <h3 class="metric-card__value font-extrabold font-mono mt-0.5 tabular-nums" id="today-kpi-total">0</h3>
+                    <p id="today-kpi-total-sub" class="text-[11px] font-semibold text-slate-600 mt-0.5 truncate">Đang tải lịch...</p>
+                </div>
+            </div>
+            <span class="text-[10px] font-extrabold text-blue-700 bg-blue-50 px-2 py-1 rounded-md border border-blue-300 uppercase shrink-0">Lịch</span>
+        </div>
+
+        <div class="metric-card glass-panel glow-card-green flex items-center justify-between">
+            <div class="flex items-center min-w-0">
+                <div class="metric-card__icon rounded-xl bg-emerald-600 text-white border-2 border-emerald-800 border-b-4 flex items-center justify-center text-lg shadow-sm mr-3.5 shrink-0">
+                    <i class="fa-solid fa-comment-dots" aria-hidden="true"></i>
+                </div>
+                <div class="min-w-0">
+                    <p class="metric-card__label uppercase">Zalo đã nộp</p>
+                    <h3 class="metric-card__value font-extrabold font-mono mt-0.5 tabular-nums" id="today-kpi-zalo">0</h3>
+                    <p id="today-kpi-zalo-sub" class="text-[11px] font-semibold text-slate-600 mt-0.5 truncate">Đủ 0 · Trễ 0 · Thiếu 0</p>
+                </div>
+            </div>
+            <span class="text-[10px] font-extrabold text-emerald-800 bg-emerald-50 px-2 py-1 rounded-md border border-emerald-300 uppercase shrink-0">Zalo</span>
+        </div>
+
+        <div class="metric-card glass-panel glow-card-blue flex items-center justify-between">
+            <div class="flex items-center min-w-0">
+                <div class="metric-card__icon rounded-xl bg-indigo-600 text-white border-2 border-indigo-800 border-b-4 flex items-center justify-center text-lg shadow-sm mr-3.5 shrink-0">
+                    <i class="fa-solid fa-graduation-cap" aria-hidden="true"></i>
+                </div>
+                <div class="min-w-0">
+                    <p class="metric-card__label uppercase">LMS &amp; Điểm danh</p>
+                    <h3 class="metric-card__value font-extrabold font-mono mt-0.5 tabular-nums" id="today-kpi-lms">0</h3>
+                    <p id="today-kpi-lms-sub" class="text-[11px] font-semibold text-slate-600 mt-0.5 truncate">ĐD chưa XM 0 · Thiếu NX 0</p>
+                </div>
+            </div>
+            <span class="text-[10px] font-extrabold text-indigo-800 bg-indigo-50 px-2 py-1 rounded-md border border-indigo-300 uppercase shrink-0">LMS</span>
+        </div>
+
+        <div class="metric-card glass-panel glow-card-amber flex items-center justify-between">
+            <div class="flex items-center min-w-0">
+                <div class="metric-card__icon rounded-xl bg-amber-500 text-white border-2 border-amber-700 border-b-4 flex items-center justify-center text-lg shadow-sm mr-3.5 shrink-0">
+                    <i class="fa-solid fa-star" aria-hidden="true"></i>
+                </div>
+                <div class="min-w-0">
+                    <p class="metric-card__label uppercase">SPCK Buổi 12–14</p>
+                    <h3 class="metric-card__value font-extrabold font-mono mt-0.5 tabular-nums" id="today-kpi-spck">0</h3>
+                    <p id="today-kpi-spck-sub" class="text-[11px] font-semibold text-slate-600 mt-0.5 truncate">Coding 0/0 · Robotics 0/0</p>
+                </div>
+            </div>
+            <span class="text-[10px] font-extrabold text-amber-800 bg-amber-50 px-2 py-1 rounded-md border border-amber-300 uppercase shrink-0">SPCK</span>
+        </div>
+
+        <div class="metric-card glass-panel glow-card-rose flex items-center justify-between">
+            <div class="flex items-center min-w-0">
+                <div class="metric-card__icon rounded-xl bg-rose-600 text-white border-2 border-rose-800 border-b-4 flex items-center justify-center text-lg shadow-sm mr-3.5 shrink-0">
+                    <i class="fa-solid fa-list-check" aria-hidden="true"></i>
+                </div>
+                <div class="min-w-0">
+                    <p class="metric-card__label uppercase">Cần tick BCNB</p>
+                    <h3 class="metric-card__value font-extrabold font-mono mt-0.5 tabular-nums" id="today-kpi-bcnb">0</h3>
+                    <p id="today-kpi-bcnb-sub" class="text-[11px] font-semibold text-slate-600 mt-0.5 truncate">Chờ NX Zalo 0 · NX LMS 0</p>
+                </div>
+            </div>
+            <span class="text-[10px] font-extrabold text-rose-700 bg-rose-50 px-2 py-1 rounded-md border border-rose-300 uppercase shrink-0">BCNB</span>
+        </div>
+    </div>
+
+    <!-- CONTROL & REALTIME SYNC BAR -->
+    <div class="glass-panel p-3.5 space-y-2.5 shrink-0">
+        <!-- ROW 1: DATE, SNAPSHOT STATUS & REALTIME ACTIONS -->
+        <div class="flex flex-wrap items-center justify-between gap-2.5">
+            <div class="flex flex-wrap items-center gap-2 bg-slate-100 p-1.5 rounded-xl border border-slate-300">
+                <label for="today-date-input" class="text-xs font-extrabold text-slate-700 uppercase pl-1.5 whitespace-nowrap">
+                    <i class="fa-regular fa-calendar mr-1 text-blue-700" aria-hidden="true"></i>Ngày:
+                </label>
+                <input type="date" id="today-date-input" onchange="onTodayDateChange()" class="input-3d rounded-lg px-2.5 py-1 text-xs font-bold text-slate-900">
+                <button type="button" id="today-reset-date-btn" onclick="resetTodayDate()" class="action-button action-button--tool text-xs px-2.5 py-1.5" title="Quay về ngày hôm nay (giờ Việt Nam)">
+                    <i class="fa-solid fa-clock-rotate-left text-blue-600" aria-hidden="true"></i> Hôm nay
+                </button>
+                <button type="button" id="today-refresh-overview-btn" onclick="loadTodayOverview()" class="preflight-refresh px-2.5 py-1.5" title="Tải lại dữ liệu tổng quan Lớp Hôm Nay" aria-label="Làm mới dữ liệu Lớp Hôm Nay">
+                    <i class="fa-solid fa-arrows-rotate text-blue-600" aria-hidden="true"></i>
+                </button>
+                <span id="today-mode-badge" class="rounded-lg bg-slate-800 text-white border border-slate-950 px-2.5 py-1 text-[11px] font-bold">Chế độ: Đang kiểm tra</span>
+                <span id="today-snapshot-badge" class="rounded-lg bg-white text-slate-800 border border-slate-300 px-2.5 py-1 text-[11px] font-bold">Kế hoạch BCNB: Chưa tải</span>
+            </div>
+
+            <div class="flex flex-wrap items-center gap-2 bg-slate-200/90 p-1.5 rounded-xl border border-slate-400/80" role="group" aria-label="Thao tác kiểm tra và đồng bộ Lớp Hôm Nay">
+                <button type="button" id="today-check-live-btn" onclick="triggerTodayLiveSync(true)" class="action-button action-button--scan" title="Kiểm tra Live tin nhắn Zalo và LMS mà không ghi BCNB">
+                    <i class="fa-solid fa-bolt" aria-hidden="true"></i> Kiểm tra Live ngay
+                </button>
+                <button type="button" id="today-sync-bcnb-btn" onclick="triggerTodayLiveSync(false)" class="action-button action-button--lms" title="Quét Live Zalo + LMS các lớp đã tan ca và tick đúng tuần BCNB">
+                    <i class="fa-solid fa-check-double" aria-hidden="true"></i> Quét &amp; Tick BCNB đúng tuần
+                </button>
+                <button type="button" id="today-sync-selected-btn" onclick="triggerTodaySelectedSync()" disabled class="action-button action-button--purple" title="Chỉ quét & tick BCNB cho các lớp đã chọn">
+                    <i class="fa-solid fa-list-check" aria-hidden="true"></i> Quét các lớp đã chọn (0)
+                </button>
+                <button type="button" id="today-copy-reminders-btn" onclick="copyTodayReminders()" class="action-button action-button--tool" title="Copy danh sách lớp thiếu Zalo, LMS, hoặc SPCK theo từng giáo viên">
+                    <i class="fa-regular fa-copy text-blue-600" aria-hidden="true"></i> Copy nhắc GV
+                </button>
+            </div>
+        </div>
+
+        <!-- ROW 2: SEARCH & 8 FILTER CHIPS -->
+        <div class="well-inset p-2.5 flex flex-wrap items-center justify-between gap-2.5 text-xs text-slate-800">
+            <label class="search-box search-box--compact input-3d rounded-lg flex items-center overflow-hidden min-w-[230px]" for="today-search-input">
+                <span class="pl-3 text-slate-500" aria-hidden="true"><i class="fa-solid fa-magnifying-glass"></i></span>
+                <span class="sr-only">Tìm lớp, nhóm Zalo hoặc giáo viên trong ngày</span>
+                <input type="search" id="today-search-input" onkeyup="filterTodayRows()" onchange="filterTodayRows()" class="bg-transparent border-none text-xs font-semibold text-slate-900 focus:ring-0 block w-full py-1.5 px-2.5 outline-none" placeholder="Tìm mã lớp, nhóm, giáo viên...">
+            </label>
+
+            <div class="flex flex-wrap items-center gap-1.5" role="group" aria-label="Bộ lọc trạng thái lớp hôm nay">
+                <button type="button" id="today-chip-all" onclick="setTodayFilter('all')" class="today-filter-chip px-2.5 py-1 rounded-lg border font-bold text-xs bg-blue-600 text-white border-blue-700 transition-colors duration-150">Tất cả (0)</button>
+                <button type="button" id="today-chip-attention" onclick="setTodayFilter('attention')" class="today-filter-chip px-2.5 py-1 rounded-lg border font-bold text-xs bg-white text-slate-700 border-slate-300 transition-colors duration-150">Cần xử lý (0)</button>
+                <button type="button" id="today-chip-ongoing" onclick="setTodayFilter('ongoing')" class="today-filter-chip px-2.5 py-1 rounded-lg border font-bold text-xs bg-white text-slate-700 border-slate-300 transition-colors duration-150">Đang diễn ra (0)</button>
+                <button type="button" id="today-chip-upcoming" onclick="setTodayFilter('upcoming')" class="today-filter-chip px-2.5 py-1 rounded-lg border font-bold text-xs bg-white text-slate-700 border-slate-300 transition-colors duration-150">Sắp diễn ra (0)</button>
+                <button type="button" id="today-chip-ended" onclick="setTodayFilter('ended')" class="today-filter-chip px-2.5 py-1 rounded-lg border font-bold text-xs bg-white text-slate-700 border-slate-300 transition-colors duration-150">Đã tan ca (0)</button>
+                <button type="button" id="today-chip-missing-zalo" onclick="setTodayFilter('missing_zalo')" class="today-filter-chip px-2.5 py-1 rounded-lg border font-bold text-xs bg-white text-slate-700 border-slate-300 transition-colors duration-150">Thiếu Zalo (0)</button>
+                <button type="button" id="today-chip-missing-lms" onclick="setTodayFilter('missing_lms')" class="today-filter-chip px-2.5 py-1 rounded-lg border font-bold text-xs bg-white text-slate-700 border-slate-300 transition-colors duration-150">Thiếu LMS / NX (0)</button>
+                <button type="button" id="today-chip-spck" onclick="setTodayFilter('spck')" class="today-filter-chip px-2.5 py-1 rounded-lg border font-bold text-xs bg-white text-slate-700 border-slate-300 transition-colors duration-150">SPCK B12–B14 (0)</button>
+            </div>
+        </div>
+
+        <!-- ROW 3: SYNC STATUS BANNER -->
+        <div id="today-sync-banner" class="well-inset px-3 py-2 flex flex-wrap items-center justify-between gap-2 text-xs font-semibold text-slate-800">
+            Đang chờ tải lịch lớp hôm nay...
+        </div>
+    </div>
+
+    <!-- SPCK B12-B14 SPOTLIGHT PANEL -->
+    <div id="today-spck-panel" class="hidden glass-panel p-3.5 space-y-2.5 shrink-0 border-l-4 border-l-amber-500">
+        <div class="flex flex-wrap items-center justify-between gap-2">
+            <div class="flex items-center gap-2">
+                <i class="fa-solid fa-star text-amber-600" aria-hidden="true"></i>
+                <h2 class="text-xs font-extrabold uppercase tracking-wider text-slate-900">Điểm nóng SPCK Buổi 12 – 13 – 14</h2>
+            </div>
+            <span id="today-spck-summary" class="text-xs font-bold text-amber-900 bg-amber-50 border border-amber-300 px-2.5 py-0.5 rounded-md">0 lớp</span>
+        </div>
+        <div id="today-spck-cards" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2.5"></div>
+    </div>
+
+    <!-- MAIN CHRONOLOGICAL DAILY TIMELINE TABLE -->
+    <div class="data-panel glass-panel shrink-0 flex flex-col overflow-hidden">
+        <div class="bg-slate-900 text-white px-5 py-2.5 border-b-2 border-slate-950 flex flex-wrap items-center justify-between gap-2 shrink-0">
+            <div class="flex items-center gap-2.5">
+                <i class="fa-solid fa-clock text-emerald-400" aria-hidden="true"></i>
+                <span class="text-xs font-extrabold uppercase tracking-wider">Bảng theo dõi Real-time lớp học trong ngày (theo khung giờ)</span>
+            </div>
+            <span class="text-[11px] font-bold text-slate-300">Chỉ lớp đã tan ca &amp; có nhóm Zalo mới được quét và tick BCNB đúng tuần</span>
+        </div>
+
+        <div class="table-scroll shrink-0 flex-1">
+            <table id="today-results-table" class="data-table w-full text-sm text-left tabular-nums">
+                <thead class="text-[11px] font-extrabold uppercase tracking-wider sticky top-0 z-10 border-b-2 border-slate-400">
+                    <tr>
+                        <th class="px-3 py-3 w-10 text-center">
+                            <input type="checkbox" id="today-select-all" onchange="toggleSelectAllTodayRows(this.checked)" aria-label="Chọn tất cả lớp đang hiển thị">
+                        </th>
+                        <th class="px-4 py-3">Khung giờ &amp; Trạng thái</th>
+                        <th class="px-4 py-3">Lớp · Nhóm · Tuần</th>
+                        <th class="px-4 py-3">Giáo viên</th>
+                        <th class="px-4 py-3">Zalo &amp; Minh chứng</th>
+                        <th class="px-4 py-3">LMS · ĐD · NX · SPCK</th>
+                        <th class="px-4 py-3 text-center">BCNB &amp; Thao tác</th>
+                    </tr>
+                </thead>
+                <tbody id="today-results-tbody" class="divide-y bg-transparent">
+                    <tr>
+                        <td colspan="7" class="border-none">
+                            <div class="empty-state flex flex-col items-center justify-center px-6 py-10 text-center">
+                                <div class="empty-state__icon flex items-center justify-center mb-4">
+                                    <i class="fa-regular fa-calendar text-3xl" aria-hidden="true"></i>
+                                </div>
+                                <p class="font-extrabold text-slate-800">Chưa có dữ liệu Lớp Hôm Nay</p>
+                                <p class="mt-1 text-sm font-medium text-slate-600">Mở tab này hoặc bấm Kiểm tra Live ngay để tổng hợp lịch học trong ngày.</p>
+                            </div>
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>

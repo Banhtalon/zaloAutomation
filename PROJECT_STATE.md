@@ -1,21 +1,26 @@
 # PROJECT STATE — Zalo Automation
 
-> Snapshot trạng thái hiện hành, cập nhật **2026-11-14**. Source/runtime kiểm chứng mới có độ tin cậy cao hơn tài liệu. Không dùng file này làm quyền chạy thao tác thật trên hệ thống ngoài. Toàn bộ lịch sử phát triển theo thời gian xem tại [CHANGELOG.md](CHANGELOG.md); các quyết định kiến trúc & quy trình xem tại [PROJECT_DECISIONS.md](PROJECT_DECISIONS.md).
+> Snapshot trạng thái hiện hành, cập nhật **2026-11-15**. Source/runtime kiểm chứng mới có độ tin cậy cao hơn tài liệu. Không dùng file này làm quyền chạy thao tác thật trên hệ thống ngoài. Toàn bộ lịch sử phát triển theo thời gian xem tại [CHANGELOG.md](CHANGELOG.md); các quyết định kiến trúc & quy trình xem tại [PROJECT_DECISIONS.md](PROJECT_DECISIONS.md).
 
 ## Tổng quan kiểm chứng & năng lực hiện hành
 
-| Hạng mục | Trạng thái đã kiểm chứng gần nhất (`2026-11-13`) |
+| Hạng mục | Trạng thái đã kiểm chứng gần nhất (`2026-11-15`) |
 |---|---|
-| Cổng chất lượng cô lập (`.\CHECK_QUALITY.ps1 -Isolated`) | `QUALITY GATE PASSED` (exit `0`), `719/719` regression tests `OK`, branch coverage `78.9%` |
-| Static analysis & Bảo mật | Ruff `0` lỗi, Mypy `0` lỗi trên `78` source files, `secrets=0` |
-| Hợp đồng Frontend JS (`node tests/check_template_js.js`) | `template-js-contract-ok scripts=7 handlers=37 behavior=13` (exit `0`) |
+| Cổng chất lượng cô lập (`.\CHECK_QUALITY.ps1 -Isolated`) | `QUALITY GATE PASSED` (exit `0`), `749/749` regression tests `OK`, branch coverage `79.4%` |
+| Static analysis & Bảo mật | Ruff `0` lỗi, Mypy `0` lỗi trên `80` source files, `secrets=0`, `migrations=[1, 2, 3, 4]` |
+| Hợp đồng Frontend JS (`node tests/check_template_js.js`) | `template-js-contract-ok scripts=8 handlers=46 behavior=14` (exit `0`) |
+| Trang riêng `Lớp Hôm Nay` (Live LMS, Zalo & SPCK B12–14) | Đã triển khai đầy đủ (`DEC-048`): timeline ca học 2 tuần (`UPCOMING`/`ONGOING`/`ENDED`), `GET /api/today/overview`, job `TODAY_REALTIME_SYNC`, spotlight SPCK Coding B12–14 (miễn `PTB`/`CSB`), ảnh `2x`, tick dòng chuẩn `(class_code, lesson, class_date_iso, session_id)` cho `NX Zalo` + `NX LMS` (chưa chạy ghi production) |
 | Auto Discovery, Quét Zalo song song & Tích BCNB | Đã triển khai đầy đủ: quét chọn lọc (`selected_target_keys`), duyệt tay 1-Click có vết SHA-256, hoãn buổi học chưa kết thúc (`⏳ Chưa tới giờ kiểm tra`), AI gợi ý báo cáo Zalo (`DEC-036`, `DEC-045`) |
 | Kiểm định chất lượng LMS, SPCK & Ghi chú QC Teaching | Đã triển khai: Tier-1 Bulk GraphQL + Phễu 2 tầng AI nhận xét LMS khử PII, kiểm định SPCK Buổi 12–14 theo điểm danh (miễn PTB/CSB `DEC-044`, quy tắc Robotics `DEC-045`), tự động hợp nhất & ghi `Mô tả vấn đề (TE/TF/QC)` có read-back (`DEC-038`) |
 | Báo cáo tuần, Xuất CSV lỗi & Email Quản lý | Đã triển khai: bảng 9 cột, lỗi thiếu Zalo mức đỏ nặng nhất (`❌ Chưa nhận xét`, `#dc2626` bọc `<span>` tương thích Webmail BizFly Cloud), cảnh báo vàng `⚠️` (`#b45309`) cho SPCK thiếu nộp/thiếu nhận xét (`DEC-046`), khóa cứng `MANAGER_EMAIL_ALLOWLIST` |
 | Tick LMS tự động & Nộp Google Form | Đã triển khai: quét Web LMS lập kế hoạch chọn từng lớp (`selection_digest`), lấy học viên trực tiếp từ LMS cho Google Form kèm idempotency & ảnh bằng chứng ẩn danh |
-| Quy trình điều phối AI & Đồng bộ mã nguồn | Cơ chế 2 luồng `[FAST-TRACK]` / `[FULL GATE]` (`DEC-047`), nhánh chính chuẩn hóa `main` (`origin/main`) làm Source of Truth (`DEC-040`) |
+| Quy trình điều phối AI & Đồng bộ mã nguồn | Cơ chế 2 luồng `[FAST-TRACK]` / `[FULL GATE]` (`DEC-047`), review độc lập **`Argon High`** (`gemini-4-argon-high` read-only `swarm`, `DEC-049`), nhánh chính `main` (`origin/main`) làm Source of Truth (`DEC-040`) |
 
 ## Các mốc cập nhật gần nhất
+
+- **2026-11-15 (Wave 7 — Trang riêng `Lớp Hôm Nay`, Spotlight SPCK B12–14 & Review `Argon High` — `DEC-048`, `DEC-049`, `[FULL GATE]`)**:
+  - Thêm trang riêng `#btn-today` / `#tab-today` (`api/today_routes.py`, `services/today_ops_service.py`, `templates/partials/today.html`, `static/js/today.js`) theo dõi thời gian thực ca học trong ngày xuyên 2 tuần BCNB (`required_week` + `latest_week`), truy vấn live LMS + SPCK B12–14, quét Zalo chụp ảnh `2x`, nhắc giáo viên thiếu Zalo/LMS/SPCK sau khi ca học kết thúc (`phase === 'ENDED'`) và đồng bộ tick `NX Zalo` + `NX LMS` đúng dòng BCNB (`CHECK_QUALITY -Isolated` `749/749 PASS`, `79.4%` coverage; Gate #1 `Sol 6.1` PASS; Gate #2–#4 `Argon High` `#41`/`#42`/`#44` `VERDICT: PASS`).
+  - Đổi công cụ Review độc lập `[FULL GATE]` sang `Argon High` (`gemini-4-argon-high`, `swarm` read-only) tại `AGENTS.md` và `HANDOFF.md` (`DEC-049`).
 
 - **2026-11-14 (Quy tắc tự động tra cứu & đồng bộ Graphify Offline 100% — `[FAST-TRACK]`)**:
   - Tạo `.agents/rules/graphify.md` (`trigger: always_on`) và cập nhật `AGENTS.md`, `GEMINI.md`: bắt buộc tra cứu `graphify query`/`explain`/`path` trước khi đọc code tràn lan, chạy `graphify update .` sau khi sửa code, bảo toàn `.graphifyignore` và khóa cứng chế độ offline 100% (`$env:GRAPHIFY_BACKEND="none"`, `--code-only`, cấm gọi API ngoài).

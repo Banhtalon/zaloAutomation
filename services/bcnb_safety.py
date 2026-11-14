@@ -527,6 +527,36 @@ async def resolve_lms_columns(page) -> tuple[int, int]:
     return class_indexes[0], lms_indexes[0]
 
 
+def _parse_bcnb_cell_date_iso(raw_text: str, *, fallback_year: int) -> str | None:
+    """Extract YYYY-MM-DD from a BCNB schedule cell such as ``18:00\\n14/11/2026``."""
+    from datetime import date
+
+    text = str(raw_text or "").strip()
+    if not text:
+        return None
+    iso_match = re.fullmatch(r"(\d{4})-(\d{1,2})-(\d{1,2})", text)
+    if iso_match:
+        try:
+            year_i, month_i, day_i = (int(part) for part in iso_match.groups())
+            return date(year_i, month_i, day_i).isoformat()
+        except ValueError:
+            return None
+    matches = re.findall(
+        r"(?<!\d)(\d{1,2})[/.-](\d{1,2})(?:[/.-](\d{2,4}))?(?!\d)",
+        text,
+    )
+    if not matches:
+        return None
+    day_s, month_s, year_s = matches[-1]
+    year_val = int(year_s) if year_s else fallback_year
+    if year_val < 100:
+        year_val += 2000
+    try:
+        return date(year_val, int(month_s), int(day_s)).isoformat()
+    except ValueError:
+        return None
+
+
 async def verify_checkbox_persisted(
     page,
     *,
@@ -535,6 +565,8 @@ async def verify_checkbox_persisted(
     week: int,
     year: int,
     lesson: str | None = None,
+    class_date_iso: str | None = None,
+    session_id: str | None = None,
 ) -> bool:
     """Hard reload and read a newly resolved checkbox from the BCNB server view."""
     await page.reload(wait_until="domcontentloaded")
@@ -542,7 +574,7 @@ async def verify_checkbox_persisted(
     if (selected_week, selected_year) != (week, year):
         raise RuntimeError("BCNB reload trả về sai tuần/năm cần xác minh.")
 
-    lesson_index = None
+    lesson_index: int | None = None
     if column_kind == "report":
         class_index, lesson_index, checkbox_index = await resolve_report_columns(page)
         if lesson is None:
@@ -551,6 +583,40 @@ async def verify_checkbox_persisted(
         class_index, checkbox_index = await resolve_lms_columns(page)
     else:
         raise RuntimeError("Loại checkbox BCNB không hợp lệ.")
+
+    target_date_iso: str | None = None
+    if class_date_iso is not None:
+        raw_date_iso = str(class_date_iso).strip() if isinstance(class_date_iso, str) else ""
+        if not raw_date_iso:
+            raise RuntimeError("Ngày học cần xác minh trên BCNB không được rỗng.")
+        target_date_iso = _parse_bcnb_cell_date_iso(raw_date_iso, fallback_year=year)
+        if target_date_iso is None:
+            raise RuntimeError("Ngày học cần xác minh trên BCNB không hợp lệ.")
+    target_session_id: str | None = None
+    if session_id is not None:
+        stripped_sid = str(session_id).strip() if isinstance(session_id, str) else str(session_id).strip()
+        if not stripped_sid:
+            raise RuntimeError("Mã buổi BCNB cần xác minh không được rỗng.")
+        target_session_id = stripped_sid
+    date_index: int | None = None
+    if (column_kind == "lms" and lesson is not None) or target_date_iso is not None:
+        header_cells = await page.locator("table tr").first.locator("th, td").all()
+        headers = [fold_text((await cell.inner_text()).strip()) for cell in header_cells]
+        matched = match_bcnb_column_indexes(headers)
+        if column_kind == "lms" and lesson is not None:
+            lesson_indexes = matched["lesson_indexes"]
+            if len(lesson_indexes) != 1:
+                raise RuntimeError(
+                    "Cấu trúc bảng BCNB đã thay đổi: thiếu cột buổi để xác minh dòng LMS."
+                )
+            lesson_index = lesson_indexes[0]
+        if target_date_iso is not None:
+            date_indexes = matched["class_date_indexes"]
+            if len(date_indexes) != 1:
+                raise RuntimeError(
+                    "Cấu trúc bảng BCNB đã thay đổi: thiếu cột Ngày học để xác minh duy nhất dòng."
+                )
+            date_index = date_indexes[0]
 
     target_code = _canonical_class_code(class_code)
     target_lesson = str(lesson).strip() if lesson is not None else None
@@ -562,6 +628,7 @@ async def verify_checkbox_persisted(
             class_index,
             checkbox_index,
             lesson_index if lesson_index is not None else 0,
+            date_index if date_index is not None else 0,
         )
         if len(cells) <= required_index:
             continue
@@ -571,6 +638,22 @@ async def verify_checkbox_persisted(
         if lesson_index is not None:
             observed_lesson = (await cells[lesson_index].inner_text()).strip()
             if observed_lesson != target_lesson:
+                continue
+        if date_index is not None and target_date_iso is not None:
+            observed_date = _parse_bcnb_cell_date_iso(
+                await cells[date_index].inner_text(),
+                fallback_year=year,
+            )
+            if observed_date != target_date_iso:
+                continue
+        if target_session_id is not None:
+            observed_sid = ""
+            if hasattr(row, "get_attribute"):
+                try:
+                    observed_sid = str((await row.get_attribute("data-session-id")) or "").strip()
+                except Exception:
+                    observed_sid = ""
+            if observed_sid != target_session_id:
                 continue
         matches.append(cells[checkbox_index].locator('input[type="checkbox"]').first)
 

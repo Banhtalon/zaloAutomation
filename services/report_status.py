@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from datetime import datetime, timedelta
 import re
-from typing import Any
+from typing import Any, TypeGuard
 import unicodedata
 
 from core.time_utils import now_business, now_utc, parse_timestamp, utc_iso
@@ -868,6 +868,173 @@ def resolve_spck_status(row: Mapping[str, Any]) -> str:
     return text
 
 
+_ROBOTICS_TRACK_RE = re.compile(r"(?:^|[-_])ROB(?:[-_]|\d|$)", flags=re.IGNORECASE)
+_SPCK_EXEMPT_COURSE_RE = re.compile(
+    r"(?:^|-)(?:PTB|CSB)(?:[0-9]+)?(?:-|$)",
+    flags=re.IGNORECASE,
+)
+_CODING_TRACK_TOKEN_RE = re.compile(
+    r"(?:^|[-_])(?:C4K|PTB|PTI|PTA|JSB|JSI|JSA|CSB|CSI|CSA|GB|GI|GA|SB|SI|SA|WEB|APP|PY)(?:[0-9]+)?(?=[-_]|$)",
+    flags=re.IGNORECASE,
+)
+_SPCK_APPLICABLE_LESSONS = frozenset({12, 13, 14})
+
+
+def classify_course_track(
+    class_code: Any,
+    khoi: Any = "",
+    lesson: Any = "",
+) -> dict[str, Any]:
+    """Classify a class session into CODING / ROBOTICS / OTHER and SPCK applicability."""
+
+    code_norm = normalize_class_code(class_code)
+    raw_upper = str(class_code or "").strip().upper()
+    khoi_ascii = (
+        unicodedata.normalize("NFKD", str(khoi or ""))
+        .encode("ascii", "ignore")
+        .decode("ascii")
+        .lower()
+    )
+    lesson_num = normalize_lesson_number(lesson)
+    is_robotics = bool(
+        "rob" in khoi_ascii or _ROBOTICS_TRACK_RE.search(raw_upper)
+    )
+    is_coding = (not is_robotics) and bool(
+        "coding" in khoi_ascii
+        or "lap trinh" in khoi_ascii
+        or _CODING_TRACK_TOKEN_RE.search(code_norm)
+    )
+    if is_robotics:
+        course_track = "ROBOTICS"
+    elif is_coding:
+        course_track = "CODING"
+    else:
+        course_track = "OTHER"
+
+    spck_exempt_course = bool(_SPCK_EXEMPT_COURSE_RE.search(code_norm))
+    is_spck_session = lesson_num in _SPCK_APPLICABLE_LESSONS
+    requires_spck = bool(is_spck_session and not spck_exempt_course)
+    return {
+        "course_track": course_track,
+        "is_coding": is_coding,
+        "is_robotics": is_robotics,
+        "spck_exempt_course": spck_exempt_course,
+        "lesson_num": lesson_num,
+        "is_spck_session": is_spck_session,
+        "requires_spck": requires_spck,
+    }
+
+
+def _is_non_negative_int(value: Any) -> TypeGuard[int]:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def is_lms_ready_for_bcnb_tick(row: Mapping[str, Any]) -> tuple[bool, str]:
+    """Return ``(ready, reason)`` for safely ticking BCNB's ``NX LMS`` checkbox."""
+
+    if not isinstance(row, Mapping):
+        return False, "INVALID_ROW"
+    if is_session_deferred(row):
+        return False, "SESSION_DEFERRED"
+
+    raw_st = row.get("scan_target")
+    st: Mapping[str, Any] = raw_st if isinstance(raw_st, Mapping) else {}
+    if row.get("lms_fetch_unavailable") is True or st.get("lms_fetch_unavailable") is True:
+        return False, "LMS_FETCH_UNAVAILABLE"
+
+    class_code = normalize_class_code(row.get("class_code") or st.get("class_code") or "")
+    khoi = str(row.get("khoi") or st.get("khoi") or "").strip()
+    track_info = classify_course_track(
+        class_code,
+        khoi=khoi,
+        lesson=row.get("lesson") or st.get("lesson") or "",
+    )
+
+    for container in (row, st):
+        for issue_key in ("lms_quality_issues", "quality_issues"):
+            issues = container.get(issue_key)
+            if isinstance(issues, list) and any(
+                issue_code(item) == ISSUE_CODE_LMS_MANUAL_CHECK for item in issues
+            ):
+                return False, "LMS_MANUAL_CHECK_REQUIRED"
+
+    comments = row.get("lms_comments", st.get("lms_comments"))
+    attendance = row.get("lms_attendance", st.get("lms_attendance"))
+    spck = row.get("lms_spck", st.get("lms_spck"))
+    if not isinstance(comments, Mapping) or not isinstance(attendance, Mapping):
+        return False, "LMS_NOT_EVALUATED"
+
+    att_status = str(attendance.get("status") or "").strip().upper()
+    comm_status = str(comments.get("status") or "").strip().upper()
+    unverified_att = attendance.get("unverified_count")
+    attended_count = attendance.get("attended_count")
+    submitted_comm = comments.get("submitted_count")
+
+    if not _is_non_negative_int(unverified_att) or not _is_non_negative_int(attended_count):
+        return False, "LMS_ATTENDANCE_UNVERIFIED"
+
+    spck_status = (
+        str(spck.get("status") or "").strip().upper()
+        if isinstance(spck, Mapping)
+        else ""
+    )
+
+    if att_status == "EXEMPT" and comm_status == "EXEMPT":
+        if unverified_att == 0 and attended_count == 0:
+            if has_spck_missing_fail(row) or has_spck_comment_missing_fail(row):
+                return False, "LMS_SPCK_INCOMPLETE"
+            if is_lesson_14(row) and not (class_code and track_info["spck_exempt_course"]):
+                if not isinstance(spck, Mapping) or spck_status != "EXEMPT":
+                    return False, "LESSON_14_SPCK_UNVERIFIED"
+            elif isinstance(spck, Mapping):
+                if spck_status == "UNVERIFIED":
+                    return False, "LMS_SPCK_UNVERIFIED"
+                if spck_status == "MISSING":
+                    return False, "LMS_SPCK_INCOMPLETE"
+            return True, "ALL_ABSENT_EXEMPT"
+        return False, "LMS_ATTENDANCE_UNVERIFIED"
+
+    if att_status != "VERIFIED" or unverified_att != 0 or attended_count <= 0:
+        return False, "LMS_ATTENDANCE_UNVERIFIED"
+
+    if is_lesson_14(row):
+        if has_spck_missing_fail(row) or has_spck_comment_missing_fail(row):
+            return False, "LESSON_14_SPCK_INCOMPLETE"
+        if not isinstance(spck, Mapping):
+            return False, "LESSON_14_SPCK_UNVERIFIED"
+        spck_submitted = spck.get("submitted_count")
+        spck_missing_comm = spck.get("missing_comment_count")
+        if class_code and track_info["spck_exempt_course"]:
+            if spck_status != "NOT_REQUIRED":
+                return False, "LESSON_14_SPCK_UNVERIFIED"
+        else:
+            if not spck_status or spck_status == "UNVERIFIED":
+                return False, "LESSON_14_SPCK_UNVERIFIED"
+            if spck_status not in {"COMPLETE", "PARTIAL"}:
+                return False, "LESSON_14_SPCK_INCOMPLETE"
+            if not _is_non_negative_int(spck_submitted) or spck_submitted <= 0:
+                return False, "LESSON_14_SPCK_INCOMPLETE"
+            if not _is_non_negative_int(spck_missing_comm) or spck_missing_comm > 0:
+                return False, "LESSON_14_SPCK_INCOMPLETE"
+        if comm_status == "EXEMPT":
+            return True, "LESSON_14_VERIFIED"
+        if (
+            comm_status in {"COMPLETE", "REVIEW"}
+            and _is_non_negative_int(submitted_comm)
+            and int(submitted_comm) >= int(attended_count)
+        ):
+            return True, "LESSON_14_VERIFIED"
+        return False, "LMS_COMMENTS_INCOMPLETE"
+
+    if (
+        comm_status in {"COMPLETE", "REVIEW"}
+        and _is_non_negative_int(submitted_comm)
+        and int(submitted_comm) >= int(attended_count)
+    ):
+        return True, "LMS_COMMENTS_VERIFIED"
+    return False, "LMS_COMMENTS_INCOMPLETE"
+
+
 def is_failed(row: Any) -> bool:
     """Return True only when Zalo report is missing/unverified, LMS comment is not completed, or SPCK is 0/N unsubmitted.
 
@@ -1295,12 +1462,14 @@ __all__ = [
     "TERMINAL_WRITE_STATUSES",
     "VERIFIED_EVIDENCE_STATES",
     "categorize_row",
+    "classify_course_track",
     "coerce_structured_issue",
     "has_spck_comment_missing_fail",
     "has_spck_missing_fail",
     "identity_tokens",
     "is_failed",
     "is_lesson_14",
+    "is_lms_ready_for_bcnb_tick",
     "is_session_deferred",
     "issue_code",
     "issue_severity",

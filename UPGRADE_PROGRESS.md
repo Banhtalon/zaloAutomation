@@ -1,7 +1,7 @@
 # KẾ HOẠCH CHI TIẾT & TIẾN ĐỘ NÂNG CẤP DỰ ÁN (UPGRADE PLAN & PROGRESS)
 
-**Cập nhật lần cuối:** `2026-11-13 12:10 +07:00`
-**Trạng thái hiện tại:** Đã hoàn tất **Phase 0 → Phase 3.2 (`45/45` ✅)**, hoàn tất **Wave 4 (Phase 4.0 → Phase 4.4: `25/25` ✅ — Kiểm định chất lượng nội dung LMS/Zalo, Tự động ghi `Mô tả vấn đề` lên Teaching & Bảng Email Quản lý 9 cột)**, hoàn tất **Wave 5 (Phase 5.0 → 5.8: `59/59` ✅ — Hardening toàn diện luồng kiểm tra báo cáo)**, hoàn tất **Phase 6.1 (`7/7` ✅ — Kiểm định Nộp Sản Phẩm Cuối Khóa SPCK Buổi 12, 13, 14 & Hotfix GraphQL/PII `DEC-042`)**, hoàn tất **Phase 6.2 → 6.5 (`20/20` ✅ Source/local đạt kiểm chứng)**, và hoàn tất **Phase 6.6 (`4/4` ✅ Source/local đạt kiểm chứng — Phân cấp lỗi đỏ `❌ Chưa nhận xét` Zalo & cảnh báo vàng `⚠️` SPCK trong Email Quản lý / Dashboard `DEC-046`)**.
+> **Cập nhật lần cuối:** `2026-11-15 01:32 +07:00`
+> **Trạng thái hiện tại:** Đã hoàn tất **Phase 0 → Phase 3.2 (`45/45` ✅)**, hoàn tất **Wave 4 (Phase 4.0 → Phase 4.4: `25/25` ✅ — Kiểm định chất lượng nội dung LMS/Zalo, Tự động ghi `Mô tả vấn đề` lên Teaching & Bảng Email Quản lý 9 cột)**, hoàn tất **Wave 5 (Phase 5.0 → 5.8: `59/59` ✅ — Hardening toàn diện luồng kiểm tra báo cáo)**, hoàn tất **Phase 6.1 (`7/7` ✅ — Kiểm định Nộp Sản Phẩm Cuối Khóa SPCK Buổi 12, 13, 14 & Hotfix GraphQL/PII `DEC-042`)**, hoàn tất **Phase 6.2 → 6.5 (`20/20` ✅ Source/local đạt kiểm chứng)**, hoàn tất **Phase 6.6 (`4/4` ✅ Source/local đạt kiểm chứng — Phân cấp lỗi đỏ `❌ Chưa nhận xét` Zalo & cảnh báo vàng `⚠️` SPCK trong Email Quản lý / Dashboard `DEC-046`)**, và hoàn tất **Wave 7 (`16/16` ✅ Source/local đạt kiểm chứng — Trang riêng `Lớp Hôm Nay (Live)`: Live LMS/Zalo, SPCK Coding B12–14, Tick `NX Zalo + NX LMS` đúng tuần & Review `Argon High` Gate #2–#4 PASS, `DEC-048`, `DEC-049`)**.
 
 ---
 
@@ -37,6 +37,46 @@
 | **Phase 6.4** | **Loại cảnh báo lặp và làm gọn mô tả vấn đề trong email/báo cáo** | P1 | ✅ Source/local đạt kiểm chứng | `4/4` |
 | **Phase 6.5** | **Chuẩn hóa quy tắc QC (`FAIL` vs `NOTE`), Phễu 2 tầng AI nhận xét LMS, làm rõ SPCK & hoãn buổi học tương lai** | P0 | ✅ Source/local đạt kiểm chứng | `6/6` |
 | **Phase 6.6** | **Phân cấp lỗi đỏ `❌ Chưa nhận xét` Zalo & cảnh báo vàng `⚠️` SPCK trong Email Quản lý (`DEC-046`)** | P1 | ✅ Source/local đạt kiểm chứng | `4/4` |
+| **Phase 7.0** | **Sao lưu Pre-Wave 7 & Khởi tạo Master Checklist Trang Lớp Hôm Nay** | P0 (Bắt buộc) | ✅ Hoàn thành | `3/3` |
+| **Phase 7.1** | **Khung giờ buổi học (`LMS + Zalo`), Điều kiện dương `NX LMS` & Read-back BCNB chuẩn từng dòng** | P1 (Cao) | ✅ Hoàn thành | `5/5` |
+| **Phase 7.2** | **Backend `today_ops_service.py`, Job `TODAY_REALTIME_SYNC`, Tick `NX LMS + NX Zalo` & API Routes** | P1 (Cao) | ✅ Xong (`Argon High` #41 PASS) | `5/5` |
+| **Phase 7.3** | **Giao diện Trang riêng `Lớp Hôm Nay (Live)` + SPCK Coding B12–14 & Kiểm thử Frontend** | P1 (Cao) | ✅ Xong (`Argon High` #42 PASS) | `4/4` |
+| **Phase 7.4** | **Graphify Sync, `CHECK_QUALITY.ps1 -Isolated`, Final `Argon High` Review & Đồng bộ GitHub (`DEC-040`)** | P0 (Bắt buộc) | ✅ Hoàn thành (`Argon High` #44 PASS) | `4/4` |
+
+### 🚀 Kế hoạch & Tiến độ Wave 7 — Trang riêng `Lớp Hôm Nay` (Live LMS, Zalo, SPCK Coding B12–14 & Tick BCNB Đúng Tuần)
+
+> **Cơ chế kiểm chứng (`DEC-047`, `DEC-049` `[FULL GATE]`):** Gate #1 (`Phase 7.1`) vượt qua Reviewer độc lập `gpt-6.1-sol (high)` (`VERDICT: PASS`); từ Gate #2 trở đi (`Phase 7.2 → 7.4`), theo chỉ đạo Owner (`DEC-049`), sử dụng **Review độc lập `Argon High` (`gemini-4-argon-high`, swarm read-only, không `fork`)** tới khi đạt `VERDICT: PASS` rồi mới tích `[x]`.
+
+#### Phase 7.0 — Sao lưu an toàn & Khởi tạo Checklist Wave 7 ✅ (`3/3`)
+- [x] **7.0.1.** Chốt baseline HEAD sạch `f3b61c3fa2ef687e4cae3ca154147192598d2644` và lưu manifest ngoài repository (`$env:TEMP\wave7_baseline_manifest.txt`).
+- [x] **7.0.2.** Sao lưu nóng `database.db` (`scripts/backup_restore.py`) sang `.backups/db/pre-wave7-20261114-144245.sqlite3` (`75,227,136` bytes, SHA-256 `B9DDA23DCA0C32A16BCD83FFD997556396EA19D793C2C6B696A32033C3F7408F`, `integrity="ok"`) và chạy `restore-drill` (`schema_migrations=4`, `scan_jobs=505`, `external_action_audit=2868`).
+- [x] **7.0.3.** Khởi tạo bảng theo dõi & checklist chi tiết Wave 7 (`Phase 7.0 → 7.4`) trong `UPGRADE_PROGRESS.md` và artifact `implementation_plan.md`.
+
+#### Phase 7.1 — Khung giờ buổi học (`LMS + Zalo`), Điều kiện dương Tick `NX LMS` & Read-back BCNB từng dòng ✅ (`5/5`, `Sol 6.1` Gate #1 `VERDICT: PASS`)
+- [x] **7.1.1.** Mở rộng `services/zalo_target_eligibility.py` (`parse_group_time_range`, `resolve_session_time_window`, hỗ trợ `lms_start_time`/`lms_end_time` trong `evaluate_scan_target` với quy tắc an toàn `max(group_end, lms_end)`).
+- [x] **7.1.2.** Nâng cấp `services/lms_quality_service.py` (`extract_lms_slot_time_range`, gắn `lms_start_time`/`lms_end_time` lên cả ca sắp/đang học để hiển thị Live Timeline, dùng `max(group_end, lms_end)` để mở khóa kiểm tra trong ngày cho Buổi 14 / nhóm thiếu giờ).
+- [x] **7.1.3.** Bổ sung Single Source of Truth vào `services/report_status.py`: `classify_course_track` (`CODING` / `ROBOTICS` / `OTHER`, miễn SPCK `PTB`/`CSB` theo `DEC-044`) và `is_lms_ready_for_bcnb_tick` (xác minh điểm danh 100%, không `"."`/trống, không vướng lỗi SPCK B14).
+- [x] **7.1.4.** Nâng cấp `services/bcnb_safety.py` & `services/bcnb_actions.py` (`verify_checkbox_persisted` và `execute_verified_checkbox_action` nhận `class_date_iso` + `session_id` để định danh duy nhất dòng `NX LMS` cho lớp học 2 buổi/tuần).
+- [x] **7.1.5.** Bổ sung `tests/test_today_eligibility_and_bcnb.py`, chạy unit tests (`75/75 PASS`) + Ruff + Mypy và vượt qua Review độc lập `gpt-6.1-sol (high)` đạt `VERDICT: PASS` (session `01a1da9f-078d-75d2-9c66-61a94e9a7b9a`).
+
+#### Phase 7.2 — Backend `today_ops_service.py`, Job `TODAY_REALTIME_SYNC`, Tick `NX LMS + NX Zalo` & API Routes ✅ (`5/5`, `Argon High` Gate #2 `#41` `VERDICT: PASS`)
+- [x] **7.2.1.** Nâng cấp `update_bcnb_reports` (`services/zalo_bcnb_service.py`) hỗ trợ `tick_lms: bool = False` (tick `BCNB_LMS_TICK` khi `is_lms_ready_for_bcnb_tick` đạt `True` vào đúng tuần `Wxx/YYYY` & đúng dòng kèm `class_date_iso` + `session_id`) và `check_only: bool = False` (chế độ đọc live 100%, không click/ghi BCNB), đồng thời khử exception PII trong log/audit (`bcnb_actions.py`, `zalo_bcnb_service.py`).
+- [x] **7.2.2.** Xây dựng `services/today_ops_service.py` (`build_today_overview`, `run_today_realtime_sync`): tổng hợp lớp trong ngày xuyên cả 2 tuần BCNB, truy vấn live GraphQL LMS + SPCK B12–14 trước để lấy khung giờ/điểm danh/nhận xét/SPCK, quét Zalo các buổi đã tan ca + chụp ảnh Retina `2x`, cập nhật `zalo_batch_targets` khi `not check_only`, lưu `scan_jobs.results`.
+- [x] **7.2.3.** Đăng ký job `TODAY_REALTIME_SYNC` trong `services/job_dispatcher.py` (dùng `mode_from_job(job)`, không `str(exc)`) và mở rộng `repositories/report_repository.py` đồng bộ kết quả từ `TODAY_REALTIME_SYNC` (`check_only != 1`) vào `Báo Cáo Tuần`.
+- [x] **7.2.4.** Tạo `api/today_routes.py` (`GET /api/today/overview`, `POST /api/today/sync` dùng `public_error`, không `str(exc)`) và gắn router vào `main.py`.
+- [x] **7.2.5.** Bổ sung `tests/test_today_ops_service.py` & `tests/test_today_routes.py`, chạy unit tests + Ruff + Mypy + `check_phase4_quality.py` + `check_phase5_quality.py` (`30/30 test_today*, 44/44 test_bcnb*, 50/50 report_status/api_routes, Ruff/Mypy/Phase4-5 PASS`; `Argon High` Gate #2 `#37` & tái kiểm delta `#41` đạt `VERDICT: PASS`).
+
+#### Phase 7.3 — Giao diện Trang riêng `Lớp Hôm Nay` & Kiểm thử hợp đồng Frontend ✅ (`4/4`, `Argon High` Gate #3 `#42` `VERDICT: PASS`)
+- [x] **7.3.1.** Thêm tab riêng `#btn-today` (`Lớp Hôm Nay`) trong `templates/partials/sidebar.html` và cập nhật điều hướng/tiêu đề trong `static/js/state.js` & auto-refresh trong `static/js/jobs.js`.
+- [x] **7.3.2.** Xây dựng `templates/partials/today.html` & `static/js/today.js`: bộ chọn ngày + 5 thẻ KPI (tách riêng **SPCK Buổi 12–14 Coding / Robotics** + Panel điểm nóng SPCK), nút `Kiểm tra Live ngay` & `Quét & Tick BCNB đúng tuần` + `Quét các lớp đã chọn`, 8 chip lọc nhanh + tìm kiếm, bảng Timeline 7 cột hiển thị khung giờ, pha thời gian thực, trạng thái Zalo + `NX Zalo`, trạng thái LMS + `NX LMS`, SPCK B12–14, vấn đề QC & thao tác từng lớp.
+- [x] **7.3.3.** Gắn partial/script vào `templates/index.html` (`<= 120` dòng, không `duration-300+`), thêm `#tab-today .table-scroll` ở `static/css/app.css`, cập nhật `tests/check_template_js.js` (`expectedOrder` + `checkTodayLivePageWorkflow`), `tests/check_phase3_quality.py`, `tests/check_app_smoke.py`.
+- [x] **7.3.4.** Chạy `node tests/check_template_js.js` + `check_phase3_quality.py` + `check_app_smoke.py` + unit tests (`check_template_js scripts=8 handlers=46 behavior=14, check_phase3, check_app_smoke, 30/30 test_today* PASS`; `Argon High` Gate #3 `#38` -> `#42` đạt `VERDICT: PASS` sau khi sửa 3 điểm).
+
+#### Phase 7.4 — Graphify Sync, `CHECK_QUALITY.ps1 -Isolated`, Final `Argon High` Review & Đồng bộ GitHub ✅ (`4/4`, `Argon High` Gate #4 `#44` `VERDICT: PASS`)
+- [x] **7.4.1.** Chạy `$env:GRAPHIFY_BACKEND="none"; graphify update .` đồng bộ AST cục bộ 100% offline (`5089` nodes, `15379` edges, `183` communities; `.graphifyignore` nguyên vẹn).
+- [x] **7.4.2.** Chạy toàn bộ cổng chất lượng cô lập `.\CHECK_QUALITY.ps1 -Isolated` đạt `exit 0` (`QUALITY GATE PASSED`, `749/749` regression tests `OK`, branch coverage `79.4%`, Ruff `0`, Mypy `0` trên `80` file, `secrets=0`, Phase 3/4/5/6/7/8/9/9B + `check_app_smoke` + `check_template_js` PASS).
+- [x] **7.4.3.** Gọi Review độc lập tổng thể `Argon High` (`gemini-4-argon-high`, `reviewer-74`, swarm read-only `#43 -> #44`) trên toàn bộ diff Wave 7 đạt `VERDICT: PASS` (`[P0]=0, [P1]=0, [P2]=0`).
+- [x] **7.4.4.** Tích `[x]` toàn bộ checklist, ghi `DEC-048` & `DEC-049` vào `PROJECT_DECISIONS.md`, cập nhật `CHANGELOG.md`, `PROJECT_STATE.md`, `README.md`, kiểm tra `git diff --check` + manifest sạch và đồng bộ GitHub `origin/main` (`DEC-040`).
 
 ### Kế hoạch & Tiến độ 6.5 (AI tự động tích `[x]` khi xong từng phần)
 

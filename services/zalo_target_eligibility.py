@@ -15,7 +15,7 @@ import re
 from typing import Any
 
 from core.time_utils import BUSINESS_TIMEZONE, now_business, to_business
-from services.report_status import normalize_class_code
+from services.report_status import normalize_class_code, normalize_lesson_number
 
 
 READY_PREVIOUS_WEEK = "READY_PREVIOUS_WEEK"
@@ -39,11 +39,61 @@ _ISO_DATE_RE = re.compile(r"^\s*(\d{4})-(\d{1,2})-(\d{1,2})\s*$")
 _VN_DATE_RE = re.compile(r"(?<!\d)(\d{1,2})[/.-](\d{1,2})[/.-](\d{2,4})(?!\d)")
 
 
+_HM_TIME_RE = re.compile(r"^\s*([01]?\d|2[0-3]):([0-5]\d)(?::([0-5]\d)(?:\.(\d+))?)?\s*$")
+
+
 @dataclass(frozen=True)
 class TargetEligibility:
     eligible: bool
     reason: str
     eligible_after: str | None = None
+
+
+def _parse_hm_time(value: object, *, ceiling_subsecond: bool = False) -> time | None:
+    if isinstance(value, time):
+        total_sec = value.hour * 3600 + value.minute * 60 + value.second + (
+            1 if ceiling_subsecond and value.microsecond > 0 else 0
+        )
+        if total_sec >= 86400:
+            return None
+        return time(total_sec // 3600, (total_sec % 3600) // 60, total_sec % 60)
+    text = str(value or "").strip()
+    if not text:
+        return None
+    match = _HM_TIME_RE.fullmatch(text)
+    if not match:
+        return None
+    frac = match.group(4) or ""
+    has_subsec = bool(frac and int(frac) > 0)
+    try:
+        total_sec = (
+            int(match.group(1)) * 3600
+            + int(match.group(2)) * 60
+            + int(match.group(3) or 0)
+            + (1 if ceiling_subsecond and has_subsec else 0)
+        )
+        if total_sec >= 86400:
+            return None
+        return time(total_sec // 3600, (total_sec % 3600) // 60, total_sec % 60)
+    except ValueError:
+        return None
+
+
+def parse_group_time_range(group_name: object) -> tuple[time, time] | None:
+    """Read `(start_time, end_time)` embedded in a Zalo group title when unambiguous."""
+
+    matches = list(_TIME_RANGE_RE.finditer(str(group_name or "")))
+    if len(matches) != 1:
+        return None
+    match = matches[0]
+    try:
+        start_t = time(int(match.group("start_hour")), int(match.group("start_min") or 0))
+        end_t = time(int(match.group("end_hour")), int(match.group("end_min") or 0))
+    except ValueError:
+        return None
+    if end_t <= start_t:
+        return None
+    return start_t, end_t
 
 
 def parse_group_end_time(group_name: object) -> time | None:
@@ -55,14 +105,112 @@ def parse_group_end_time(group_name: object) -> time | None:
     missing.
     """
 
-    matches = list(_TIME_RANGE_RE.finditer(str(group_name or "")))
-    if len(matches) != 1:
-        return None
-    match = matches[0]
-    try:
-        return time(int(match.group("end_hour")), int(match.group("end_min") or 0))
-    except ValueError:
-        return None
+    parsed = parse_group_time_range(group_name)
+    return parsed[1] if parsed is not None else None
+
+
+def resolve_session_time_window(
+    target_day: date | None,
+    *,
+    lms_start_time: object = None,
+    lms_end_time: object = None,
+    group_name: object = "",
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Resolve effective `(start, end)` window and live phase (`UPCOMING`/`ONGOING`/`ENDED`/`TIME_UNKNOWN`)."""
+
+    lms_start = _parse_hm_time(lms_start_time, ceiling_subsecond=False)
+    lms_end = _parse_hm_time(lms_end_time, ceiling_subsecond=True)
+    if lms_start is not None and lms_end is not None and lms_end <= lms_start:
+        lms_start, lms_end = None, None
+    elif lms_end is None:
+        lms_start = None
+
+    group_range = parse_group_time_range(group_name)
+    group_start, group_end = group_range if group_range is not None else (None, None)
+
+    if lms_end is not None and group_end is not None:
+        start_candidates = [t for t in (lms_start, group_start) if t is not None]
+        effective_start = min(start_candidates) if start_candidates else None
+        effective_end: time | None = max(lms_end, group_end)
+        time_source = "COMBINED"
+    elif lms_end is not None:
+        effective_start = lms_start
+        effective_end = lms_end
+        time_source = "LMS_SLOT"
+    elif group_end is not None:
+        effective_start = group_start
+        effective_end = group_end
+        time_source = "ZALO_GROUP"
+    else:
+        effective_start = None
+        effective_end = None
+        time_source = "UNKNOWN"
+
+    current = to_business(now or now_business())
+    current_day = current.date()
+    eligible_after: str | None = None
+    if target_day is None:
+        session_phase = "TIME_UNKNOWN"
+        is_ended = False
+    elif target_day < current_day:
+        session_phase = "ENDED"
+        is_ended = True
+    elif target_day > current_day:
+        session_phase = "UPCOMING"
+        is_ended = False
+        if effective_end is not None:
+            eligible_after = datetime.combine(
+                target_day, effective_end, tzinfo=BUSINESS_TIMEZONE
+            ).isoformat(timespec="seconds" if effective_end.second else "minutes")
+    else:
+        if effective_end is None:
+            session_phase = "TIME_UNKNOWN"
+            is_ended = False
+        else:
+            end_at = datetime.combine(target_day, effective_end, tzinfo=BUSINESS_TIMEZONE)
+            eligible_after = end_at.isoformat(
+                timespec="seconds" if effective_end.second else "minutes"
+            )
+            if current >= end_at:
+                session_phase = "ENDED"
+                is_ended = True
+            elif effective_start is not None and current >= datetime.combine(
+                target_day, effective_start, tzinfo=BUSINESS_TIMEZONE
+            ):
+                session_phase = "ONGOING"
+                is_ended = False
+            else:
+                session_phase = "UPCOMING"
+                is_ended = False
+
+    start_hm = effective_start.strftime("%H:%M") if effective_start is not None else None
+    end_hm = effective_end.strftime("%H:%M") if effective_end is not None else None
+    if start_hm and end_hm:
+        time_range_display = f"{start_hm} – {end_hm}"
+    elif end_hm:
+        time_range_display = f"Kết thúc {end_hm}"
+    else:
+        time_range_display = "Chưa rõ giờ"
+
+    phase_labels = {
+        "UPCOMING": "⏳ Sắp diễn ra",
+        "ONGOING": "🟢 Đang diễn ra",
+        "ENDED": "🏁 Đã kết thúc",
+        "TIME_UNKNOWN": "❓ Chưa rõ giờ",
+    }
+    return {
+        "start_time": effective_start,
+        "end_time": effective_end,
+        "start_time_hm": start_hm,
+        "end_time_hm": end_hm,
+        "time_range_display": time_range_display,
+        "time_source": time_source,
+        "session_phase": session_phase,
+        "session_phase_label": phase_labels[session_phase],
+        "is_ended": is_ended,
+        "eligible_after": eligible_after,
+    }
 
 
 def _parse_target_day(value: object) -> date | None:
@@ -108,7 +256,9 @@ def scan_target_identity(target: Mapping[str, Any]) -> tuple[int, int, str, str,
 
     period = _period_from_mapping(target)
     class_code = normalize_class_code(target.get("class_code"))
-    lesson = str(target.get("lesson") or "").strip()
+    raw_lesson = str(target.get("lesson") or "").strip()
+    lesson_num = normalize_lesson_number(raw_lesson)
+    lesson = str(lesson_num) if lesson_num is not None else raw_lesson
     target_day = _parse_target_day(target.get("class_date_iso") or target.get("class_date"))
     if period is None or not class_code or not lesson or target_day is None:
         return None
@@ -142,16 +292,21 @@ def evaluate_scan_target(
     if target_day > current.date():
         return TargetEligibility(False, DEFERRED_FUTURE_CLASS_DATE)
 
-    end_time = parse_group_end_time(target.get("group_name"))
-    if end_time is None:
+    window = resolve_session_time_window(
+        target_day,
+        lms_start_time=target.get("lms_start_time"),
+        lms_end_time=target.get("lms_end_time"),
+        group_name=target.get("group_name"),
+        now=current,
+    )
+    if window["end_time"] is None:
         return TargetEligibility(False, DEFERRED_SAME_DAY_TIME_UNKNOWN)
-    end_at = datetime.combine(target_day, end_time, tzinfo=BUSINESS_TIMEZONE)
-    if current >= end_at:
+    if window["is_ended"]:
         return TargetEligibility(True, READY_CURRENT_DAY_AFTER_CLASS_END)
     return TargetEligibility(
         False,
         DEFERRED_SAME_DAY_BEFORE_CLASS_END,
-        eligible_after=end_at.isoformat(timespec="minutes"),
+        eligible_after=window["eligible_after"],
     )
 
 

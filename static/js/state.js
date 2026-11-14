@@ -129,6 +129,11 @@
             const headerTitle = document.getElementById('header-title');
             if (tabId === 'dashboard') {
                 headerTitle.innerText = "Zalo Auto";
+            } else if (tabId === 'today') {
+                headerTitle.innerText = "Lớp Hôm Nay (Live)";
+                if (typeof loadTodayOverview === 'function') {
+                    loadTodayOverview();
+                }
             } else if (tabId === 'groups') {
                 headerTitle.innerText = "Quản lý Cấu hình Nhóm Zalo";
                 fetchGroups();
@@ -382,6 +387,9 @@
                 });
             }
             renderZaloWorkflow();
+            if (typeof syncTodayActionButtons === 'function') {
+                syncTodayActionButtons();
+            }
         }
 
         function renderZaloWorkflow() {

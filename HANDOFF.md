@@ -15,5 +15,5 @@
 - **Công cụ workflow phụ trợ (`.ai-workflow/`)**: tách riêng ở `.venv/Scripts/python.exe` và `requirements-workflow.txt` (dữ liệu cục bộ `.workflow-local/` được Git bỏ qua).
 - **Cổng kiểm chứng**:
   - **Luồng Nhanh (`[FAST-TRACK]`)**: unit test mục tiêu + `node tests/check_template_js.js` (nếu chạm JS/HTML) + `ruff check` & `mypy` phạm vi hẹp + `git diff --check`.
-  - **Luồng Đầy đủ (`[FULL GATE]`)**: unit test mục tiêu + `node tests/check_template_js.js` + `.\CHECK_QUALITY.ps1 -Isolated` (`exit 0`) + Review độc lập `gpt-6.1-sol` (`read-only`) đạt `PASS`.
+  - **Luồng Đầy đủ (`[FULL GATE]`)**: unit test mục tiêu + `node tests/check_template_js.js` + `.\CHECK_QUALITY.ps1 -Isolated` (`exit 0`) + Review độc lập `Argon High` (`gemini-4-argon-high`, `read-only`) đạt `VERDICT: PASS`.
 - **Đồng bộ**: Cập nhật `CHANGELOG.md` + `PROJECT_STATE.md`, commit các tệp trong `allowlist` (không bao giờ stage `.env`, `database.db`, browser profile hay dữ liệu nhạy cảm) và `git push` lên GitHub (`origin`).

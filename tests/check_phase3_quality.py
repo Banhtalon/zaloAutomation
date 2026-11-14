@@ -41,6 +41,7 @@ required_files = {
     "static/js/googleform.js",
     "static/js/lms.js",
     "static/js/modals.js",
+    "static/js/today.js",
     "tests/check_template_js.js",
     "requirements-dev.txt",
     "pyproject.toml",
@@ -68,6 +69,7 @@ partial_names = [
     "sidebar.html",
     "header.html",
     "dashboard.html",
+    "today.html",
     "googleform.html",
     "groups.html",
     "specs.html",
@@ -115,7 +117,8 @@ invariants = {
     "accessible-icon-controls": 'aria-label="Đóng cửa sổ LMS"' in template_source
     and 'aria-label="Đóng ảnh báo cáo"' in template_source
     and 'aria-label="Làm mới danh sách lớp tạm ẩn"' in template_source
-    and 'aria-label="Làm mới lịch sử nộp Form"' in template_source,
+    and 'aria-label="Làm mới lịch sử nộp Form"' in template_source
+    and 'aria-label="Làm mới dữ liệu Lớp Hôm Nay"' in template_source,
     "fixed-safe-area": template_source.count("safe-area-modal") >= 2
     and "safe-area-inset-top" in app_css
     and "viewport-fit=cover" in index_template,

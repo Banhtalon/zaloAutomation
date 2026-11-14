@@ -681,6 +681,12 @@
                 if (typeof refreshZaloRequiredWeekSummary === 'function') {
                     await refreshZaloRequiredWeekSummary(null, { keepLiveMode: true, silent: true });
                 }
+            } else if (job.job_type === 'TODAY_REALTIME_SYNC') {
+                if (typeof handleTodayJobTerminal === 'function') {
+                    await handleTodayJobTerminal(job, payload);
+                } else if (typeof loadTodayOverview === 'function') {
+                    await loadTodayOverview({ silent: true });
+                }
             } else if (job.job_type === 'GOOGLEFORM_SUBMIT') {
                 if (typeof clearGoogleFormIdempotencyState === 'function') {
                     clearGoogleFormIdempotencyState();
@@ -689,6 +695,12 @@
                 const terminalMessage = formatGoogleFormTerminalMessage(job, payload);
                 document.getElementById('status-text').textContent = terminalMessage;
                 alert(terminalMessage);
+            }
+            if (job.job_type !== 'TODAY_REALTIME_SYNC'
+                && typeof todayTabIsActive === 'function'
+                && todayTabIsActive()
+                && typeof loadTodayOverview === 'function') {
+                await loadTodayOverview({ silent: true });
             }
         }
 

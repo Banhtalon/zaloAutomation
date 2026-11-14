@@ -22,6 +22,7 @@
 
         <div class="app-scroll overflow-y-auto flex-1 flex flex-col z-10">
             {% include "partials/dashboard.html" %}
+            {% include "partials/today.html" %}
             {% include "partials/googleform.html" %}
             {% include "partials/groups.html" %}
             {% include "partials/specs.html" %}
@@ -38,5 +39,6 @@
     <script src="/static/js/googleform.js?v={{ asset_version }}"></script>
     <script src="/static/js/lms.js?v={{ asset_version }}"></script>
     <script src="/static/js/modals.js?v={{ asset_version }}"></script>
+    <script src="/static/js/today.js?v={{ asset_version }}"></script>
 </body>
 </html>

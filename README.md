@@ -6,8 +6,8 @@
   <img src="https://img.shields.io/badge/Playwright-Chromium-2EAD33?logo=playwright&logoColor=white" alt="Playwright" />
   <img src="https://img.shields.io/badge/Database-SQLite%20%2B%20aiosqlite-003B57?logo=sqlite&logoColor=white" alt="SQLite" />
   <img src="https://img.shields.io/badge/AI-Google%20Gemini-4285F4?logo=googlegemini&logoColor=white" alt="Gemini" />
-  <img src="https://img.shields.io/badge/Tests-719%20Passing-16A34A" alt="Tests Passing" />
-  <img src="https://img.shields.io/badge/Branch%20Coverage-78.9%25-2563EB" alt="Coverage" />
+  <img src="https://img.shields.io/badge/Tests-749%20Passing-16A34A" alt="Tests Passing" />
+  <img src="https://img.shields.io/badge/Branch%20Coverage-79.4%25-2563EB" alt="Coverage" />
 </p>
 
 **MindX Auto (`zaloAutomation`)** là hệ thống vận hành cục bộ trên Windows hỗ trợ kiểm tra báo cáo giảng dạy, kiểm định chất lượng nhận xét học viên / Sản Phẩm Cuối Khóa (SPCK), đồng bộ trạng thái bảng kiểm tra nhận xét (**Teaching / BCNB**) và tự động hóa điền **Google Form** theo triết lý **Fail-Closed** (luôn xem trước, kiểm chứng bằng chứng rõ ràng, lưu vết kiểm toán và không bao giờ suy đoán khi dữ liệu mơ hồ).
@@ -24,18 +24,22 @@
   - Phân biệt quy tắc Buổi thường, Buổi Checkpoint (`Coding` B5/B9, `Robotics` B4/B8), quy tắc nộp SPCK theo sĩ số đi học thực tế (`ATTENDED` / `LATE_ARRIVED`), đặc thù khối `Robotics` và các khóa được miễn SPCK (`PTB` / `CSB`).
 - **Tự động cập nhật BCNB có đọc ngược (`Read-back Verification`)**: Tách biệt độc lập thao tác tích checkbox và thao tác cập nhật cột `Mô tả vấn đề (TE/TF/QC)`, bảo toàn nguyên vẹn ghi chú thủ công của QC và xác minh lại dữ liệu trên DOM sau khi lưu.
 
-### 2. Tra Cứu Lịch Sử Tuần, Xuất CSV Lỗi & Gửi Email Quản Lý
+### 2. Trang Riêng "Lớp Hôm Nay" (Theo Dõi Thời Gian Thực)
+- **Timeline ca học trong ngày**: Tổng hợp các lớp diễn ra hôm nay xuyên 2 tuần BCNB (`required_week` + `latest_week`), hiển thị rõ giờ học và pha thời gian thực (`Chưa diễn ra`, `Đang diễn ra`, `Đã kết thúc`).
+- **Cập nhật Live LMS, SPCK Coding B12–14 & Zalo**: Chế độ `Kiểm tra Live ngay` (chỉ đọc) hoặc `Quét & Tick BCNB đúng tuần` (`TODAY_REALTIME_SYNC`) để đối chiếu điểm danh/nhận xét LMS, spotlight tiến độ **SPCK Buổi 12–14** cho khối `Coding` (miễn `PTB`/`CSB`), quét Zalo kèm ảnh chứng cứ `2x`, copy nhanh danh sách nhắc giảng viên thiếu báo cáo sau khi tan ca và tick chuẩn dòng cho cả `NX Zalo` lẫn `NX LMS`.
+
+### 3. Tra Cứu Lịch Sử Tuần, Xuất CSV Lỗi & Gửi Email Quản Lý
 - **Tổng hợp tuần chuẩn xác**: Hợp nhất kết quả quét nền, các lượt quét lại chọn lọc cùng snapshot và lịch sử duyệt tay theo đúng khóa buổi học.
 - **Phân cấp mức độ cảnh báo trực quan**:
   - **Mức Đỏ (`❌`)**: Chưa gửi báo cáo Zalo (`❌ Chưa nhận xét`) hoặc chưa hoàn tất nhận xét buổi học trên LMS.
   - **Mức Cảnh báo Vàng (`⚠️`)**: Chưa nộp SPCK hoặc SPCK chưa có nhận xét trong bảng Email Quản lý, kèm danh sách nhắc nhở chi tiết từng hạng mục QC.
 - **Đa định dạng xuất bản**: Xuất file CSV chuẩn `UTF-8 BOM` mở trực tiếp bằng Excel, bảng HTML tương thích Webmail doanh nghiệp / Gmail, sao chép nhanh danh sách nhắc giảng viên 1-Click và gửi SMTP TLS có kiểm soát `allowlist` người nhận.
 
-### 3. Đối Chiếu & Tích LMS Tự Động
+### 4. Đối Chiếu & Tích LMS Tự Động
 - Quét trực tiếp danh sách lớp quá hạn điểm danh / nhận xét trên Web LMS (hoặc từ ảnh chụp), đối chiếu với bảng BCNB tuần hiện tại để dựng bảng xem trước **Dự kiến tick** vs **Không tick**.
 - Cho phép chọn/bỏ chọn từng lớp, khóa toàn vẹn kế hoạch bằng mã băm dùng một lần (`plan_digest` + `selection_digest`) trước khi thực thi.
 
-### 4. Trích Xuất Học Viên & Điền Google Form
+### 5. Trích Xuất Học Viên & Điền Google Form
 - Lấy trực tiếp danh sách học viên theo mã lớp từ LMS hoặc trích xuất qua OCR Gemini từ ảnh danh sách lớp.
 - Hỗ trợ cấu hình ánh xạ câu hỏi (`Q&A Mapping`), câu hỏi trắc nghiệm / dropdown, khóa chống gửi trùng (`idempotency`), giới hạn tốc độ và lưu ảnh chụp biểu mẫu đã ẩn danh tên học viên.
 
@@ -56,12 +60,12 @@ flowchart LR
 
 | Thành phần | Công nghệ sử dụng |
 |---|---|
-| **Backend & API** | Python `3.14`, FastAPI `0.136`, Uvicorn `0.49` (`43` HTTP routes) |
+| **Backend & API** | Python `3.14`, FastAPI `0.136`, Uvicorn `0.49` (`46` paths / `49` OpenAPI operations) |
 | **Tự động hóa trình duyệt** | Playwright `1.60` (Chromium, persistent profile + file lock độc quyền) |
 | **AI & Xử lý ngôn ngữ/ảnh** | Google Gemini (`google-genai`), kết hợp bộ phân loại luật tất định |
 | **Cơ sở dữ liệu** | SQLite (`aiosqlite`), migration có kiểm tra checksum, sao lưu nóng & diễn tập khôi phục |
 | **Giao diện người dùng** | Jinja2 Templates, Vanilla JavaScript, Tactile High-Contrast UI (WCAG AA) |
-| **Kiểm định chất lượng** | `unittest` (`719` tests), `coverage` (`78.9%` branch), `ruff`, `mypy` (`78` files), Node JS contract check |
+| **Kiểm định chất lượng** | `unittest` (`749` tests), `coverage` (`79.4%` branch), `ruff`, `mypy` (`80` files), Node JS contract check |
 
 ---
 
@@ -70,16 +74,16 @@ flowchart LR
 ```text
 zaloAutomation/
 ├── main.py                     # Khởi tạo FastAPI app, middleware bảo mật & gắn routers
-├── api/                        # 10 module HTTP routes (Zalo, LMS, Google Form, Jobs, Auth, Health...)
+├── api/                        # 11 module HTTP routes (Zalo, Lớp Hôm Nay, LMS, Google Form, Jobs, Auth, Health...)
 ├── core/                       # Cấu hình bất biến, DI Container, phân quyền RBAC & kiểm tra readiness
-├── services/                   # Nghiệp vụ cốt lõi (quét Zalo, chấm LMS/SPCK, ghi BCNB, gửi Email, Dispatcher)
+├── services/                   # Nghiệp vụ cốt lõi (quét Zalo, Lớp Hôm Nay, chấm LMS/SPCK, ghi BCNB, Email, Dispatcher)
 ├── classifiers/                # Bộ phân loại tin nhắn báo cáo Zalo theo luật & trích xuất ngày/buổi
 ├── googleform_autosubmit/      # Cấu hình môi trường, OCR danh sách lớp & trình điền Google Form
 ├── repositories/               # Truy cập dữ liệu SQLite (jobs, snapshots, reports, external_action_audit)
 ├── db/                         # Quản lý schema, migrations, sao lưu nóng & kiểm tra khôi phục
-├── templates/ & static/        # Giao diện Dashboard 4 khu vực, CSS Tactile 3D & JavaScript frontend
+├── templates/ & static/        # Giao diện Dashboard & Lớp Hôm Nay (5 khu vực), CSS Tactile 3D & JavaScript frontend
 ├── scripts/                    # Khởi chạy local, kiểm tra bảo mật/bí mật, sao lưu & công cụ vận hành
-├── tests/                      # 719 bài kiểm thử tự động & các cổng kiểm tra hợp đồng giao diện/kiến trúc
+├── tests/                      # 749 bài kiểm thử tự động & các cổng kiểm tra hợp đồng giao diện/kiến trúc
 ├── START.bat                   # Script khởi động nhanh ứng dụng trên Windows
 ├── DANG_NHAP_ZALO.bat          # Script mở hồ sơ trình duyệt để đăng nhập sẵn Zalo Web
 └── CHECK_QUALITY.ps1           # Cổng kiểm định chất lượng toàn diện (chế độ cô lập -Isolated)

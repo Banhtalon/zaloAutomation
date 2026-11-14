@@ -17,6 +17,7 @@ const expectedOrder = [
   '/static/js/googleform.js',
   '/static/js/lms.js',
   '/static/js/modals.js',
+  '/static/js/today.js',
 ];
 if (JSON.stringify(scriptSources) !== JSON.stringify(expectedOrder)) {
   throw new Error(`Unexpected local script order: ${JSON.stringify(scriptSources)}`);
@@ -61,6 +62,13 @@ const requiredIds = [
   'dashboard-compact-strip', 'dashboard-preflight-pill',
   'dashboard-plan-strip-text', 'dashboard-progress-strip-text',
   'dashboard-preflight-drawer', 'dashboard-preflight-drawer-checks',
+  'btn-today', 'tab-today',
+  'today-kpi-total', 'today-kpi-zalo', 'today-kpi-lms', 'today-kpi-spck', 'today-kpi-bcnb',
+  'today-date-input', 'today-reset-date-btn', 'today-refresh-overview-btn',
+  'today-mode-badge', 'today-snapshot-badge', 'today-sync-banner',
+  'today-check-live-btn', 'today-sync-bcnb-btn', 'today-sync-selected-btn', 'today-copy-reminders-btn',
+  'today-search-input', 'today-spck-panel', 'today-spck-cards',
+  'today-results-table', 'today-results-tbody', 'today-select-all',
 ];
 for (const id of requiredIds) {
   if (!new RegExp(`id=["']${id}["']`).test(templates)) {
@@ -3193,6 +3201,395 @@ async function checkPhase57FrontendHardening() {
   assertFrontend(attendanceReportingCheck, 'attendance counts, exemptions, uncertain evidence, quality NOTE, and real missing submissions must remain distinct');
 }
 
+async function checkTodayLivePageWorkflow() {
+  const syncPayloads = [];
+  const confirmPrompts = [];
+  let overviewCallCount = 0;
+
+  const sampleOverview = {
+    target_date_iso: '2026-11-14',
+    today_iso: '2026-11-14',
+    is_today: true,
+    execution_mode: 'production',
+    snapshot: {
+      snapshot_id: 55,
+      observed_at: '2026-11-14T12:00:00Z',
+      is_stale: false,
+      required_week: { week: 45, year: 2026 },
+      latest_week: { week: 46, year: 2026 },
+    },
+    latest_sync_job: {
+      job_id: 801,
+      status: 'SUCCESS',
+      check_only: true,
+      execution_mode: 'dry-run',
+      bcnb_summary: { updated_count: 1, lms_updated_count: 1 },
+    },
+    kpis: {
+      total: { count: 3, upcoming: 0, ongoing: 1, ended: 2, time_unknown: 0, missing_zalo_group: 0 },
+      zalo: { submitted_or_exempt: 2, done: 1, late: 0, exempt: 1, failed: 1, missing: 1, review: 0, deferred: 0, not_scanned: 0, nx_zalo_checked: 1 },
+      lms: { evaluated: 2, ready_for_tick: 1, nx_lms_checked: 0, comment_issue_count: 1, attendance_unverified: 1 },
+      spck_b12_14: { total: 2, coding_total: 1, coding_complete: 0, coding_incomplete: 1, robotics_total: 0, robotics_complete: 0, robotics_incomplete: 0, exempt_course_total: 1 },
+      bcnb_pending: { need_nx_zalo: 1, need_nx_lms: 1, total_pending_rows: 2 },
+    },
+    items: [
+      {
+        target_key: '2026:46:VT-JSB15:13:2026-11-14',
+        week: 46,
+        year: 2026,
+        week_label: 'W46/2026',
+        is_current_week: true,
+        class_code: 'VT-JSB15',
+        lesson: '13',
+        lesson_num: 13,
+        class_date: '14/11/2026',
+        class_date_iso: '2026-11-14',
+        group_name: '[VT]-JSB15-17h30 <script>x</script>',
+        person: 'GV Coding',
+        missing_zalo_group: false,
+        phase: 'ENDED',
+        phase_label: 'Đã tan ca',
+        eligible_for_sync: true,
+        start_hm: '17:30',
+        end_hm: '19:30',
+        time_range_display: '17:30 – 19:30',
+        time_source: 'LMS_SLOT',
+        is_coding: true,
+        is_robotics: false,
+        spck_exempt_course: false,
+        is_spck_session: true,
+        requires_spck: true,
+        zalo_category: 'DONE',
+        zalo_status_label: '✅ Đã báo cáo',
+        nx_zalo_checked: false,
+        screenshot_url: '/api/evidence/801/proof.png',
+        lms_checked: true,
+        lms_fetch_unavailable: false,
+        lms_status_text: '❌ Thiếu SPCK B13',
+        lms_attendance: { status: 'UNVERIFIED', attended_count: 4, absent_count: 0 },
+        lms_comments: { status: 'MISSING', submitted_count: 2, exempt_count: 0 },
+        lms_spck: {
+          status: 'MISSING',
+          submitted_count: 0,
+          attended_count: 4,
+          exempt_count: 0,
+          missing_comment_count: 4,
+          is_spck_session: true,
+          requires_spck: true,
+          spck_exempt_course: false,
+          summary_text: '❌ Chưa nộp SPCK (4/4 HS)',
+          detail_notes: ['[LMS] Chưa nộp SPCK Buổi 13'],
+        },
+        nx_lms_checked: false,
+        lms_ready_for_tick: false,
+        lms_ready_reason: 'Chưa đủ nhận xét LMS',
+        issues: [{ code: 'LMS_SPCK_MISSING', severity: 'FAIL', text: '[LMS] Chưa nộp SPCK (4/4 HS)' }],
+        fail_count: 1,
+        note_count: 0,
+      },
+      {
+        target_key: '2026:45:VT-PTB02:14:2026-11-14',
+        week: 45,
+        year: 2026,
+        week_label: 'W45/2026',
+        is_current_week: false,
+        class_code: 'VT-PTB02',
+        lesson: '14',
+        lesson_num: 14,
+        class_date: '14/11/2026',
+        class_date_iso: '2026-11-14',
+        group_name: '[VT]-PTB02-19h00',
+        person: 'GV PTB',
+        missing_zalo_group: false,
+        phase: 'ENDED',
+        phase_label: 'Đã tan ca',
+        eligible_for_sync: true,
+        start_hm: '19:00',
+        end_hm: '21:00',
+        time_range_display: '19:00 – 21:00',
+        time_source: 'ZALO_GROUP',
+        is_coding: true,
+        is_robotics: false,
+        spck_exempt_course: true,
+        is_spck_session: true,
+        requires_spck: false,
+        zalo_category: 'EXEMPT',
+        zalo_status_label: '⚪ Miễn B14',
+        nx_zalo_checked: true,
+        lms_checked: true,
+        lms_fetch_unavailable: false,
+        lms_status_text: '✅ Đủ ĐD & NX LMS',
+        lms_attendance: { status: 'VERIFIED', attended_count: 5, absent_count: 0 },
+        lms_comments: { status: 'COMPLETE', submitted_count: 5, exempt_count: 0 },
+        lms_spck: {
+          status: 'NOT_REQUIRED',
+          is_spck_session: true,
+          requires_spck: false,
+          spck_exempt_course: true,
+          summary_text: '',
+          detail_notes: [],
+        },
+        nx_lms_checked: false,
+        lms_ready_for_tick: true,
+        lms_ready_reason: '',
+        issues: [],
+        fail_count: 0,
+        note_count: 0,
+      },
+      {
+        target_key: '2026:46:VT-C4K09:05:2026-11-14',
+        week: 46,
+        year: 2026,
+        week_label: 'W46/2026',
+        is_current_week: true,
+        class_code: 'VT-C4K09',
+        lesson: '5',
+        lesson_num: 5,
+        class_date: '14/11/2026',
+        class_date_iso: '2026-11-14',
+        group_name: '[VT]-C4K09-18h30',
+        person: 'GV Đang Học',
+        missing_zalo_group: false,
+        phase: 'ONGOING',
+        phase_label: 'Đang diễn ra',
+        eligible_for_sync: false,
+        start_hm: '18:30',
+        end_hm: '20:30',
+        time_range_display: '18:30 – 20:30',
+        time_source: 'LMS_SLOT',
+        is_coding: true,
+        is_robotics: false,
+        spck_exempt_course: false,
+        is_spck_session: false,
+        requires_spck: false,
+        zalo_category: 'deferred',
+        zalo_status_label: '⏳ Chưa tới giờ kiểm tra',
+        nx_zalo_checked: null,
+        lms_checked: false,
+        lms_fetch_unavailable: false,
+        lms_status_text: '⏳ Đang chờ điểm danh / nhận xét LMS',
+        lms_spck: { status: 'NOT_APPLICABLE', is_spck_session: false, requires_spck: false, spck_exempt_course: false, summary_text: '—' },
+        nx_lms_checked: null,
+        lms_ready_for_tick: false,
+        issues: [],
+        fail_count: 0,
+        note_count: 0,
+      },
+    ],
+  };
+
+  let resolveFirstSlowOverview;
+  const harness = createFrontendHarness(async (url, options = {}) => {
+    const cleanUrl = String(url || '');
+    if (cleanUrl.startsWith('/api/today/overview')) {
+      overviewCallCount += 1;
+      if (overviewCallCount === 1) {
+        return await new Promise(resolve => {
+          resolveFirstSlowOverview = () =>
+            resolve({
+              ok: true,
+              status: 200,
+              json: async () => ({
+                ...sampleOverview,
+                target_date_iso: '2026-11-01',
+                kpis: {
+                  ...sampleOverview.kpis,
+                  total: { count: 99, upcoming: 0, ongoing: 0, ended: 99, time_unknown: 0, missing_zalo_group: 0 },
+                },
+                items: [],
+              }),
+            });
+        });
+      }
+      return { ok: true, status: 200, json: async () => sampleOverview };
+    }
+    if (cleanUrl === '/api/today/sync') {
+      const parsedBody = JSON.parse(String(options.body || '{}'));
+      syncPayloads.push(parsedBody);
+      if (!parsedBody.confirm_yellow) {
+        return {
+          ok: false,
+          status: 409,
+          json: async () => ({
+            detail: {
+              code: 'SCAN_PREFLIGHT_CONFIRMATION_REQUIRED',
+              message: 'Cảnh báo vàng preflight BCNB.',
+            },
+          }),
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          job_id: 777,
+          message: 'Đã khởi tạo job #777 cho Lớp Hôm Nay.',
+        }),
+      };
+    }
+    if (cleanUrl === '/api/jobs/latest') {
+      return { ok: true, status: 200, json: async () => null };
+    }
+    if (cleanUrl.startsWith('/api/jobs/777')) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          id: 777,
+          job_type: 'TODAY_REALTIME_SYNC',
+          status: 'SUCCESS',
+          message: 'Hoàn tất Lớp Hôm Nay',
+          retryable: false,
+          cancel_allowed: false,
+          results: { kind: 'today_realtime_sync' },
+        }),
+      };
+    }
+    return { ok: true, status: 200, json: async () => ({}) };
+  });
+
+  harness.context.confirm = message => {
+    confirmPrompts.push(String(message || ''));
+    return true;
+  };
+  harness.context.window.confirm = harness.context.confirm;
+
+  for (const scriptPath of [
+    '/static/js/state.js',
+    '/static/js/groups.js',
+    '/static/js/jobs.js',
+    '/static/js/modals.js',
+    '/static/js/today.js',
+  ]) {
+    vm.runInContext(scriptSourceByPath.get(scriptPath), harness.context);
+  }
+
+  // Out-of-order protection: slow request #1 starts, fast request #2 finishes first, then #1 resolves late and must be ignored.
+  const pSlow = vm.runInContext(`loadTodayOverview({ dateIso: '2026-11-01' })`, harness.context);
+  vm.runInContext(`switchTab('today')`, harness.context);
+  await flushAsyncWork();
+  resolveFirstSlowOverview();
+  await pSlow;
+  await flushAsyncWork();
+
+  assertFrontend(
+    harness.elements.get('header-title').innerText === 'Lớp Hôm Nay (Live)',
+    'switchTab("today") must set header-title to Lớp Hôm Nay (Live)',
+  );
+  assertFrontend(
+    harness.elements.get('today-kpi-total').textContent === '3' &&
+      harness.elements.get('today-kpi-zalo').textContent === '2' &&
+      harness.elements.get('today-kpi-lms').textContent === '1' &&
+      harness.elements.get('today-kpi-spck').textContent === '0/1' &&
+      harness.elements.get('today-kpi-bcnb').textContent === '2',
+    'Out-of-order guard and Today KPI rendering failed',
+  );
+
+  // SPCK spotlight and chip counts (including realistic PTB/CSB exempt classification with is_coding=true)
+  const spckPanel = harness.elements.get('today-spck-panel');
+  const spckCards = harness.elements.get('today-spck-cards');
+  const ptbCardText = JSON.stringify(spckCards.children[1]);
+  assertFrontend(
+    !spckPanel.classList.contains('hidden') &&
+      spckCards.children.length === 2 &&
+      ptbCardText.includes('MIỄN SPCK (PTB/CSB)') &&
+      ptbCardText.includes('⚪ Miễn SPCK (PTB/CSB)') &&
+      !ptbCardText.includes('CODING (bắt buộc SPCK)') &&
+      !ptbCardText.includes('⏳ Chưa kiểm tra SPCK') &&
+      harness.elements.get('today-chip-spck').textContent === 'SPCK B12–B14 (2)' &&
+      harness.elements.get('today-chip-ongoing').textContent === 'Đang diễn ra (1)',
+    'SPCK B12-14 spotlight panel and filter chips must reflect Today items and PTB/CSB exemption',
+  );
+
+  // XSS safety check + chronological 7-column row selection + PTB/CSB table badge
+  const tbody = harness.elements.get('today-results-tbody');
+  assertFrontend(
+    tbody.children.length === 3 &&
+      tbody.children[0].children.length === 7 &&
+      !String(tbody.children[0].innerHTML || '').includes('<script>') &&
+      JSON.stringify(tbody.children[1].children[2]).includes('Miễn SPCK'),
+    'Today table must render 3 rows x 7 cols using safe textContent and show Miễn SPCK for PTB/CSB',
+  );
+
+  // Verify only eligible_for_sync rows get selected by toggleSelectAllTodayRows(true)
+  vm.runInContext(`toggleSelectAllTodayRows(true)`, harness.context);
+  assertFrontend(
+    harness.elements.get('today-sync-selected-btn').textContent === 'Quét các lớp đã chọn (2)' &&
+      !harness.elements.get('today-sync-selected-btn').disabled,
+    'toggleSelectAllTodayRows(true) must select only the 2 ended eligible rows and enable selected sync button',
+  );
+
+  // Filter by spck then search by VT-JSB15
+  vm.runInContext(`setTodayFilter('spck')`, harness.context);
+  assertFrontend(tbody.children.length === 2, 'SPCK filter must narrow table to 2 B12-B14 rows');
+  harness.elements.get('today-search-input').value = 'VT-JSB15';
+  vm.runInContext(`filterTodayRows()`, harness.context);
+  assertFrontend(tbody.children.length === 1, 'Search filter must narrow SPCK view to VT-JSB15');
+
+  // Trigger selected sync in production mode with YELLOW preflight confirmation retry
+  await vm.runInContext(`triggerTodaySelectedSync()`, harness.context);
+  await flushAsyncWork();
+  assertFrontend(
+    syncPayloads.length === 2 &&
+      syncPayloads[0].confirm_yellow === false &&
+      syncPayloads[1].confirm_yellow === true &&
+      Array.isArray(syncPayloads[1].selected_target_keys) &&
+      syncPayloads[1].selected_target_keys.length === 2 &&
+      confirmPrompts.length === 2,
+    'Production selected sync must ask production confirm + retry with confirm_yellow=true after 409',
+  );
+
+  // Copy reminders grouped by teacher
+  await vm.runInContext(`copyTodayReminders()`, harness.context);
+  assertFrontend(
+    harness.clipboardWrites.length === 1 &&
+      harness.clipboardWrites[0].includes('GV Coding:') &&
+      harness.clipboardWrites[0].includes('VT-JSB15 B13') &&
+      !harness.clipboardWrites[0].includes('VT-PTB02'),
+    'copyTodayReminders must copy only incomplete teachers/classes to clipboard',
+  );
+
+  // Verify edge cases: ONGOING B12-14, all-absent EXEMPT SPCK, COMPLETE with missing_comment_count>0, and single alert when busy
+  const edgeCasesPass = vm.runInContext(
+    `(() => {
+      const ongoingB13 = {
+        phase: 'ONGOING', is_coding: true, is_spck_session: true, requires_spck: true,
+        zalo_category: 'deferred', lms_checked: false, lms_spck: { status: 'UNVERIFIED' },
+      };
+      const allAbsentExempt = {
+        phase: 'ENDED', is_coding: true, is_spck_session: true, requires_spck: true,
+        zalo_category: 'EXEMPT', lms_checked: true, lms_ready_for_tick: true,
+        lms_attendance: { status: 'EXEMPT', attended_count: 0, absent_count: 5 },
+        lms_comments: { status: 'EXEMPT', submitted_count: 0, exempt_count: 5 },
+        lms_spck: { status: 'EXEMPT', summary_text: 'SPCK không áp dụng (toàn bộ học viên nghỉ)' },
+      };
+      const missingSpckComments = {
+        phase: 'ENDED', lesson: '12', is_coding: true, is_spck_session: true, requires_spck: true,
+        zalo_category: 'DONE', lms_checked: true, lms_ready_for_tick: false,
+        lms_attendance: { status: 'VERIFIED', attended_count: 4, absent_count: 0 },
+        lms_comments: { status: 'COMPLETE', submitted_count: 4, exempt_count: 0 },
+        lms_spck: { status: 'COMPLETE', missing_comment_count: 2, summary_text: 'SPCK 4/4', detail_notes: ['[LMS] SPCK chưa có nhận xét (2/4 HS)'] },
+      };
+      return collectTodayMissingReasons(ongoingB13).length === 0
+        && !isTodayItemMissingLms(ongoingB13)
+        && isTodaySpckComplete(allAbsentExempt)
+        && collectTodayMissingReasons(allAbsentExempt).length === 0
+        && !isTodaySpckComplete(missingSpckComments)
+        && isTodayItemMissingLms(missingSpckComments)
+        && collectTodayMissingReasons(missingSpckComments).includes('[LMS] SPCK chưa có nhận xét (2/4 HS)');
+    })()`,
+    harness.context,
+  );
+  assertFrontend(edgeCasesPass, 'SPCK edge cases (ongoing B13, all-absent EXEMPT, missing_comment_count>0) failed');
+
+  const alertsBeforeBusy = harness.alerts.length;
+  vm.runInContext(`currentJobActive = true; triggerTodayLiveSync(true); currentJobActive = false;`, harness.context);
+  assertFrontend(
+    harness.alerts.length === alertsBeforeBusy + 1,
+    'triggerTodayLiveSync when busy must show exactly one alert via canStartAnotherJob()',
+  );
+}
+
 async function runFrontendBehaviorChecks() {
   await checkJobPollingAndTerminalDetails();
   await checkGoogleFormHistoryAndHttpError();
@@ -3207,7 +3604,8 @@ async function runFrontendBehaviorChecks() {
   await checkGoogleFormFetchLmsStudentsAndIdempotency();
   await checkWeeklyHistoryAndCsvExport();
   await checkPhase57FrontendHardening();
-  console.log(`template-js-contract-ok scripts=${scriptSources.length} handlers=${handlerNames.size} behavior=13`);
+  await checkTodayLivePageWorkflow();
+  console.log(`template-js-contract-ok scripts=${scriptSources.length} handlers=${handlerNames.size} behavior=14`);
 }
 
 runFrontendBehaviorChecks().catch(error => {

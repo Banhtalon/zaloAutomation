@@ -35,6 +35,10 @@ with tempfile.TemporaryDirectory() as temp_dir:
             "zalo-review-queue-items",
             "paste-area",
             "groups-table-body",
+            "btn-today",
+            "tab-today",
+            "today-results-table",
+            "today-spck-panel",
             "full-log-terminal",
             "lmsModal",
             "image-modal",
@@ -47,6 +51,7 @@ with tempfile.TemporaryDirectory() as temp_dir:
             "/static/js/jobs.js",
             "/static/js/googleform.js",
             "/static/js/lms.js",
+            "/static/js/today.js",
         ):
             if client.get(asset).status_code != 200:
                 raise SystemExit(f"dashboard-asset-missing={asset}")
@@ -94,6 +99,8 @@ with tempfile.TemporaryDirectory() as temp_dir:
             "/api/auth/me": {"get"},
             "/api/auth/logout": {"post"},
             "/api/evidence/{job_id}/{filename}": {"get"},
+            "/api/today/overview": {"get"},
+            "/api/today/sync": {"post"},
         }
         missing = set(required) - set(paths)
         if missing:

@@ -56,6 +56,8 @@ async def execute_verified_checkbox_action(
     execution_mode: str,
     reason: dict,
     lesson: str | None = None,
+    class_date_iso: str | None = None,
+    session_id: str | None = None,
     evidence_path: str | None = None,
     evidence_sha256: str | None = None,
     evidence_job_id: int | None = None,
@@ -64,6 +66,11 @@ async def execute_verified_checkbox_action(
     should_halt: Callable[[], bool] | None = None,
 ) -> str:
     """Write once, then mark VERIFIED only after hard reload and fresh lookup."""
+    verify_extra: dict[str, Any] = {}
+    if class_date_iso is not None:
+        verify_extra["class_date_iso"] = class_date_iso
+    if session_id is not None:
+        verify_extra["session_id"] = session_id
     normalized_sha256 = str(evidence_sha256 or "").strip().upper() or None
     if evidence_path and not (
         normalized_sha256 and re.fullmatch(r"[A-F0-9]{64}", normalized_sha256)
@@ -116,6 +123,7 @@ async def execute_verified_checkbox_action(
             week=week,
             year=year,
             lesson=lesson,
+            **verify_extra,
         )
         if persisted:
             await audit_repo.complete_action(
@@ -210,13 +218,15 @@ async def execute_verified_checkbox_action(
                 week=week,
                 year=year,
                 lesson=lesson,
+                **verify_extra,
             )
         except Exception as verification_error:
+            err_type = type(verification_error).__name__
             await audit_repo.complete_action(
                 audit["id"],
                 outcome="UNKNOWN",
                 after_state={"checked": None},
-                error_message=str(verification_error)[:500],
+                error_message=f"Xác minh {column_kind} sau reload thất bại ({err_type}).",
             )
             terminal_audit_recorded = True
             raise BcnbOutcomeUnknownError(
@@ -238,13 +248,15 @@ async def execute_verified_checkbox_action(
                     week=week,
                     year=year,
                     lesson=lesson,
+                    **verify_extra,
                 )
             except Exception as recovery_error:
+                err_type = type(recovery_error).__name__
                 await audit_repo.complete_action(
                     audit["id"],
                     outcome="UNKNOWN",
                     after_state={"checked": None},
-                    error_message=str(recovery_error)[:500],
+                    error_message=f"Xác minh {column_kind} sau lỗi ghi thất bại ({err_type}).",
                 )
                 terminal_audit_recorded = True
                 raise BcnbOutcomeUnknownError(
@@ -256,16 +268,21 @@ async def execute_verified_checkbox_action(
                 )
                 return "VERIFIED"
             after_checked = False
+        action_err_type = type(action_error).__name__
         if not terminal_audit_recorded:
             await audit_repo.complete_action(
                 audit["id"],
                 outcome="FAILED",
                 after_state={"checked": after_checked},
-                error_message=str(action_error)[:500],
+                error_message=f"Thao tác {column_kind} thất bại ({action_err_type}).",
             )
         log_message(
-            f"Xác minh thao tác BCNB thất bại cho {class_code}: {action_error}",
+            f"Xác minh thao tác BCNB thất bại cho {class_code}: {action_err_type}",
             level="ERROR",
+            event="bcnb_action.checkbox_failed",
+            class_code=class_code,
+            column_kind=column_kind,
+            error_type=action_err_type,
         )
         raise
 
@@ -895,6 +912,7 @@ async def execute_verified_checker_note_action(
                 session_id=clean_session_id,
             )
         except Exception as verification_error:
+            err_type = type(verification_error).__name__
             await audit_repo.complete_action(
                 audit["id"],
                 outcome="UNKNOWN",
@@ -902,7 +920,7 @@ async def execute_verified_checker_note_action(
                     "qc_issue_note": None,
                     "bcnb_session_id": clean_session_id,
                 },
-                error_message=str(verification_error)[:500],
+                error_message=f"Xác minh Mô tả vấn đề sau reload thất bại ({err_type}).",
             )
             terminal_audit_recorded = True
             raise BcnbOutcomeUnknownError(
@@ -952,6 +970,7 @@ async def execute_verified_checker_note_action(
                     session_id=clean_session_id,
                 )
             except Exception as recovery_error:
+                err_type = type(recovery_error).__name__
                 await audit_repo.complete_action(
                     audit["id"],
                     outcome="UNKNOWN",
@@ -959,7 +978,7 @@ async def execute_verified_checker_note_action(
                         "qc_issue_note": None,
                         "bcnb_session_id": clean_session_id,
                     },
-                    error_message=str(recovery_error)[:500],
+                    error_message=f"Xác minh Mô tả vấn đề sau lỗi POST thất bại ({err_type}).",
                 )
                 terminal_audit_recorded = True
                 raise BcnbOutcomeUnknownError(
@@ -992,6 +1011,7 @@ async def execute_verified_checker_note_action(
             )
             terminal_audit_recorded = True
             raise BcnbConflictAfterWriteError(conflict_msg) from action_error
+        action_err_type = type(action_error).__name__
         if not terminal_audit_recorded:
             await audit_repo.complete_action(
                 audit["id"],
@@ -1002,11 +1022,14 @@ async def execute_verified_checker_note_action(
                     ),
                     "bcnb_session_id": clean_session_id or None,
                 },
-                error_message=str(action_error)[:500],
+                error_message=f"Cập nhật Mô tả vấn đề thất bại ({action_err_type}).",
             )
         log_message(
-            f"Xác minh ghi chú Mô tả vấn đề BCNB thất bại cho {class_code}: {action_error}",
+            f"Xác minh ghi chú Mô tả vấn đề BCNB thất bại cho {class_code}: {action_err_type}",
             level="ERROR",
+            event="bcnb_action.checker_note_failed",
+            class_code=class_code,
+            error_type=action_err_type,
         )
         raise
 
