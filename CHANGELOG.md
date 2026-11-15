@@ -4,6 +4,18 @@ Tài liệu này ghi lại toàn bộ quá trình hình thành, phát triển ki
 
 ---
 
+## [2026-11-15] — Wave 7 Live Hotfix: Sửa lỗi `TimeoutError` khi nhấn `Kiểm tra Live ngay` trên `Lớp Hôm Nay` & Cô lập lỗi setup Zalo (`DEC-048`, `DEC-049`)
+
+- **Sửa nguyên nhân gốc gây `TimeoutError` (`services/today_ops_service.py` — `_scan_ended_zalo_targets`, `run_today_realtime_sync`)**:
+  - Trước đây `_scan_ended_zalo_targets` gọi `_invoke_landing_provider(landing_provider, zalo_page)` trên trang `about:blank` mới mở **trước** khi `_setup_scan_page` điều hướng tới `https://chat.zalo.me/` và truyền callback chưa bind page vào `landing_facts_provider`, làm `ZaloAuthReadinessAdapter` poll hết `60.0s` trên `about:blank` và làm sập toàn bộ job `TODAY_REALTIME_SYNC` khi có lớp đã kết thúc.
+  - Sửa bằng cách truyền zero-arg callable đã bind `target_page` (`landing_facts_provider=landing_provider_for(candidate_page)`) vào `_setup_scan_page` để chỉ kiểm tra trạng thái đăng nhập **sau** `page.goto("https://chat.zalo.me/")`.
+- **Đồng bộ cơ chế phục hồi & cô lập lỗi với `run_parallel_zalo_batch` (`services/today_ops_service.py`)**:
+  - Bổ sung retry khởi tạo trang Zalo tới `MAX_SETUP_ATTEMPTS` (ngắt ngay với nhóm mã `LANDING_SETUP_CODES` như `LOGIN_OR_QR`), phát setup telemetry bounded qua `_emit_setup_telemetry`, đóng trang an toàn chống double-close, timeout từng target qua `_await_with_target_timeout` (`TARGET_TIMEOUT`), retry `TargetSearchError` 1 lần trên trang Zalo làm mới (`attempt=2`), cập nhật tiến độ từng lớp (`50%..74%`), và giữ nguyên `error_code` / `error_message` / `batch_halted` trong `finalize_registered_scan`.
+  - Cô lập lỗi `ZaloSetupError` về trạng thái `PARTIAL_SUCCESS` kèm `zalo_setup_notice` trong message & `results` JSON thay vì làm `FAILED` toàn bộ job — giữ nguyên toàn bộ kết quả live LMS, SPCK B12–14 và BCNB đọc được trong ngày trong khi vẫn giữ các lớp Zalo ở trạng thái fail-closed (`INSUFFICIENT_EVIDENCE`, không ghi `NX Zalo`).
+- **Hồi quy & Kiểm chứng (`tests/test_today_ops_service.py`, `[FULL GATE]`)**:
+  - Thêm 3 regression unit tests mới (`test_run_today_realtime_sync_navigates_zalo_before_landing_facts_provider`, `test_run_today_realtime_sync_isolates_zalo_setup_login_qr_and_preserves_lms_spck`, `test_scan_ended_zalo_targets_retries_transient_setup_and_target_search_error`).
+  - Targeted unit tests (`tests.test_today_ops_service`, `tests.test_today_routes`, `tests.test_today_eligibility_and_bcnb`): `33/33 OK`; `ruff`, `mypy`, `node tests/check_template_js.js` PASS; offline `graphify update .` (`5126` nodes, `15502` edges, `180` communities); `.\CHECK_QUALITY.ps1 -Isolated`: `exit 0` (`QUALITY GATE PASSED`, `752/752` regression tests `OK` trong `366.395s`, branch coverage `79.5%`, `services/today_ops_service.py` `78.7%`). Review độc lập `Argon High` (`reviewer-75`, swarm read-only `#46 -> #47`): `VERDICT: PASS` (`[P0]=0, [P1]=0, [P2]=0`).
+
 ## [2026-11-15] — Wave 7: Trang riêng `Lớp Hôm Nay` (Live LMS/Zalo, SPCK Coding B12–14, Tick BCNB đúng tuần) & Đổi Review độc lập sang `Argon High` (`DEC-048`, `DEC-049`)
 
 - **Backend theo dõi lớp trong ngày & đồng bộ BCNB đúng tuần (`services/today_ops_service.py`, `api/today_routes.py`, `services/job_dispatcher.py`, `repositories/report_repository.py`)**:

@@ -16,15 +16,23 @@ from repositories.evidence_repository import EvidenceRepository
 from repositories.group_repository import GroupRepository
 from repositories.job_repository import JobRepository
 from repositories.report_repository import ReportRepository
-from repositories.zalo_batch_repository import ZaloBatchRepository
+from repositories.zalo_batch_repository import ZaloBatchRepository, canonical_target_key
 from services.external_gateways import ExternalGateways
 from services.runtime import WorkerRuntime
 from services.today_ops_service import (
+    _scan_ended_zalo_targets,
     build_today_overview,
     parse_target_date_iso,
     run_today_realtime_sync,
 )
 from services.zalo_bcnb_service import update_bcnb_reports
+from services.zalo_parallel_service import (
+    TARGET_TIMEOUT,
+    ScanPageState,
+    TargetSearchError,
+    TargetTimeoutError,
+    ZaloSetupError,
+)
 
 
 def _make_two_week_snapshot() -> dict:
@@ -2379,3 +2387,394 @@ class TodayOpsServiceTests(unittest.IsolatedAsyncioTestCase):
         ):
             self.assertNotIn(pii, joined_all)
         self.assertGreaterEqual(len(audits), 3)
+
+    async def test_run_today_realtime_sync_navigates_zalo_before_landing_facts_provider(
+        self,
+    ) -> None:
+        await self.group_repo.apply_discovery_snapshot(_make_two_week_snapshot())
+        job_id = await self.job_repo.create_job(
+            "TODAY_REALTIME_SYNC",
+            {"target_date_iso": "2026-11-14", "check_only": True, "tick_lms": False},
+        )
+        runtime = WorkerRuntime(evidence_root=self.evidence_root)
+        gateways = ExternalGateways.production()
+
+        class _FakeZaloPage:
+            def __init__(self) -> None:
+                self.url = "about:blank"
+                self.closed = False
+                self.goto_urls: list[str] = []
+
+            async def add_init_script(self, _script: str) -> None:
+                return None
+
+            async def goto(self, url: str, **_kwargs) -> None:
+                self.url = url
+                self.goto_urls.append(url)
+
+            async def wait_for_selector(self, _selector: str, **_kwargs) -> None:
+                return None
+
+            def is_closed(self) -> bool:
+                return self.closed
+
+            async def close(self) -> None:
+                self.closed = True
+
+        fake_page = _FakeZaloPage()
+        observed_urls: list[str] = []
+
+        class _FakeSess:
+            async def landing_facts_provider(self, page):
+                observed_urls.append(page.url)
+                if not page.url.startswith("https://chat.zalo.me"):
+                    raise TimeoutError("polled about:blank before goto")
+                return {
+                    "page_closed": False,
+                    "blocking_modal": False,
+                    "unsupported_browser": False,
+                    "network_error": False,
+                    "readiness_timeout": False,
+                    "selector_detached": False,
+                    "authenticated_shell_visible": True,
+                    "search_control_visible": True,
+                    "login_or_qr_visible": False,
+                }
+
+        @asynccontextmanager
+        async def _fake_session():
+            yield _FakeSess()
+
+        gateways.browser.persistent_session = _fake_session
+        scanned_codes: list[str] = []
+
+        async def _fake_prefetch(_page, *, today_candidates, **_kwargs):
+            for c in today_candidates:
+                c["lms_attendance"] = {"status": "VERIFIED", "unverified_count": 0}
+                c["lms_comments"] = {"status": "COMPLETE", "submitted_count": 3}
+                c["lms_spck"] = {"status": "COMPLETE", "submitted_count": 3}
+            return {}
+
+        async def _fake_scan_one(_page, *, job_id: int, target: dict, screenshots_dir: str, **_kw):
+            scanned_codes.append(target["class_code"])
+            shot_file = Path(screenshots_dir) / f"{target['class_code']}.png"
+            shot_file.parent.mkdir(parents=True, exist_ok=True)
+            shot_file.write_bytes(b"\x89PNG\r\n\x1a\nfake")
+            return {
+                "group": target["group_name"],
+                "class_code": target["class_code"],
+                "session_id": target.get("session_id"),
+                "date_iso": target.get("date_iso"),
+                "person": target.get("person") or "GV A",
+                "decision": "VERIFIED",
+                "evidence_state": "SUBMITTED_VERIFIED",
+                "reason": "ok",
+                "screenshot_path": str(shot_file),
+                "screenshot_sha256": hashlib.sha256(b"\x89PNG\r\n\x1a\nfake").hexdigest(),
+                "image_match_method": "EXACT",
+            }
+
+        now_dt = datetime(2026, 11, 14, 15, 0, tzinfo=BUSINESS_TIMEZONE)
+        with (
+            patch("services.today_ops_service._new_scan_page", AsyncMock(return_value=fake_page)),
+            patch("services.today_ops_service._close_scan_page", AsyncMock()),
+            patch("services.today_ops_service._prefetch_lms_for_today", AsyncMock(side_effect=_fake_prefetch)),
+            patch("services.today_ops_service.inspect_and_attach_quality_issues_async", AsyncMock()),
+            patch("services.today_ops_service._scan_one_target", AsyncMock(side_effect=_fake_scan_one)),
+            patch("services.today_ops_service._login_bcnb_if_needed", AsyncMock()),
+            patch(
+                "services.today_ops_service.update_bcnb_reports",
+                AsyncMock(
+                    return_value={
+                        "mode": "check_only",
+                        "updated_count": 0,
+                        "lms_updated_count": 0,
+                        "failed_targets": [],
+                        "lms_failed_targets": [],
+                    }
+                ),
+            ),
+            patch(
+                "services.zalo_parallel_service.ensure_zalo_history_synced",
+                AsyncMock(return_value={"decision": "SYNC_VERIFIED", "verified": True}),
+            ),
+        ):
+            await run_today_realtime_sync(
+                job_id,
+                {"target_date_iso": "2026-11-14", "check_only": True, "tick_lms": False},
+                "dry-run",
+                runtime=runtime,
+                external=gateways,
+                job_repo=self.job_repo,
+                group_repo=self.group_repo,
+                audit_repo=self.audit_repo,
+                evidence_repo=self.evidence_repo,
+                batch_repo=self.batch_repo,
+                now_override=now_dt,
+            )
+
+        job = await self.job_repo.get_job(job_id)
+        self.assertEqual(job["status"], "SUCCESS")
+        self.assertEqual(observed_urls, ["https://chat.zalo.me/"])
+        self.assertGreaterEqual(len(fake_page.goto_urls), 1)
+        self.assertEqual(fake_page.goto_urls[0], "https://chat.zalo.me/")
+        self.assertEqual(scanned_codes, ["VT-PTA01", "VT-PTB01"])
+
+    async def test_run_today_realtime_sync_isolates_zalo_setup_login_qr_and_preserves_lms_spck(
+        self,
+    ) -> None:
+        await self.group_repo.apply_discovery_snapshot(_make_two_week_snapshot())
+        job_id = await self.job_repo.create_job(
+            "TODAY_REALTIME_SYNC",
+            {"target_date_iso": "2026-11-14", "check_only": True, "tick_lms": False},
+        )
+        runtime = WorkerRuntime(evidence_root=self.evidence_root)
+        gateways = ExternalGateways.production()
+
+        class _FakePage:
+            def __init__(self) -> None:
+                self.url = "about:blank"
+                self.closed = False
+
+            async def add_init_script(self, _script: str) -> None:
+                return None
+
+            async def goto(self, url: str, **_kwargs) -> None:
+                self.url = url
+
+            async def wait_for_selector(self, _selector: str, **_kwargs) -> None:
+                return None
+
+            async def close(self) -> None:
+                self.closed = True
+
+        provider_calls = 0
+
+        class _QrSession:
+            async def landing_facts_provider(self, _page):
+                nonlocal provider_calls
+                provider_calls += 1
+                return {
+                    "page_closed": False,
+                    "blocking_modal": False,
+                    "unsupported_browser": False,
+                    "network_error": False,
+                    "readiness_timeout": False,
+                    "selector_detached": False,
+                    "authenticated_shell_visible": False,
+                    "search_control_visible": False,
+                    "login_or_qr_visible": True,
+                }
+
+        @asynccontextmanager
+        async def _fake_session():
+            yield _QrSession()
+
+        gateways.browser.persistent_session = _fake_session
+        scan_mock = AsyncMock(side_effect=AssertionError("must not scan when setup returns LOGIN_OR_QR"))
+
+        async def _fake_prefetch(_page, *, today_candidates, **_kwargs):
+            for c in today_candidates:
+                c["lms_attendance"] = {"status": "VERIFIED", "unverified_count": 0}
+                c["lms_comments"] = {"status": "COMPLETE", "submitted_count": 4}
+                c["lms_spck"] = {"status": "COMPLETE", "submitted_count": 4}
+            return {}
+
+        now_dt = datetime(2026, 11, 14, 15, 0, tzinfo=BUSINESS_TIMEZONE)
+        with (
+            patch("services.today_ops_service._new_scan_page", AsyncMock(side_effect=lambda _s: _FakePage())),
+            patch("services.today_ops_service._close_scan_page", AsyncMock()),
+            patch("services.today_ops_service._prefetch_lms_for_today", AsyncMock(side_effect=_fake_prefetch)),
+            patch("services.today_ops_service.inspect_and_attach_quality_issues_async", AsyncMock()),
+            patch("services.today_ops_service._scan_one_target", scan_mock),
+            patch("services.today_ops_service._login_bcnb_if_needed", AsyncMock()),
+            patch(
+                "services.today_ops_service.update_bcnb_reports",
+                AsyncMock(
+                    return_value={
+                        "mode": "check_only",
+                        "updated_count": 0,
+                        "lms_updated_count": 0,
+                        "failed_targets": [],
+                        "lms_failed_targets": [],
+                    }
+                ),
+            ),
+        ):
+            await run_today_realtime_sync(
+                job_id,
+                {"target_date_iso": "2026-11-14", "check_only": True, "tick_lms": False},
+                "dry-run",
+                runtime=runtime,
+                external=gateways,
+                job_repo=self.job_repo,
+                group_repo=self.group_repo,
+                audit_repo=self.audit_repo,
+                evidence_repo=self.evidence_repo,
+                batch_repo=self.batch_repo,
+                now_override=now_dt,
+            )
+
+        job = await self.job_repo.get_job(job_id)
+        self.assertEqual(job["status"], "PARTIAL_SUCCESS")
+        self.assertEqual(provider_calls, 1)
+        self.assertEqual(scan_mock.await_count, 0)
+        self.assertIn("Lưu ý Zalo:", job["message"])
+        envelope = json.loads(job["results"])
+        self.assertIn("đăng nhập/QR", envelope["zalo_setup_notice"])
+        self.assertEqual(len(envelope["items"]), 2)
+        for item in envelope["items"]:
+            self.assertEqual(item["evidence_state"], "INSUFFICIENT_EVIDENCE")
+            self.assertEqual(
+                item["evidence"]["classifier_result"]["decision"],
+                "INSUFFICIENT_EVIDENCE",
+            )
+            self.assertEqual(item["error_code"], "LOGIN_OR_QR")
+        pta_item = next(
+            x
+            for x in envelope["today_items"]
+            if (x.get("class_code") or (x.get("scan_target") or {}).get("class_code"))
+            == "VT-PTA01"
+        )
+        self.assertEqual(pta_item["lms_spck"]["status"], "COMPLETE")
+        fake_container = MagicMock()
+        fake_container.settings.bcnb_dry_run = True
+        fake_container.settings.zalo_plan_max_age_minutes = 30
+        fake_container.group_repo = self.group_repo
+        fake_container.job_repo = self.job_repo
+        overview = await build_today_overview(
+            fake_container,
+            target_date_iso="2026-11-14",
+            now=now_dt,
+        )
+        overview_pta = next(x for x in overview["items"] if x["class_code"] == "VT-PTA01")
+        self.assertEqual(overview_pta["lms_spck"]["status"], "COMPLETE")
+
+    async def test_scan_ended_zalo_targets_retries_transient_setup_and_target_search_error(
+        self,
+    ) -> None:
+        job_id = await self.job_repo.create_job(
+            "TODAY_REALTIME_SYNC",
+            {"target_date_iso": "2026-11-14", "check_only": False, "tick_lms": False},
+            mutates_external=True,
+        )
+        runtime = WorkerRuntime(evidence_root=self.evidence_root)
+        gateways = ExternalGateways.production()
+        targets = [
+            {
+                "group_name": "MindX - VT-PTA01 (08:00-10:00)",
+                "class_code": "VT-PTA01",
+                "week": 45,
+                "year": 2026,
+                "lesson": "12",
+                "class_date_iso": "2026-11-14",
+                "session_id": "sess-1",
+                "date_iso": "2026-11-14",
+                "person": "GV A",
+            },
+            {
+                "group_name": "MindX - VT-PTB01 (10:00-12:00)",
+                "class_code": "VT-PTB01",
+                "week": 46,
+                "year": 2026,
+                "lesson": "13",
+                "class_date_iso": "2026-11-14",
+                "session_id": "sess-2",
+                "date_iso": "2026-11-14",
+                "person": "GV B",
+            },
+        ]
+        await self.batch_repo.seed_targets(job_id, targets)
+        seeded_rows = await self.batch_repo.list_for_job(job_id)
+        target_id_by_key = {
+            canonical_target_key(dict(row.get("source") or row)): int(row["id"])
+            for row in seeded_rows
+        }
+
+        opened_pages: list[dict] = []
+        closed_pages: list[int] = []
+        setup_attempts = 0
+        target_attempts: list[tuple[str, int]] = []
+
+        async def _fake_new_page(_sess):
+            page = {"id": len(opened_pages) + 1}
+            opened_pages.append(page)
+            return page
+
+        async def _fake_close_page(_sess, page):
+            closed_pages.append(int(page["id"]))
+
+        async def _fake_setup(page, **_kwargs):
+            nonlocal setup_attempts
+            setup_attempts += 1
+            if setup_attempts == 1:
+                raise ZaloSetupError(
+                    "SELECTOR_READINESS_TIMEOUT",
+                    page_state=ScanPageState.SELECTOR_WAIT,
+                )
+            return {"decision": "SYNC_VERIFIED", "verified": True, "page_id": page["id"]}
+
+        async def _fake_scan_one(_page, *, target, screenshots_dir, attempt: int = 1, **_kw):
+            code = target["class_code"]
+            target_attempts.append((code, attempt))
+            if code == "VT-PTA01" and attempt == 1:
+                raise TargetSearchError("TARGET_SEARCH_FILL_ERROR", phase="fill", attempt=1)
+            if code == "VT-PTB01":
+                raise TargetTimeoutError("target scan hung")
+            shot_file = Path(screenshots_dir) / f"{code}.png"
+            shot_file.parent.mkdir(parents=True, exist_ok=True)
+            shot_file.write_bytes(b"\x89PNG\r\n\x1a\nfake")
+            return {
+                "group": target["group_name"],
+                "class_code": code,
+                "session_id": target["session_id"],
+                "date_iso": target["date_iso"],
+                "person": target["person"],
+                "decision": "VERIFIED",
+                "evidence_state": "SUBMITTED_VERIFIED",
+                "reason": "ok",
+                "screenshot_path": str(shot_file),
+                "screenshot_sha256": hashlib.sha256(b"\x89PNG\r\n\x1a\nfake").hexdigest(),
+                "image_match_method": "EXACT",
+            }
+
+        today_dt = datetime(2026, 11, 14, 15, 0, tzinfo=BUSINESS_TIMEZONE)
+        with (
+            patch("services.today_ops_service._new_scan_page", AsyncMock(side_effect=_fake_new_page)),
+            patch("services.today_ops_service._close_scan_page", AsyncMock(side_effect=_fake_close_page)),
+            patch("services.today_ops_service._setup_scan_page", AsyncMock(side_effect=_fake_setup)),
+            patch("services.today_ops_service._scan_one_target", AsyncMock(side_effect=_fake_scan_one)),
+        ):
+            results, failures, notice = await _scan_ended_zalo_targets(
+                object(),
+                job_id=job_id,
+                targets=targets,
+                screenshots_dir=str(Path(self.evidence_root) / f"job_{job_id}"),
+                today=today_dt,
+                runtime=runtime,
+                external=gateways,
+                job_repo=self.job_repo,
+                batch_repo=self.batch_repo,
+                target_id_by_key=target_id_by_key,
+                persist_batch_targets=True,
+            )
+
+        self.assertEqual(setup_attempts, 3)
+        self.assertEqual([p["id"] for p in opened_pages], [1, 2, 3])
+        self.assertEqual(closed_pages, [1, 2, 3])
+        self.assertEqual(target_attempts, [("VT-PTA01", 1), ("VT-PTA01", 2), ("VT-PTB01", 1)])
+        self.assertIsNone(notice)
+        self.assertEqual(failures, 1)
+        self.assertEqual(len(results), 2)
+        self.assertEqual(results[0]["decision"], "VERIFIED")
+        self.assertEqual(results[1]["evidence_state"], "INSUFFICIENT_EVIDENCE")
+        self.assertEqual(
+            results[1]["evidence"]["classifier_result"]["decision"],
+            "INSUFFICIENT_EVIDENCE",
+        )
+        self.assertEqual(results[1]["error_code"], TARGET_TIMEOUT)
+        persisted = await self.batch_repo.list_for_job(job_id)
+        by_code = {r["class_code"]: r for r in persisted}
+        self.assertEqual(by_code["VT-PTA01"]["scan_status"], "VERIFIED")
+        self.assertEqual(by_code["VT-PTB01"]["scan_status"], "FAILED")
+        self.assertEqual(by_code["VT-PTB01"]["error_code"], TARGET_TIMEOUT)

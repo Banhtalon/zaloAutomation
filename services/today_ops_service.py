@@ -8,6 +8,7 @@ ticks back to the exact BCNB week and row without touching unended classes.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping, Sequence
 import contextlib
 from datetime import date, datetime
@@ -84,13 +85,26 @@ from services.zalo_discovery_service import (
 )
 from services.zalo_evidence import apply_lesson_14_exemption, get_evidence_reference
 from services.zalo_parallel_service import (
+    LANDING_SETUP_CODES,
+    MAX_SETUP_ATTEMPTS,
+    SETUP_OK,
+    TARGET_TIMEOUT,
+    ScanPageState,
+    TargetSearchError,
+    TargetTimeoutError,
+    ZaloSetupError,
+    _await_with_target_timeout,
     _close_scan_page,
     _create_production_backup,
+    _emit_setup_telemetry,
     _empty_result,
     _invoke_landing_provider,
     _new_scan_page,
     _scan_one_target,
+    _setup_failure_result,
     _setup_scan_page,
+    _target_search_failure_result,
+    _target_timeout_seconds,
     attach_zalo_sync_result,
 )
 from services.zalo_target_eligibility import (
@@ -1504,6 +1518,95 @@ def _make_today_placeholder_result(
     }
 
 
+def _zalo_setup_notice(error_code: str) -> str:
+    """Build a safe Vietnamese status notice when Zalo Web scan setup halts."""
+    if error_code in {
+        "LOGIN_OR_QR",
+        "AUTH_STATE_AMBIGUOUS",
+        "AUTH_READINESS_AMBIGUOUS",
+    }:
+        return (
+            "Phiên Zalo Web chưa sẵn sàng hoặc đang yêu cầu đăng nhập/QR; "
+            "chưa kiểm tra báo cáo Zalo cho các lớp đã kết thúc."
+        )
+    return (
+        f"Không thể khởi tạo trang Zalo Web ({error_code}); "
+        "đã giữ kết quả LMS/SPCK/BCNB và đặt các lớp Zalo về trạng thái cần kiểm tra lại."
+    )
+
+
+async def _claim_batch_target(
+    target: dict[str, Any],
+    *,
+    job_id: int,
+    batch_repo: ZaloBatchRepository,
+    target_id_by_key: Mapping[str, int],
+    persist_batch_targets: bool,
+) -> tuple[dict[str, Any], int | None]:
+    """Claim one queued Zalo scan row when batch target persistence is enabled."""
+    key = canonical_target_key(target)
+    if not (persist_batch_targets and key in target_id_by_key):
+        return target, None
+    claimed = await batch_repo.claim_scan(job_id, "today-ops-1")
+    if claimed is None:
+        return target, None
+    return dict(claimed.get("source") or target), int(claimed["id"])
+
+
+async def _fail_batch_target(
+    batch_repo: ZaloBatchRepository,
+    claimed_target_id: int | None,
+    *,
+    result: dict[str, Any],
+    error_code: str,
+    error_message: str,
+) -> None:
+    """Persist one fail-closed Zalo target scan outcome."""
+    if claimed_target_id is None:
+        return
+    await batch_repo.complete_scan(
+        claimed_target_id,
+        status="FAILED",
+        result=result,
+        error_code=error_code,
+        error_message=error_message,
+    )
+
+
+async def _fail_remaining_targets_on_setup(
+    remaining_targets: Sequence[dict[str, Any]],
+    *,
+    job_id: int,
+    today: datetime,
+    setup_error: ZaloSetupError,
+    job_repo: JobRepository,
+    batch_repo: ZaloBatchRepository,
+    target_id_by_key: Mapping[str, int],
+    persist_batch_targets: bool,
+) -> tuple[list[dict[str, Any]], int]:
+    """Mark unclaimed remaining targets fail-closed when Zalo setup halts."""
+    failed_results: list[dict[str, Any]] = []
+    for raw_target in remaining_targets:
+        await job_repo.ensure_not_cancelled(job_id)
+        target, claimed_target_id = await _claim_batch_target(
+            raw_target,
+            job_id=job_id,
+            batch_repo=batch_repo,
+            target_id_by_key=target_id_by_key,
+            persist_batch_targets=persist_batch_targets,
+        )
+        res = _setup_failure_result(target, today=today, setup_error=setup_error)
+        await _fail_batch_target(
+            batch_repo,
+            claimed_target_id,
+            result=res,
+            error_code=setup_error.code,
+            error_message=setup_error.safe_message,
+        )
+        failed_results.append(res)
+    return failed_results, len(failed_results)
+
+
 async def _scan_ended_zalo_targets(
     session,
     *,
@@ -1511,54 +1614,255 @@ async def _scan_ended_zalo_targets(
     targets: list[dict[str, Any]],
     screenshots_dir: str,
     today: datetime,
+    runtime: WorkerRuntime | None = None,
     external: ExternalGateways,
     job_repo: JobRepository,
     batch_repo: ZaloBatchRepository,
     target_id_by_key: Mapping[str, int],
     persist_batch_targets: bool,
-) -> tuple[list[dict[str, Any]], int]:
+) -> tuple[list[dict[str, Any]], int, str | None]:
     """Scan ended Zalo targets sequentially on one Zalo Web page with Retina 2x capture."""
     if not targets:
-        return [], 0
+        return [], 0, None
     results: list[dict[str, Any]] = []
     scan_failures = 0
+    setup_notice: str | None = None
     zalo_ai_classifier = getattr(external, "zalo_ai_report_classifier", None) or getattr(
         external, "zalo_ai_classifier", None
     )
     landing_provider = getattr(session, "landing_facts_provider", None)
-    zalo_page = await _new_scan_page(session)
-    try:
-        landing_facts = await _invoke_landing_provider(landing_provider, zalo_page)
-        sync_result = await _setup_scan_page(
-            zalo_page,
-            job_id=job_id,
-            job_repo=job_repo,
-            landing_facts=landing_facts,
-            landing_facts_provider=landing_provider,
-        )
-        for target in targets:
+    timeout_seconds = _target_timeout_seconds(runtime)
+    closed_pages: set[int] = set()
+
+    async def close_page_once(page: Any) -> None:
+        if page is None or id(page) in closed_pages:
+            return
+        closed_pages.add(id(page))
+        try:
+            await _close_scan_page(session, page)
+        except JobCancelledError:
+            raise
+        except Exception as exc:
+            log_message(
+                "Dong trang quet Zalo trong Lop Hom Nay khong thanh cong",
+                job_id=job_id,
+                error_type=type(exc).__name__,
+            )
+
+    def landing_provider_for(target_page: Any):
+        if not callable(landing_provider):
+            return landing_provider
+
+        async def _provide() -> Any:
+            # Delegate inside _setup_scan_page only after navigating to chat.zalo.me.
+            return await _invoke_landing_provider(landing_provider, target_page)
+
+        return _provide
+
+    async def open_ready_page(*, max_attempts: int) -> tuple[Any, dict[str, Any]]:
+        last_error: ZaloSetupError | None = None
+        for attempt in range(1, max_attempts + 1):
             await job_repo.ensure_not_cancelled(job_id)
-            key = canonical_target_key(target)
-            claimed_target_id: int | None = None
-            if persist_batch_targets and key in target_id_by_key:
-                claimed = await batch_repo.claim_scan(job_id, "today-ops-1")
-                if claimed is not None:
-                    claimed_target_id = int(claimed["id"])
-                    target = dict(claimed.get("source") or target)
+            candidate_page: Any = None
+            setup_started = asyncio.get_running_loop().time()
             try:
-                res = await _scan_one_target(
-                    zalo_page,
+                candidate_page = await _new_scan_page(session)
+                sync_res = await _setup_scan_page(
+                    candidate_page,
                     job_id=job_id,
-                    target=target,
-                    sync_result=sync_result,
-                    screenshots_dir=screenshots_dir,
-                    today=today,
                     job_repo=job_repo,
-                    worker_id="today-ops-1",
-                    ai_report_classifier=zalo_ai_classifier,
+                    landing_facts_provider=landing_provider_for(candidate_page),
                 )
-            except JobCancelledError:
+                await job_repo.ensure_not_cancelled(job_id)
+                _emit_setup_telemetry(
+                    job_id=job_id,
+                    worker_id="today-ops-1",
+                    started_at=setup_started,
+                    page_state=ScanPageState.READY,
+                    selector_count=1,
+                    selector_ready=True,
+                    error_code=SETUP_OK,
+                )
+                return candidate_page, sync_res
+            except (JobCancelledError, asyncio.CancelledError):
+                await close_page_once(candidate_page)
                 raise
+            except ZaloSetupError as exc:
+                last_error = exc
+                _emit_setup_telemetry(
+                    job_id=job_id,
+                    worker_id="today-ops-1",
+                    started_at=setup_started,
+                    page_state=exc.page_state,
+                    selector_count=exc.selector_count,
+                    selector_ready=exc.selector_ready,
+                    error_code=exc.code,
+                )
+                await close_page_once(candidate_page)
+                if exc.code in LANDING_SETUP_CODES or attempt >= max_attempts:
+                    raise
+                log_message(
+                    "Thu lai khoi tao trang quet Zalo sau loi setup",
+                    job_id=job_id,
+                    attempt=attempt,
+                    error_code=exc.code,
+                )
+            except Exception as exc:
+                await close_page_once(candidate_page)
+                raise ZaloSetupError(
+                    f"SETUP_{type(exc).__name__.upper()}",
+                    page_state=ScanPageState.NAVIGATING,
+                ) from exc
+        raise last_error or ZaloSetupError(
+            "SETUP_UNKNOWN",
+            page_state=ScanPageState.NAVIGATING,
+        )
+
+    try:
+        zalo_page, sync_result = await open_ready_page(max_attempts=MAX_SETUP_ATTEMPTS)
+    except (JobCancelledError, asyncio.CancelledError):
+        raise
+    except ZaloSetupError as setup_exc:
+        setup_notice = _zalo_setup_notice(setup_exc.code)
+        log_message(
+            "Dung quet Zalo trong Lop Hom Nay do setup khong san sang",
+            job_id=job_id,
+            error_code=setup_exc.code,
+            target_count=len(targets),
+        )
+        failed_results, failed_count = await _fail_remaining_targets_on_setup(
+            targets,
+            job_id=job_id,
+            today=today,
+            setup_error=setup_exc,
+            job_repo=job_repo,
+            batch_repo=batch_repo,
+            target_id_by_key=target_id_by_key,
+            persist_batch_targets=persist_batch_targets,
+        )
+        return failed_results, failed_count, setup_notice
+
+    try:
+        total = len(targets)
+        for idx, raw_target in enumerate(targets):
+            await job_repo.ensure_not_cancelled(job_id)
+            pct = 50 + int((idx * 24) / max(1, total))
+            class_label = str(raw_target.get("class_code") or f"#{idx + 1}")
+            await job_repo.update_job(
+                job_id,
+                message=f"Đang quét Zalo lớp {idx + 1}/{total}: {class_label}...",
+                progress=min(74, max(50, pct)),
+            )
+            target, claimed_target_id = await _claim_batch_target(
+                raw_target,
+                job_id=job_id,
+                batch_repo=batch_repo,
+                target_id_by_key=target_id_by_key,
+                persist_batch_targets=persist_batch_targets,
+            )
+            try:
+                try:
+                    res = await _await_with_target_timeout(
+                        _scan_one_target(
+                            zalo_page,
+                            job_id=job_id,
+                            target=target,
+                            sync_result=sync_result,
+                            screenshots_dir=screenshots_dir,
+                            today=today,
+                            job_repo=job_repo,
+                            worker_id="today-ops-1",
+                            ai_report_classifier=zalo_ai_classifier,
+                        ),
+                        timeout_seconds=timeout_seconds,
+                    )
+                except TargetSearchError as search_exc:
+                    log_message(
+                        "Thu lam moi trang quet Zalo sau loi tim kiem target",
+                        job_id=job_id,
+                        class_code=target.get("class_code"),
+                        error_code=search_exc.code,
+                    )
+                    old_page = zalo_page
+                    zalo_page = None
+                    await close_page_once(old_page)
+                    zalo_page, sync_result = await open_ready_page(max_attempts=1)
+                    res = await _await_with_target_timeout(
+                        _scan_one_target(
+                            zalo_page,
+                            job_id=job_id,
+                            target=target,
+                            sync_result=sync_result,
+                            screenshots_dir=screenshots_dir,
+                            today=today,
+                            job_repo=job_repo,
+                            worker_id="today-ops-1",
+                            attempt=2,
+                            ai_report_classifier=zalo_ai_classifier,
+                        ),
+                        timeout_seconds=timeout_seconds,
+                    )
+            except (JobCancelledError, asyncio.CancelledError):
+                raise
+            except ZaloSetupError as setup_exc:
+                setup_notice = setup_notice or _zalo_setup_notice(setup_exc.code)
+                res = _setup_failure_result(target, today=today, setup_error=setup_exc)
+                scan_failures += 1
+                await _fail_batch_target(
+                    batch_repo,
+                    claimed_target_id,
+                    result=res,
+                    error_code=setup_exc.code,
+                    error_message=setup_exc.safe_message,
+                )
+                results.append(res)
+                if zalo_page is None or setup_exc.code in LANDING_SETUP_CODES:
+                    rest_results, rest_failures = await _fail_remaining_targets_on_setup(
+                        targets[idx + 1 :],
+                        job_id=job_id,
+                        today=today,
+                        setup_error=setup_exc,
+                        job_repo=job_repo,
+                        batch_repo=batch_repo,
+                        target_id_by_key=target_id_by_key,
+                        persist_batch_targets=persist_batch_targets,
+                    )
+                    results.extend(rest_results)
+                    scan_failures += rest_failures
+                    break
+                continue
+            except TargetSearchError as search_exc:
+                scan_failures += 1
+                res = attach_zalo_sync_result(
+                    _target_search_failure_result(target, today=today, error=search_exc),
+                    sync_result,
+                )
+                await _fail_batch_target(
+                    batch_repo,
+                    claimed_target_id,
+                    result=res,
+                    error_code=search_exc.code,
+                    error_message=search_exc.safe_message,
+                )
+            except TargetTimeoutError:
+                scan_failures += 1
+                res = attach_zalo_sync_result(
+                    _empty_result(
+                        target,
+                        today=today,
+                        reason="Không đủ bằng chứng vì quét Zalo vượt quá thời gian cho phép.",
+                        decision="INSUFFICIENT_EVIDENCE",
+                    ),
+                    sync_result,
+                )
+                res["error_code"] = TARGET_TIMEOUT
+                await _fail_batch_target(
+                    batch_repo,
+                    claimed_target_id,
+                    result=res,
+                    error_code=TARGET_TIMEOUT,
+                    error_message="Quét target Zalo vượt quá thời gian cho phép.",
+                )
             except Exception as exc:
                 scan_failures += 1
                 res = attach_zalo_sync_result(
@@ -1571,14 +1875,13 @@ async def _scan_ended_zalo_targets(
                     sync_result,
                 )
                 res["error_code"] = "SCAN_FAILED"
-                if claimed_target_id is not None:
-                    await batch_repo.complete_scan(
-                        claimed_target_id,
-                        status="FAILED",
-                        result=res,
-                        error_code="SCAN_FAILED",
-                        error_message=res["error_code"],
-                    )
+                await _fail_batch_target(
+                    batch_repo,
+                    claimed_target_id,
+                    result=res,
+                    error_code="SCAN_FAILED",
+                    error_message=res["error_code"],
+                )
             else:
                 if claimed_target_id is not None:
                     ev_state = str(res.get("evidence_state") or "")
@@ -1590,8 +1893,8 @@ async def _scan_ended_zalo_targets(
                     )
             results.append(res)
     finally:
-        await _close_scan_page(session, zalo_page)
-    return results, scan_failures
+        await close_page_once(zalo_page)
+    return results, scan_failures, setup_notice
 
 
 async def _persist_batch_write_outcomes(
@@ -1965,17 +2268,20 @@ async def run_today_realtime_sync(
                     message=f"Đang quét Zalo {len(ended_scan_targets)} lớp đã kết thúc...",
                     progress=50,
                 )
-                zalo_scan_results, scan_failures = await _scan_ended_zalo_targets(
-                    session,
-                    job_id=job_id,
-                    targets=ended_scan_targets,
-                    screenshots_dir=screenshots_dir,
-                    today=today,
-                    external=effective_external,
-                    job_repo=j_repo,
-                    batch_repo=b_repo,
-                    target_id_by_key=target_id_by_key,
-                    persist_batch_targets=persist_batch,
+                zalo_scan_results, scan_failures, zalo_setup_notice = (
+                    await _scan_ended_zalo_targets(
+                        session,
+                        job_id=job_id,
+                        targets=ended_scan_targets,
+                        screenshots_dir=screenshots_dir,
+                        today=today,
+                        runtime=runtime,
+                        external=effective_external,
+                        job_repo=j_repo,
+                        batch_repo=b_repo,
+                        target_id_by_key=target_id_by_key,
+                        persist_batch_targets=persist_batch,
+                    )
                 )
 
                 ended_exempt_results = [
@@ -2037,12 +2343,22 @@ async def run_today_realtime_sync(
                                 if tid is not None and rl not in ended_exempt_lks:
                                     ev_state = str(res.get("evidence_state") or "")
                                     ev_path, ev_sha = get_evidence_reference(res)
+                                    err_code = str(res.get("error_code") or "").strip() or None
+                                    err_msg = (
+                                        str(res.get("reason") or err_code).strip()
+                                        if err_code
+                                        else None
+                                    )
                                     await b_repo.finalize_registered_scan(
                                         tid,
                                         result=res,
-                                        write_ready=ev_state in {"SUBMITTED_VERIFIED", "SUBMITTED_LATE_VERIFIED"},
+                                        write_ready=ev_state
+                                        in {"SUBMITTED_VERIFIED", "SUBMITTED_LATE_VERIFIED"},
+                                        batch_halted=bool(res.get("setup_error_code")),
                                         evidence_path=ev_path,
                                         evidence_sha256=ev_sha,
+                                        error_code=err_code,
+                                        error_message=err_msg,
                                     )
 
                 await j_repo.update_job(
@@ -2102,6 +2418,8 @@ async def run_today_realtime_sync(
                     f"NX Zalo: {int(public_bcnb_summary.get('updated_count') or 0)}, "
                     f"NX LMS: {int(public_bcnb_summary.get('lms_updated_count') or 0)}."
                 )
+                if zalo_setup_notice:
+                    summary_msg = f"{summary_msg} Lưu ý Zalo: {zalo_setup_notice}"
                 envelope = {
                     "kind": "today_realtime_sync",
                     "selective_rescan": True,
@@ -2116,6 +2434,8 @@ async def run_today_realtime_sync(
                     "today_items": all_today_items,
                     "bcnb_summary": public_bcnb_summary,
                 }
+                if zalo_setup_notice:
+                    envelope["zalo_setup_notice"] = zalo_setup_notice
                 await j_repo.update_job(
                     job_id,
                     status=final_status,

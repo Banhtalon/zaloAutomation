@@ -6,10 +6,10 @@
 
 | Hạng mục | Trạng thái đã kiểm chứng gần nhất (`2026-11-15`) |
 |---|---|
-| Cổng chất lượng cô lập (`.\CHECK_QUALITY.ps1 -Isolated`) | `QUALITY GATE PASSED` (exit `0`), `749/749` regression tests `OK`, branch coverage `79.4%` |
+| Cổng chất lượng cô lập (`.\CHECK_QUALITY.ps1 -Isolated`) | `QUALITY GATE PASSED` (exit `0`), `752/752` regression tests `OK`, branch coverage `79.5%` |
 | Static analysis & Bảo mật | Ruff `0` lỗi, Mypy `0` lỗi trên `80` source files, `secrets=0`, `migrations=[1, 2, 3, 4]` |
 | Hợp đồng Frontend JS (`node tests/check_template_js.js`) | `template-js-contract-ok scripts=8 handlers=46 behavior=14` (exit `0`) |
-| Trang riêng `Lớp Hôm Nay` (Live LMS, Zalo & SPCK B12–14) | Đã triển khai đầy đủ (`DEC-048`): timeline ca học 2 tuần (`UPCOMING`/`ONGOING`/`ENDED`), `GET /api/today/overview`, job `TODAY_REALTIME_SYNC`, spotlight SPCK Coding B12–14 (miễn `PTB`/`CSB`), ảnh `2x`, tick dòng chuẩn `(class_code, lesson, class_date_iso, session_id)` cho `NX Zalo` + `NX LMS` (chưa chạy ghi production) |
+| Trang riêng `Lớp Hôm Nay` (Live LMS, Zalo & SPCK B12–14) | Đã triển khai & hotfix Live Zalo (`DEC-048`): timeline 2 tuần, `TODAY_REALTIME_SYNC` chỉ đọc landing Zalo **sau** `chat.zalo.me`, cô lập `ZaloSetupError` -> `PARTIAL_SUCCESS` (`zalo_setup_notice`) giữ nguyên LMS/SPCK/BCNB, retry `TargetSearchError` 1x + timeout từng target; chưa chạy ghi production |
 | Auto Discovery, Quét Zalo song song & Tích BCNB | Đã triển khai đầy đủ: quét chọn lọc (`selected_target_keys`), duyệt tay 1-Click có vết SHA-256, hoãn buổi học chưa kết thúc (`⏳ Chưa tới giờ kiểm tra`), AI gợi ý báo cáo Zalo (`DEC-036`, `DEC-045`) |
 | Kiểm định chất lượng LMS, SPCK & Ghi chú QC Teaching | Đã triển khai: Tier-1 Bulk GraphQL + Phễu 2 tầng AI nhận xét LMS khử PII, kiểm định SPCK Buổi 12–14 theo điểm danh (miễn PTB/CSB `DEC-044`, quy tắc Robotics `DEC-045`), tự động hợp nhất & ghi `Mô tả vấn đề (TE/TF/QC)` có read-back (`DEC-038`) |
 | Báo cáo tuần, Xuất CSV lỗi & Email Quản lý | Đã triển khai: bảng 9 cột, lỗi thiếu Zalo mức đỏ nặng nhất (`❌ Chưa nhận xét`, `#dc2626` bọc `<span>` tương thích Webmail BizFly Cloud), cảnh báo vàng `⚠️` (`#b45309`) cho SPCK thiếu nộp/thiếu nhận xét (`DEC-046`), khóa cứng `MANAGER_EMAIL_ALLOWLIST` |
@@ -18,6 +18,8 @@
 
 ## Các mốc cập nhật gần nhất
 
+- **2026-11-15 (Wave 7 Live Hotfix — Sửa `TimeoutError` `about:blank` & Cô lập setup Zalo trên `Lớp Hôm Nay` — `[FULL GATE]`)**:
+  - Sửa `_scan_ended_zalo_targets` & `run_today_realtime_sync` (`services/today_ops_service.py`): không gọi `landing_facts_provider` trước khi `_setup_scan_page` điều hướng `https://chat.zalo.me/`, truyền callback đã bind page (`landing_provider_for`), retry transient setup (`MAX_SETUP_ATTEMPTS`), cô lập `ZaloSetupError` thành `PARTIAL_SUCCESS` (`zalo_setup_notice`, giữ toàn bộ dữ liệu live LMS/SPCK/BCNB, giữ Zalo fail-closed), retry `TargetSearchError` 1x trên trang mới, timeout từng target (`TARGET_TIMEOUT`), giữ nguyên `error_code` trong `finalize_registered_scan`. Thêm 3 tests mới trong `tests/test_today_ops_service.py` (`33/33` targeted `OK`, `.\CHECK_QUALITY.ps1 -Isolated` `752/752 PASS`, branch coverage `79.5%`, `Argon High` `reviewer-75` `#47` `VERDICT: PASS`).
 - **2026-11-15 (Wave 7 — Trang riêng `Lớp Hôm Nay`, Spotlight SPCK B12–14 & Review `Argon High` — `DEC-048`, `DEC-049`, `[FULL GATE]`)**:
   - Thêm trang riêng `#btn-today` / `#tab-today` (`api/today_routes.py`, `services/today_ops_service.py`, `templates/partials/today.html`, `static/js/today.js`) theo dõi thời gian thực ca học trong ngày xuyên 2 tuần BCNB (`required_week` + `latest_week`), truy vấn live LMS + SPCK B12–14, quét Zalo chụp ảnh `2x`, nhắc giáo viên thiếu Zalo/LMS/SPCK sau khi ca học kết thúc (`phase === 'ENDED'`) và đồng bộ tick `NX Zalo` + `NX LMS` đúng dòng BCNB (`CHECK_QUALITY -Isolated` `749/749 PASS`, `79.4%` coverage; Gate #1 `Sol 6.1` PASS; Gate #2–#4 `Argon High` `#41`/`#42`/`#44` `VERDICT: PASS`).
   - Đổi công cụ Review độc lập `[FULL GATE]` sang `Argon High` (`gemini-4-argon-high`, `swarm` read-only) tại `AGENTS.md` và `HANDOFF.md` (`DEC-049`).
