@@ -586,14 +586,22 @@ def _resolve_row_evaluation_status(
         spck = row.get("lms_spck", st.get("lms_spck"))
         attendance = row.get("lms_attendance", st.get("lms_attendance"))
         comments_status = comments.get("status") if isinstance(comments, Mapping) else None
+        att_status = attendance.get("status") if isinstance(attendance, Mapping) else None
         if comments_status == "UNVERIFIED" or lms_status == "⏳ Chờ xác minh điểm danh/nhận xét LMS":
             return "⏳ Chờ xác minh điểm danh/nhận xét LMS"
-        if comments_status == "EXEMPT":
-            if isinstance(attendance, Mapping) and attendance.get("status") == "EXEMPT":
+        if comments_status == "EXEMPT" and att_status != "MISSING_ATTENDANCE":
+            if att_status == "EXEMPT":
                 return "✅ Không áp dụng LMS (toàn bộ học viên nghỉ)"
-        if comments_status in {"COMPLETE", "MISSING", "REVIEW", "EXEMPT"}:
+        if (
+            comments_status in {"COMPLETE", "MISSING", "MISSING_ATTENDANCE", "REVIEW", "EXEMPT"}
+            or att_status == "MISSING_ATTENDANCE"
+        ):
             clean_raw = ""
-        if comments_status != "MISSING" and not lms_failed_or_warn:
+        if (
+            comments_status not in {"MISSING", "MISSING_ATTENDANCE"}
+            and att_status != "MISSING_ATTENDANCE"
+            and not lms_failed_or_warn
+        ):
             if has_spck_missing_fail(row):
                 return "⚠️ Chưa nộp SPCK trên LMS"
             if has_spck_comment_missing_fail(row):
@@ -601,7 +609,8 @@ def _resolve_row_evaluation_status(
         if (
             isinstance(spck, Mapping)
             and spck.get("status") == "UNVERIFIED"
-            and comments_status != "MISSING"
+            and comments_status not in {"MISSING", "MISSING_ATTENDANCE"}
+            and att_status != "MISSING_ATTENDANCE"
             and not lms_failed_or_warn
         ):
             return "⏳ Chờ xác minh SPCK trên LMS"
@@ -651,7 +660,9 @@ def _resolve_row_issue_description(
 ) -> str:
     """Combine QC issue notes, LMS quality issues, and Zalo content warnings."""
     parts: list[str] = []
-    seen_norm: set[str] = set()
+    key_to_idx: dict[str, int] = {}
+    preferred_keys: set[str] = set()
+    has_compound_summary = False
 
     def _norm_issue_key(text: str) -> str:
         raw_s = text.strip()
@@ -661,12 +672,73 @@ def _resolve_row_issue_description(
         norm = " ".join(stripped.split())
         return f"[spck] {norm}" if (is_spck and norm) else norm
 
+    def _semantic_dedup_info(text: str) -> tuple[str, bool, bool]:
+        s = text.strip()
+        if re.match(r"^\[LMS\]\s*Chưa\s+ghi\s+nội\s+dung\s+bài\s+học\.?$", s, flags=re.IGNORECASE):
+            return "[lms:summary_note]", False, False
+        if re.match(r"^\[LMS\]\s*Điền\s+tóm\s+tắt\s+bài\.?$", s, flags=re.IGNORECASE):
+            return "[lms:summary_note]", True, False
+        if re.match(r"^\[LMS\]\s*Điền\s+tóm\s+tắt\s+bài\s*,", s, flags=re.IGNORECASE):
+            return _norm_issue_key(s), True, True
+        if re.match(
+            r"^\[LMS\]\s*(?!.*SPCK).*cần\s+kiểm\s+tra\s+thủ\s+công\.?$",
+            s,
+            flags=re.IGNORECASE,
+        ):
+            return "[lms:manual_check]", False, False
+        if re.match(
+            r"^\[LMS\]\s*Kiểm\s+tra\s+tay(?:\s+trên\s+LMS)?\.?$",
+            s,
+            flags=re.IGNORECASE,
+        ):
+            return "[lms:manual_check]", True, False
+        if re.match(
+            r"^\[(?:LMS|SPCK)\]\s*(?=.*SPCK).*cần\s+kiểm\s+tra\s+thủ\s+công\.?$",
+            s,
+            flags=re.IGNORECASE,
+        ) or re.match(
+            r"^\[SPCK\]\s*.*cần\s+kiểm\s+tra\s+thủ\s+công\.?$",
+            s,
+            flags=re.IGNORECASE,
+        ):
+            return "[spck:manual_check]", False, False
+        if re.match(
+            r"^\[SPCK\]\s*Kiểm\s+tra\s+tay(?:\s+trên\s+LMS)?\.?$",
+            s,
+            flags=re.IGNORECASE,
+        ):
+            return "[spck:manual_check]", True, False
+        if re.match(
+            r"^\[Zalo\]\s*Báo\s+cáo\s+không\s+ghi\s+ngày/buổi\.?$",
+            s,
+            flags=re.IGNORECASE,
+        ):
+            return "[zalo:no_date]", False, False
+        if re.match(r"^\[Zalo\]\s*Thiếu\s+ngày/buổi\.?$", s, flags=re.IGNORECASE):
+            return "[zalo:no_date]", True, False
+        m_leg_wd = re.match(
+            r"^\[Zalo\]\s*Báo\s+cáo\s+ghi\s+sai\s+ngày\s*\(\s*([^)]+?)\s*\)\.?$",
+            s,
+            flags=re.IGNORECASE,
+        )
+        if m_leg_wd:
+            return f"[zalo:wrong_date:{m_leg_wd.group(1).strip().lower()}]", False, False
+        m_new_wd = re.match(
+            r"^\[Zalo\]\s*Sai\s+ngày\s*\(\s*([^)]+?)\s*\)\.?$",
+            s,
+            flags=re.IGNORECASE,
+        )
+        if m_new_wd:
+            return f"[zalo:wrong_date:{m_new_wd.group(1).strip().lower()}]", True, False
+        return _norm_issue_key(s), False, False
+
     legacy_dup_re = re.compile(
         r"^\[LMS\]\s*(?:Nhận|Nhan)\s+x[eé]t\s+HS\s+copy-paste\s+tr[uù]ng\s+l[aặ]p\b",
         flags=re.IGNORECASE,
     )
 
     def _add_one(raw_segment: str, *, is_auto: bool = False) -> None:
+        nonlocal has_compound_summary
         cleaned = " ".join(str(raw_segment or "").split()).strip(" ;")
         if not cleaned:
             return
@@ -680,10 +752,29 @@ def _resolve_row_issue_description(
             return
         if is_auto or re.match(r"^\[(?:LMS|Zalo|SPCK)\]\s*", cleaned, flags=re.IGNORECASE):
             cleaned = normalize_auto_issue_text(cleaned)
-        key = _norm_issue_key(cleaned)
-        if key and key not in seen_norm:
-            seen_norm.add(key)
-            parts.append(cleaned)
+        key, is_preferred, is_compound_summary = _semantic_dedup_info(cleaned)
+        if not key:
+            return
+        if key == "[lms:summary_note]" and has_compound_summary:
+            return
+        if is_compound_summary:
+            has_compound_summary = True
+            if "[lms:summary_note]" in key_to_idx and key not in key_to_idx:
+                sum_idx = key_to_idx.pop("[lms:summary_note]")
+                preferred_keys.discard("[lms:summary_note]")
+                parts[sum_idx] = cleaned
+                key_to_idx[key] = sum_idx
+                preferred_keys.add(key)
+                return
+        if key in key_to_idx:
+            if is_preferred and key not in preferred_keys:
+                parts[key_to_idx[key]] = cleaned
+                preferred_keys.add(key)
+            return
+        key_to_idx[key] = len(parts)
+        if is_preferred:
+            preferred_keys.add(key)
+        parts.append(cleaned)
 
     def _add(val: Any, *, split_semicolon: bool = False, is_auto: bool = False) -> None:
         if not val:

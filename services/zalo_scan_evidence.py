@@ -468,56 +468,255 @@ async def _resolve_zalo_chat_clip(page) -> dict[str, float] | None:
                     const vpH = Number(window.innerHeight || 0);
                     if (vpW < 900 || vpH < 400) return null;
 
-                    let chatLeft = 0;
-                    const searchInput = document.querySelector('#contact-search-input');
-                    if (searchInput) {
-                        let node = searchInput;
-                        while (node && node !== document.body) {
+                    const isVisibleRect = (r) => (
+                        Boolean(r) &&
+                        r.width > 0 &&
+                        r.height > 0 &&
+                        r.bottom > 0 &&
+                        r.top < vpH
+                    );
+                    const isChatPaneRect = (r) => (
+                        Boolean(r) &&
+                        r.left >= 180 &&
+                        r.left <= vpW * 0.42 &&
+                        r.width >= 500 &&
+                        r.height >= vpH * 0.5
+                    );
+
+                    // 1. Direct right-hand chat pane containers first
+                    let directChatLeft = vpW;
+                    for (const sel of ['#messageView', '#chatView', '#main-tab', 'main']) {
+                        for (const node of Array.from(document.querySelectorAll(sel))) {
                             const rect = node.getBoundingClientRect();
-                            if (rect.left <= 90 && rect.width >= 240 && rect.width <= vpW * 0.45 && rect.height >= vpH * 0.4) {
-                                chatLeft = Math.max(chatLeft, Math.round(rect.right));
+                            if (isChatPaneRect(rect)) {
+                                directChatLeft = Math.min(directChatLeft, Math.round(rect.left));
+                            }
+                        }
+                    }
+
+                    const paneAnchorSeeds = [
+                        ...Array.from(
+                            document.querySelectorAll('header, #header, [class*="header-title"]')
+                        ).filter((el) => {
+                            const r = el.getBoundingClientRect();
+                            return isVisibleRect(r) && r.top < 140 && r.left >= 180;
+                        }),
+                        ...Array.from(
+                            document.querySelectorAll('#richInput, #input_line_0')
+                        ).filter((el) => {
+                            const r = el.getBoundingClientRect();
+                            return isVisibleRect(r) && r.left >= 180;
+                        }),
+                        ...Array.from(
+                            document.querySelectorAll('[contenteditable="true"]')
+                        ).filter((el) => {
+                            const r = el.getBoundingClientRect();
+                            return isVisibleRect(r) && r.top > vpH * 0.6 && r.left >= 180;
+                        }),
+                    ];
+                    for (const seed of paneAnchorSeeds) {
+                        let node = seed;
+                        while (node && node !== document.body && node !== document.documentElement) {
+                            const rect = node.getBoundingClientRect();
+                            if (isChatPaneRect(rect)) {
+                                directChatLeft = Math.min(directChatLeft, Math.round(rect.left));
                             }
                             node = node.parentElement;
                         }
-                        if (chatLeft < 240) {
+                    }
+
+                    let chatLeft = directChatLeft < vpW ? directChatLeft : 0;
+
+                    // Sidebar lookup: identify sidebarRoot & fallback only when no direct chat container matched
+                    let sidebarRoot = null;
+                    const searchInput = document.querySelector('#contact-search-input');
+                    if (searchInput) {
+                        let node = searchInput;
+                        while (node && node !== document.body && node !== document.documentElement) {
+                            const rect = node.getBoundingClientRect();
+                            if (
+                                rect.left <= 90 &&
+                                rect.width >= 220 &&
+                                rect.width <= 385 &&
+                                rect.height >= vpH * 0.4
+                            ) {
+                                sidebarRoot = node;
+                                if (chatLeft <= 0) {
+                                    chatLeft = Math.round(rect.right);
+                                }
+                                break;
+                            }
+                            node = node.parentElement;
+                        }
+                        if (chatLeft <= 0) {
                             const sRect = searchInput.getBoundingClientRect();
-                            if (sRect.right >= 200 && sRect.right <= vpW * 0.45) {
-                                chatLeft = Math.round(sRect.right + 16);
+                            if (sRect.left >= 0 && sRect.right >= 200 && sRect.right <= 385) {
+                                chatLeft = Math.round(sRect.right);
                             }
                         }
                     }
+                    if (
+                        sidebarRoot &&
+                        typeof sidebarRoot.querySelector === 'function' &&
+                        (
+                            sidebarRoot.querySelector('[data-component="bubble-message"]') ||
+                            sidebarRoot.querySelector('#richInput') ||
+                            sidebarRoot.querySelector('#input_line_0')
+                        )
+                    ) {
+                        sidebarRoot = null;
+                    }
+                    const isInsideSidebar = (el) => (
+                        Boolean(sidebarRoot) &&
+                        typeof sidebarRoot.contains === 'function' &&
+                        sidebarRoot.contains(el)
+                    );
 
-                    const bubbles = Array.from(document.querySelectorAll('[data-component="bubble-message"]'));
-                    let minBubbleLeft = vpW;
-                    let maxContentRight = 0;
-                    for (const el of bubbles) {
+                    // 2. Unconditional left content clamp guard (chatLeft <= minContentLeft - 24)
+                    let minContentLeft = vpW;
+                    const estLeft = chatLeft > 0 ? chatLeft : Math.min(340, Math.round(vpW * 0.18));
+                    const estFullWidth = Math.max(400, (vpW - estLeft) * 0.85);
+                    const queryChildren = (el, sel) => {
+                        if (typeof el.querySelectorAll === 'function') {
+                            return Array.from(el.querySelectorAll(sel));
+                        }
+                        return sel === '*' ? Array.from(el.children || []) : [];
+                    };
+                    const recordLeft = (leftVal) => {
+                        if (leftVal >= 180 && leftVal <= vpW * 0.55 && leftVal < minContentLeft) {
+                            minContentLeft = leftVal;
+                        }
+                    };
+
+                    for (const el of Array.from(
+                        document.querySelectorAll(
+                            '[data-component="bubble-message"], .chat-message, .msg-item, .card, [class*="avatar"]'
+                        )
+                    )) {
+                        if (!el || isInsideSidebar(el)) continue;
                         const r = el.getBoundingClientRect();
-                        if (r.width <= 0 || r.height <= 0) continue;
-                        if (r.bottom < 0 || r.top > vpH) continue;
-                        if (r.left > 180 && r.left < minBubbleLeft) {
-                            minBubbleLeft = r.left;
+                        if (!isVisibleRect(r)) continue;
+                        if (r.width >= estFullWidth) {
+                            const innerNodes = queryChildren(el, '*').filter((child) => {
+                                const cr = child.getBoundingClientRect();
+                                return isVisibleRect(cr) && cr.width < estFullWidth;
+                            });
+                            if (innerNodes.length > 0) {
+                                for (const child of innerNodes) {
+                                    recordLeft(child.getBoundingClientRect().left);
+                                }
+                                continue;
+                            }
                         }
-                        if (r.right > maxContentRight) {
-                            maxContentRight = r.right;
+                        recordLeft(r.left);
+                    }
+                    for (const el of Array.from(
+                        document.querySelectorAll('header, #header, [class*="header-title"]')
+                    )) {
+                        if (!el || isInsideSidebar(el)) continue;
+                        const r = el.getBoundingClientRect();
+                        if (!isVisibleRect(r) || r.top >= 140) continue;
+                        if (r.width >= estFullWidth) {
+                            const innerLeftNodes = queryChildren(el, '*').filter((child) => {
+                                const cr = child.getBoundingClientRect();
+                                return (
+                                    isVisibleRect(cr) &&
+                                    cr.top < 140 &&
+                                    cr.width < estFullWidth &&
+                                    cr.left >= 180 &&
+                                    cr.left <= vpW * 0.55
+                                );
+                            });
+                            if (innerLeftNodes.length > 0) {
+                                for (const child of innerLeftNodes) {
+                                    recordLeft(child.getBoundingClientRect().left);
+                                }
+                                continue;
+                            }
+                        }
+                        recordLeft(r.left);
+                    }
+                    for (const el of Array.from(
+                        document.querySelectorAll('#richInput, #input_line_0, [contenteditable="true"]')
+                    )) {
+                        if (!el || isInsideSidebar(el)) continue;
+                        const r = el.getBoundingClientRect();
+                        if (!isVisibleRect(r) || r.top <= vpH * 0.6) continue;
+                        recordLeft(r.left);
+                    }
+
+                    if (minContentLeft < vpW) {
+                        if (chatLeft <= 0) {
+                            const candidateLeft = Math.max(0, Math.round(minContentLeft - 28));
+                            chatLeft = candidateLeft <= vpW * 0.45
+                                ? candidateLeft
+                                : (searchInput ? Math.min(340, Math.round(vpW * 0.18)) : 0);
+                        } else {
+                            chatLeft = Math.min(chatLeft, Math.max(0, Math.round(minContentLeft - 24)));
+                        }
+                    } else if (chatLeft < 180 || chatLeft > vpW * 0.42) {
+                        chatLeft = searchInput ? Math.min(340, Math.round(vpW * 0.18)) : 0;
+                    }
+                    if (chatLeft > vpW * 0.45) {
+                        chatLeft = searchInput ? Math.min(340, Math.round(vpW * 0.18)) : 0;
+                    }
+
+                    // 3. Tight right-edge crop (clipRight)
+                    const paneWidth = Math.max(400, vpW - chatLeft);
+                    const fullRowWidth = paneWidth * 0.85;
+                    let maxBubbleRight = 0;
+
+                    for (const el of Array.from(
+                        document.querySelectorAll(
+                            '[data-component="bubble-message"], .chat-message, .msg-item, .card'
+                        )
+                    )) {
+                        if (!el || isInsideSidebar(el)) continue;
+                        const r = el.getBoundingClientRect();
+                        if (!isVisibleRect(r)) continue;
+                        if (r.width >= fullRowWidth) {
+                            const preferredInner = queryChildren(
+                                el,
+                                '.card, [class*="content"], img, video, canvas'
+                            );
+                            let matchedSubstance = false;
+                            for (const child of preferredInner) {
+                                const cr = child.getBoundingClientRect();
+                                if (!isVisibleRect(cr) || cr.width >= fullRowWidth) continue;
+                                if (cr.right > maxBubbleRight) {
+                                    maxBubbleRight = cr.right;
+                                }
+                                if (!(cr.width <= 72 && cr.left <= chatLeft + 120)) {
+                                    matchedSubstance = true;
+                                }
+                            }
+                            if (!matchedSubstance) {
+                                for (const child of queryChildren(el, '*')) {
+                                    const cr = child.getBoundingClientRect();
+                                    if (!isVisibleRect(cr) || cr.width >= fullRowWidth) continue;
+                                    if (cr.right > maxBubbleRight) {
+                                        maxBubbleRight = cr.right;
+                                    }
+                                }
+                            }
+                        } else if (r.right > maxBubbleRight) {
+                            maxBubbleRight = r.right;
                         }
                     }
 
-                    if (chatLeft <= 0 && minBubbleLeft < vpW && minBubbleLeft >= 240 && minBubbleLeft <= vpW * 0.45) {
-                        chatLeft = Math.max(0, Math.round(minBubbleLeft - 28));
-                    }
-                    if (chatLeft < 200 || chatLeft > vpW * 0.45) {
-                        chatLeft = searchInput ? Math.min(360, Math.round(vpW * 0.2)) : 0;
-                    }
-
-                    const paneCenterRight = chatLeft + Math.round((vpW - chatLeft) * 0.56);
+                    const paneCenterRight = chatLeft + Math.round((vpW - chatLeft) * 0.54);
                     const desiredRight = Math.max(
-                        Math.round(maxContentRight + 72),
+                        Math.round(maxBubbleRight + 64),
                         paneCenterRight,
-                        chatLeft + 960
+                        chatLeft + 880
                     );
                     const clipRight = Math.min(vpW, desiredRight);
                     const clipWidth = clipRight - chatLeft;
-                    if (clipWidth < 600 || clipWidth >= vpW - 40) {
+                    const validClip = (
+                        clipWidth >= 600 &&
+                        (chatLeft >= 180 || (chatLeft > 0 ? clipRight <= vpW - 40 : clipWidth < vpW - 40))
+                    );
+                    if (!validClip) {
                         return null;
                     }
                     return {

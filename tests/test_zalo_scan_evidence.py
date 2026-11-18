@@ -2164,6 +2164,409 @@ class ZaloScanEvidenceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(page_broken_eval.screenshot_calls), 1)
             self.assertNotIn("clip", page_broken_eval.screenshot_calls[0])
 
+    @staticmethod
+    def _build_node_dom_page(viewport_width: int, viewport_height: int, dom_children: list[dict]):
+        import json
+        import subprocess
+
+        class NodeDomPage:
+            def __init__(self, vp_w: int, vp_h: int, tree: list[dict]):
+                self._vp_w = vp_w
+                self._vp_h = vp_h
+                self._tree = tree
+
+            async def evaluate(self, script: str):
+                harness = r"""
+                const payload = JSON.parse(process.argv[1]);
+                const vpW = payload.vpW;
+                const vpH = payload.vpH;
+
+                function makeNode(spec, parent) {
+                    const left = Number((spec.rect && spec.rect.left) || 0);
+                    const top = Number((spec.rect && spec.rect.top) || 0);
+                    const width = Number((spec.rect && spec.rect.width) || 0);
+                    const height = Number((spec.rect && spec.rect.height) || 0);
+                    const right = spec.rect && spec.rect.right !== undefined
+                        ? Number(spec.rect.right)
+                        : left + width;
+                    const bottom = spec.rect && spec.rect.bottom !== undefined
+                        ? Number(spec.rect.bottom)
+                        : top + height;
+                    const className = String(spec.className || '');
+                    const node = {
+                        tag: String(spec.tag || 'div').toLowerCase(),
+                        id: String(spec.id || ''),
+                        className,
+                        classList: className.split(/\s+/).filter(Boolean),
+                        attrs: Object.assign({}, spec.attrs || {}),
+                        parentElement: parent,
+                        children: [],
+                        _rect: { left, top, width, height, right, bottom },
+                        getBoundingClientRect() {
+                            return Object.assign({}, this._rect);
+                        },
+                        contains(target) {
+                            let cur = target;
+                            while (cur) {
+                                if (cur === this) return true;
+                                cur = cur.parentElement;
+                            }
+                            return false;
+                        },
+                        querySelectorAll(selectorList) {
+                            return querySubtree(this, selectorList, false);
+                        },
+                        querySelector(selectorList) {
+                            const found = querySubtree(this, selectorList, true);
+                            return found.length > 0 ? found[0] : null;
+                        },
+                    };
+                    for (const childSpec of (spec.children || [])) {
+                        node.children.push(makeNode(childSpec, node));
+                    }
+                    return node;
+                }
+
+                function matchesSimpleSelector(node, rawSel) {
+                    const sel = rawSel.trim();
+                    if (!sel) return false;
+                    if (sel === '*') return true;
+                    const tokens = sel.match(/#[A-Za-z0-9_-]+|\.[A-Za-z0-9_-]+|\[[^\]]+\]|[A-Za-z0-9_-]+/g);
+                    if (!tokens || tokens.length === 0) return false;
+                    return tokens.every((token) => {
+                        if (token.startsWith('#')) return node.id === token.slice(1);
+                        if (token.startsWith('.')) return node.classList.includes(token.slice(1));
+                        if (token.startsWith('[') && token.endsWith(']')) {
+                            const inner = token.slice(1, -1);
+                            const starIdx = inner.indexOf('*=');
+                            if (starIdx !== -1) {
+                                const attr = inner.slice(0, starIdx).trim();
+                                const val = inner.slice(starIdx + 2).trim().replace(/^["']|["']$/g, '');
+                                const actual = attr === 'class' ? node.className : String(node.attrs[attr] || '');
+                                return actual.includes(val);
+                            }
+                            const eqIdx = inner.indexOf('=');
+                            if (eqIdx !== -1) {
+                                const attr = inner.slice(0, eqIdx).trim();
+                                const val = inner.slice(eqIdx + 1).trim().replace(/^["']|["']$/g, '');
+                                const actual = attr === 'class' ? node.className : String(node.attrs[attr] || '');
+                                return actual === val;
+                            }
+                            return Object.prototype.hasOwnProperty.call(node.attrs, inner.trim());
+                        }
+                        return node.tag === token.toLowerCase();
+                    });
+                }
+
+                function querySubtree(root, selectorList, firstOnly) {
+                    const parts = String(selectorList || '').split(',').map((s) => s.trim()).filter(Boolean);
+                    const results = [];
+                    function walk(current) {
+                        for (const child of current.children) {
+                            if (parts.some((p) => matchesSimpleSelector(child, p))) {
+                                results.push(child);
+                                if (firstOnly) return true;
+                            }
+                            if (walk(child) && firstOnly) return true;
+                        }
+                        return false;
+                    }
+                    walk(root);
+                    return results;
+                }
+
+                const docEl = makeNode(
+                    { tag: 'html', rect: { left: 0, top: 0, width: vpW, height: vpH }, children: [] },
+                    null
+                );
+                const bodyEl = makeNode(
+                    { tag: 'body', rect: { left: 0, top: 0, width: vpW, height: vpH }, children: payload.tree },
+                    docEl
+                );
+                docEl.children.push(bodyEl);
+
+                global.window = { innerWidth: vpW, innerHeight: vpH };
+                global.document = {
+                    documentElement: docEl,
+                    body: bodyEl,
+                    querySelectorAll(sel) { return querySubtree(docEl, sel, false); },
+                    querySelector(sel) {
+                        const found = querySubtree(docEl, sel, true);
+                        return found.length > 0 ? found[0] : null;
+                    },
+                };
+
+                const fn = eval(payload.script);
+                const out = fn();
+                process.stdout.write(JSON.stringify(out));
+                """
+                completed = await asyncio.to_thread(
+                    subprocess.run,
+                    [
+                        "node",
+                        "-e",
+                        harness,
+                        json.dumps(
+                            {
+                                "vpW": self._vp_w,
+                                "vpH": self._vp_h,
+                                "tree": self._tree,
+                                "script": script,
+                            }
+                        ),
+                    ],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    timeout=10,
+                    check=True,
+                )
+                return json.loads(completed.stdout)
+
+        return NodeDomPage(viewport_width, viewport_height, dom_children)
+
+    async def test_resolve_zalo_chat_clip_fixes_1920x1200_left_crop_and_right_dead_space(self):
+        from services.zalo_scan_evidence import _resolve_zalo_chat_clip
+
+        # Exact 1920x1200 live bug reproduction:
+        # - #contact-search-input ancestor wrapper extends to right=409
+        # - chat header, avatars, message bubbles, and composer sit at left=344
+        # - full-width date divider row spans width=1511 (right=1920)
+        # - inner message bubble ends at right=910
+        bug_repro_page = self._build_node_dom_page(
+            1920,
+            1200,
+            [
+                {
+                    "tag": "div",
+                    "id": "sidebar-wrapper",
+                    "rect": {"left": 64, "top": 0, "width": 345, "right": 409, "height": 1200},
+                    "children": [
+                        {
+                            "tag": "input",
+                            "id": "contact-search-input",
+                            "rect": {"left": 80, "top": 18, "width": 220, "right": 300, "height": 34},
+                        },
+                        {
+                            "tag": "div",
+                            "className": "sidebar-mini-avatar",
+                            "rect": {"left": 295, "top": 96, "width": 16, "right": 311, "height": 16},
+                        },
+                    ],
+                },
+                {
+                    "tag": "header",
+                    "id": "header",
+                    "rect": {"left": 344, "top": 0, "width": 1576, "right": 1920, "height": 68},
+                    "children": [
+                        {
+                            "tag": "div",
+                            "className": "chat-avatar",
+                            "rect": {"left": 344, "top": 12, "width": 44, "right": 388, "height": 44},
+                        },
+                        {
+                            "tag": "div",
+                            "className": "header-title",
+                            "rect": {"left": 400, "top": 16, "width": 360, "right": 760, "height": 32},
+                        },
+                    ],
+                },
+                {
+                    "tag": "div",
+                    "attrs": {"data-component": "bubble-message"},
+                    "rect": {"left": 409, "top": 120, "width": 1511, "right": 1920, "height": 30},
+                    "children": [
+                        {
+                            "tag": "span",
+                            "className": "chat-date",
+                            "rect": {"left": 1104, "top": 122, "width": 120, "right": 1224, "height": 26},
+                        }
+                    ],
+                },
+                {
+                    "tag": "div",
+                    "attrs": {"data-component": "bubble-message"},
+                    "rect": {"left": 344, "top": 180, "width": 1576, "right": 1920, "height": 260},
+                    "children": [
+                        {
+                            "tag": "img",
+                            "className": "sender-avatar",
+                            "rect": {"left": 344, "top": 180, "width": 40, "right": 384, "height": 40},
+                        },
+                        {
+                            "tag": "div",
+                            "className": "card card--text",
+                            "rect": {"left": 396, "top": 180, "width": 514, "right": 910, "height": 260},
+                        },
+                        {
+                            "tag": "div",
+                            "className": "flex-spacer",
+                            "rect": {"left": 910, "top": 180, "width": 1010, "right": 1920, "height": 260},
+                        },
+                    ],
+                },
+                {
+                    "tag": "div",
+                    "id": "input_line_0",
+                    "attrs": {"contenteditable": "true"},
+                    "rect": {"left": 344, "top": 1112, "width": 1510, "right": 1854, "height": 36},
+                },
+            ],
+        )
+        clip = await _resolve_zalo_chat_clip(bug_repro_page)
+        self.assertIsNotNone(clip)
+        assert clip is not None
+        self.assertLessEqual(clip["x"], 320.0)
+        self.assertEqual(clip["x"], 320.0)
+        self.assertLess(clip["width"], 1100.0)
+        self.assertEqual(clip["y"], 0.0)
+        self.assertEqual(clip["height"], 1200.0)
+
+        # Direct #messageView anchor + bare full-width date row (no child tags) + inner bubble right=910
+        direct_anchor_page = self._build_node_dom_page(
+            1920,
+            1200,
+            [
+                {
+                    "tag": "div",
+                    "rect": {"left": 0, "top": 0, "width": 409, "right": 409, "height": 1200},
+                    "children": [
+                        {
+                            "tag": "input",
+                            "id": "contact-search-input",
+                            "rect": {"left": 76, "top": 18, "width": 310, "right": 386, "height": 32},
+                        }
+                    ],
+                },
+                {
+                    "tag": "div",
+                    "id": "messageView",
+                    "rect": {"left": 328, "top": 0, "width": 1592, "right": 1920, "height": 1200},
+                    "children": [
+                        {
+                            "tag": "header",
+                            "rect": {"left": 344, "top": 0, "width": 1576, "right": 1920, "height": 64},
+                        },
+                        {
+                            "tag": "div",
+                            "attrs": {"data-component": "bubble-message"},
+                            "rect": {"left": 409, "top": 110, "width": 1511, "right": 1920, "height": 28},
+                        },
+                        {
+                            "tag": "div",
+                            "attrs": {"data-component": "bubble-message"},
+                            "rect": {"left": 344, "top": 165, "width": 566, "right": 910, "height": 220},
+                        },
+                    ],
+                },
+            ],
+        )
+        direct_clip = await _resolve_zalo_chat_clip(direct_anchor_page)
+        self.assertIsNotNone(direct_clip)
+        assert direct_clip is not None
+        self.assertEqual(direct_clip["x"], 320.0)
+        self.assertEqual(direct_clip["width"], 880.0)
+        self.assertLess(direct_clip["width"], 1100.0)
+
+    async def test_resolve_zalo_chat_clip_handles_narrow_screens_and_invalid_clips(self):
+        from services.zalo_scan_evidence import (
+            _capture_zalo_evidence,
+            _resolve_zalo_chat_clip,
+        )
+
+        # Narrower viewport (1120x800) where clipRight == vpW (1120) and chatLeft >= 180 remains valid
+        narrow_page = self._build_node_dom_page(
+            1120,
+            800,
+            [
+                {
+                    "tag": "div",
+                    "id": "chatView",
+                    "rect": {"left": 320, "top": 0, "width": 800, "right": 1120, "height": 800},
+                    "children": [
+                        {
+                            "tag": "div",
+                            "attrs": {"data-component": "bubble-message"},
+                            "rect": {"left": 344, "top": 120, "width": 520, "right": 864, "height": 180},
+                        }
+                    ],
+                }
+            ],
+        )
+        narrow_clip = await _resolve_zalo_chat_clip(narrow_page)
+        self.assertEqual(
+            narrow_clip,
+            {"x": 320.0, "y": 0.0, "width": 800.0, "height": 800.0},
+        )
+
+        # No sidebar & no direct container (chatLeft <= 0) clamps to minContentLeft - 28
+        content_only_page = self._build_node_dom_page(
+            1920,
+            1200,
+            [
+                {
+                    "tag": "div",
+                    "attrs": {"data-component": "bubble-message"},
+                    "rect": {"left": 344, "top": 180, "width": 566, "right": 910, "height": 200},
+                }
+            ],
+        )
+        content_only_clip = await _resolve_zalo_chat_clip(content_only_page)
+        self.assertIsNotNone(content_only_clip)
+        assert content_only_clip is not None
+        self.assertEqual(content_only_clip["x"], 316.0)
+        self.assertLess(content_only_clip["width"], 1100.0)
+
+        # Unrecognized layout where chatLeft == 0 and clipWidth >= vpW - 40 returns None
+        uncropped_page = self._build_node_dom_page(920, 800, [])
+        self.assertIsNone(await _resolve_zalo_chat_clip(uncropped_page))
+
+        # Defensive Python fallbacks for non-callable evaluate, malformed dicts, and screenshot TypeError
+        class NoEvalPage:
+            pass
+
+        self.assertIsNone(await _resolve_zalo_chat_clip(NoEvalPage()))
+
+        class StaticEvalPage:
+            def __init__(self, payload):
+                self._payload = payload
+                self.calls = []
+
+            async def evaluate(self, _script):
+                return self._payload
+
+            async def screenshot(self, **kwargs):
+                self.calls.append(kwargs)
+                if "clip" in kwargs:
+                    raise TypeError("clip unsupported")
+                with open(kwargs["path"], "wb") as handle:
+                    handle.write(b"FALLBACK_PNG_BYTES")
+
+        self.assertIsNone(await _resolve_zalo_chat_clip(StaticEvalPage(None)))
+        self.assertIsNone(await _resolve_zalo_chat_clip(StaticEvalPage({"x": "bad"})))
+        self.assertIsNone(
+            await _resolve_zalo_chat_clip(
+                StaticEvalPage({"x": -1, "y": 0, "width": 800, "height": 800})
+            )
+        )
+
+        dummy_msg = FakeMessage("Báo cáo buổi 2", "02/11/2026")
+        with tempfile.TemporaryDirectory() as root:
+            type_error_page = StaticEvalPage(
+                {"x": 320, "y": 0, "width": 880, "height": 1200}
+            )
+            ev = await _capture_zalo_evidence(
+                type_error_page,
+                dummy_msg,
+                job_id=992,
+                screenshots_dir=root,
+                label="report",
+            )
+            self.assertIsNotNone(ev)
+            self.assertEqual(len(type_error_page.calls), 2)
+            self.assertIn("clip", type_error_page.calls[0])
+            self.assertNotIn("clip", type_error_page.calls[1])
+
 
 if __name__ == "__main__":
     unittest.main()

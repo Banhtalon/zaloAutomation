@@ -4813,6 +4813,106 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+    def test_inspect_and_attach_missing_attendance_and_legacy_muc_a_dedup(self) -> None:
+        from datetime import datetime
+        from core.time_utils import BUSINESS_TIMEZONE
+
+        # 1. MISSING_ATTENDANCE supersedes prior [LMS] Chưa ghi nội dung bài học / [SPCK] Chưa nộp
+        #    and leaves strictly [LMS] Chưa điểm danh on LMS side
+        row_rob = {
+            "class_code": "VT-KIND-ROB4B04",
+            "lesson": "12",
+            "class_date_iso": "2026-11-15",
+            "evidence_state": "SUBMITTED_VERIFIED",
+            "lms_quality_issues": [
+                "[LMS] Chưa ghi nội dung bài học",
+                "[SPCK] Chưa nộp (0/6)",
+            ],
+            "quality_issues": [
+                "[LMS] Chưa ghi nội dung bài học",
+                "[SPCK] Chưa nộp (0/6)",
+            ],
+            "scan_target": {
+                "class_code": "VT-KIND-ROB4B04",
+                "lesson": "12",
+                "class_date": "15/11/2026",
+                "class_date_iso": "2026-11-15",
+                "khoi": "Robotics",
+            },
+        }
+        inspect_and_attach_quality_issues(
+            [row_rob],
+            lms_slots_by_class={
+                "VT-KIND-ROB4B04": [
+                    {
+                        "_id": "s12",
+                        "index": 11,
+                        "date": "2026-11-15",
+                        "summary": "",
+                        "studentAttendance": [],
+                        "activeClassStudentCount": 6,
+                        "studentWorks": [],
+                    }
+                ]
+            },
+            now=datetime(2026, 11, 16, 10, 0, tzinfo=BUSINESS_TIMEZONE),
+        )
+        self.assertEqual(row_rob["lms_attendance"]["status"], "MISSING_ATTENDANCE")
+        self.assertEqual(row_rob["lms_comments"]["status"], "MISSING_ATTENDANCE")
+        self.assertEqual(row_rob["lms_spck"]["status"], "MISSING_ATTENDANCE")
+        self.assertEqual(
+            [issue_text(x) for x in row_rob["lms_quality_issues"]],
+            ["[LMS] Chưa điểm danh"],
+        )
+        self.assertEqual(
+            [issue_text(x) for x in row_rob["quality_issues"]],
+            ["[LMS] Chưa điểm danh"],
+        )
+
+        # 2. When attendance is genuinely UNVERIFIED (truncated), legacy [LMS] Chưa ghi nội dung bài học
+        #    is deduplicated in favor of Mức A [LMS] Điền tóm tắt bài so they never coexist
+        row_unverified = {
+            "class_code": "VT-KIND-ROB4B04",
+            "lesson": "12",
+            "class_date_iso": "2026-11-15",
+            "evidence_state": "SUBMITTED_VERIFIED",
+            "lms_quality_issues": ["[LMS] Chưa ghi nội dung bài học"],
+            "quality_issues": ["[LMS] Chưa ghi nội dung bài học"],
+            "scan_target": {
+                "class_code": "VT-KIND-ROB4B04",
+                "lesson": "12",
+                "class_date": "15/11/2026",
+                "class_date_iso": "2026-11-15",
+                "khoi": "Robotics",
+            },
+        }
+        inspect_and_attach_quality_issues(
+            [row_unverified],
+            lms_slots_by_class={
+                "VT-KIND-ROB4B04": [
+                    {
+                        "_id": "s12",
+                        "index": 11,
+                        "date": "2026-11-15",
+                        "summary": "",
+                        "studentAttendance": [],
+                        "activeClassStudentCount": 6,
+                        "truncated": True,
+                        "studentWorks": [],
+                    }
+                ]
+            },
+            now=datetime(2026, 11, 16, 10, 0, tzinfo=BUSINESS_TIMEZONE),
+        )
+        self.assertEqual(
+            [issue_text(x) for x in row_unverified["lms_quality_issues"]],
+            ["[LMS] Điền tóm tắt bài", "[LMS] Kiểm tra tay trên LMS"],
+        )
+        self.assertIn(
+            "[LMS] Chưa ghi nội dung bài học",
+            [issue_text(x) for x in row_unverified["lms_previous_quality_issues"]],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

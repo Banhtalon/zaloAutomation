@@ -93,6 +93,9 @@ ALLOWED_LMS_TOKEN_KEYS = frozenset({"id_token", "access_token", "lms_token", "au
 
 ATTENDED_STATUSES = frozenset({"ATTENDED", "LATE_ARRIVED"})
 ABSENT_STATUSES = frozenset({"ABSENT", "ABSENT_WITH_NOTICE"})
+UNMARKED_ATTENDANCE_STATUSES = frozenset(
+    {"", "NONE", "NOT_ATTENDED", "UNMARKED", "PENDING", "NULL"}
+)
 
 CODING_TRACK_TOKENS = frozenset(
     {
@@ -1394,38 +1397,104 @@ def _evaluate_lms_attendance(
 ) -> tuple[dict[str, Any], list[dict[str, Any]], list[Any]]:
     """One attendance decision for comments and SPCK; unknown evidence never means absence."""
     data = slot_data or {}
-    rows = student_attendance if isinstance(student_attendance, list) else []
-    partial = any(
-        data.get(flag)
-        for flag in (
-            "truncated",
-            "studentAttendanceTruncated",
-            "studentAttendanceFetchError",
-            "attendanceAmbiguous",
+    is_list = isinstance(student_attendance, list)
+    rows = student_attendance if is_list else []
+    raw_active_cnt = data.get("activeClassStudentCount")
+    active_student_count = (
+        raw_active_cnt
+        if isinstance(raw_active_cnt, int)
+        and not isinstance(raw_active_cnt, bool)
+        and raw_active_cnt > 0
+        else 0
+    )
+    partial = (
+        any(
+            data.get(flag)
+            for flag in (
+                "truncated",
+                "studentAttendanceTruncated",
+                "studentAttendanceFetchError",
+                "attendanceAmbiguous",
+            )
         )
+        or len(rows) > MAX_LMS_STUDENTS_PER_SLOT
     )
     attended: list[dict[str, Any]] = []
     absent = 0
     unknown = 0
+    unmarked = 0
+    has_invalid_or_dup_key = False
     seen_keys: set[str] = set()
     for row in rows[:MAX_LMS_STUDENTS_PER_SLOT]:
         if not isinstance(row, dict):
             unknown += 1
+            has_invalid_or_dup_key = True
             continue
         key = _attendance_student_key(row)
         if key and key in seen_keys:
             unknown += 1
+            has_invalid_or_dup_key = True
             continue
+        if (
+            ("studentKey" in row and not str(row.get("studentKey") or "").strip())
+            or ("studentId" in row and not str(row.get("studentId") or "").strip())
+        ):
+            has_invalid_or_dup_key = True
         if key:
             seen_keys.add(key)
-        status = str(row.get("status") or "").strip().upper()
+        raw_status = row.get("status")
+        has_explicit_status = "status" in row and (
+            isinstance(raw_status, str)
+            or (raw_status is None and active_student_count > 0)
+        )
+        status = str(raw_status or "").strip().upper()
         if status in ATTENDED_STATUSES:
             attended.append(row)
         elif status in ABSENT_STATUSES:
             absent += 1
         else:
             unknown += 1
+            if has_explicit_status and status in UNMARKED_ATTENDANCE_STATUSES:
+                unmarked += 1
     unknown += max(0, len(rows) - MAX_LMS_STUDENTS_PER_SLOT)
+
+    is_missing_attendance = (
+        not partial
+        and is_list
+        and (
+            (len(rows) == 0 and active_student_count > 0)
+            or (
+                len(rows) > 0
+                and len(attended) == 0
+                and absent == 0
+                and unknown == len(rows)
+                and unmarked == len(rows)
+                and not has_invalid_or_dup_key
+            )
+        )
+    )
+    if is_missing_attendance:
+        metadata = {
+            "status": "MISSING_ATTENDANCE",
+            "attended_count": 0,
+            "absent_count": 0,
+            "unverified_count": 0,
+            "exempt_count": 0,
+            "total_count": len(rows),
+            "active_student_count": int(active_student_count or len(rows) or 0),
+        }
+        return (
+            metadata,
+            [],
+            [
+                make_structured_issue(
+                    ISSUE_CODE_LMS_QUALITY_FAIL,
+                    "[LMS] Chưa điểm danh",
+                    severity=SEVERITY_FAIL,
+                )
+            ],
+        )
+
     unverified = not rows or unknown > 0 or partial
     status = "UNVERIFIED" if unverified else ("EXEMPT" if not attended else "VERIFIED")
     metadata = {
@@ -1491,6 +1560,8 @@ def evaluate_lms_student_comments(
     }
     if exempt:
         return base
+    if attendance["status"] == "MISSING_ATTENDANCE":
+        return {**base, "status": "MISSING_ATTENDANCE", "issues": attendance_issues}
     if attendance["status"] == "UNVERIFIED":
         return {**base, "issues": attendance_issues}
 
@@ -2189,6 +2260,8 @@ def evaluate_lms_spck_quality(
     )
     if attendance["status"] == "EXEMPT":
         return {**empty_res, "status": "EXEMPT"}
+    if attendance["status"] == "MISSING_ATTENDANCE":
+        return {**empty_res, "status": "MISSING_ATTENDANCE", "issues": attendance_issues}
     if attendance["status"] == "UNVERIFIED":
         return {**empty_res, "issues": attendance_issues}
     raw_works = slot_data.get("studentWorks")
@@ -2608,6 +2681,24 @@ def evaluate_lms_slot_quality(
         ai_reviewer=ai_reviewer,
         verdict_cache=verdict_cache,
     )
+
+    if comments_eval["attendance"].get("status") == "MISSING_ATTENDANCE":
+        return {
+            **_lms_quality_metadata(comments_eval["attendance"], comments_eval, spck_eval),
+            "is_exempt": lesson_14_flag,
+            "is_checkpoint": checkpoint,
+            "has_valid_summary": bool(summary_eval["has_valid_summary"]),
+            "summary_clean": str(summary_eval["summary_clean"] or ""),
+            "attended_count": 0,
+            "failed_comment_count": 0,
+            "issues": [
+                make_structured_issue(
+                    ISSUE_CODE_LMS_QUALITY_FAIL,
+                    "[LMS] Chưa điểm danh",
+                    severity=SEVERITY_FAIL,
+                )
+            ],
+        }
 
     session_fail_issues: list[Any] = []
     session_manual_issues: list[Any] = []
@@ -3789,6 +3880,7 @@ async def fetch_lms_class_slots_via_page(
             const studentIdToName = new Map();
             const studentNamesSet = new Set();
             const inactiveStudentIds = new Set();
+            const activeStudentIds = new Set();
             let studentCounter = 0;
             let identityAmbiguous = false;
             const rawClassStudents = Array.isArray(item.students) ? item.students : [];
@@ -3809,6 +3901,9 @@ async def fetch_lms_class_slots_via_page(
                 }
                 if (stuId && cs && cs.activeInClass === false) {
                     inactiveStudentIds.add(stuId);
+                    activeStudentIds.delete(stuId);
+                } else if (stuId && !inactiveStudentIds.has(stuId)) {
+                    activeStudentIds.add(stuId);
                 }
             }
             for (const s of item.slots.slice(0, maxSlots)) {
@@ -3831,6 +3926,7 @@ async def fetch_lms_class_slots_via_page(
                 }
             }
             const classStudentNames = Array.from(studentNamesSet);
+            const activeClassStudentCount = activeStudentIds.size;
             const classIdStr = (item && item.id != null) ? String(item.id).trim() : '';
             if (codeKey) {
                 matchedClassMeta[codeKey] = {
@@ -3859,6 +3955,7 @@ async def fetch_lms_class_slots_via_page(
                     summary: (s && typeof s.summary === 'string') ? scrubStudentNames(s.summary.slice(0, 6000), classStudentNames) : '',
                     truncated: Boolean(slotsTruncated || attTruncated || identityAmbiguous || rawClassStudents.length > maxStudents * 2 || (s && typeof s.summary === 'string' && s.summary.length > 6000) || (rawAtt && rawAtt.some((a) => a && typeof a.comment === 'string' && a.comment.length > 15000))),
                     attendanceAmbiguous,
+                    activeClassStudentCount,
                     studentAttendance: Array.isArray(rawAtt)
                         ? rawAtt.slice(0, maxStudents).map((att) => {
                             const stuObj = (att && att.student && typeof att.student === 'object') ? att.student : null;
@@ -3883,11 +3980,12 @@ async def fetch_lms_class_slots_via_page(
             });
         };
 
+        const activeCentres = (Array.isArray(centres) && centres.length > 0) ? centres : undefined;
+
         // Tier 1: Bulk fetch when querying > 3 classes (avoids N-query rate limits on LMS)
         if (classCodes.length > 3) {
             const bulkItems = [];
             let bulkComplete = false;
-            const activeCentres = (Array.isArray(centres) && centres.length > 0) ? centres : undefined;
             for (let pageIdx = 0; pageIdx < 5; pageIdx++) {
                 const bulkTimeout = Math.max(timeoutMs || 12000, 25000);
                 const ctrl = new AbortController();
@@ -3968,98 +4066,128 @@ async def fetch_lms_class_slots_via_page(
         }
 
         // Tier 2: Per-code fetch for small batches (<= 3) or any code not returned in Tier 1
+        const buildSearchCandidates = (rawCode) => {
+            const cands = [rawCode];
+            const parts = String(rawCode || '').split('-').map((p) => p.trim()).filter(Boolean);
+            if (parts.length >= 2) {
+                const last = parts[parts.length - 1];
+                if (last === 'HB' && parts.length >= 3) {
+                    const tailTwo = `${parts[parts.length - 2]}-HB`;
+                    if (!cands.includes(tailTwo)) cands.push(tailTwo);
+                    if (parts[parts.length - 2].length >= 2 && !cands.includes(parts[parts.length - 2])) {
+                        cands.push(parts[parts.length - 2]);
+                    }
+                } else if (last.length >= 2 && !cands.includes(last)) {
+                    cands.push(last);
+                }
+            }
+            return cands;
+        };
         const fetchOneCode = async (code) => {
             if (authFailed) {
                 out[code] = Array.from({ length: maxSlots }, () => ({ fetch_error: true }));
                 return;
             }
-            for (let attempt = 0; attempt < 2; attempt++) {
-                if (authFailed) {
-                    out[code] = Array.from({ length: maxSlots }, () => ({ fetch_error: true }));
-                    return;
-                }
-                const ctrl = new AbortController();
-                const timer = setTimeout(() => ctrl.abort(), timeoutMs);
-                try {
-                    const resp = await fetch(endpoint, {
-                        method: 'POST',
-                        headers: {
-                            'content-type': 'application/json',
-                            'authorization': bearerHeader,
-                            'token': rawTokenHeader
-                        },
-                        body: JSON.stringify({
-                            operationName: 'classesMissAttendOrComment',
-                            variables: {
-                                type: [],
-                                search: code,
-                                status: ['FINISHED', 'RUNNING'],
-                                pageIndex: 0,
-                                itemsPerPage: 20,
-                                orderBy: 'createdAt_desc'
+            const searchCandidates = buildSearchCandidates(code);
+            for (const searchTerm of searchCandidates) {
+                let candidateResolvedZero = false;
+                for (let attempt = 0; attempt < 2; attempt++) {
+                    if (authFailed) {
+                        out[code] = Array.from({ length: maxSlots }, () => ({ fetch_error: true }));
+                        return;
+                    }
+                    const ctrl = new AbortController();
+                    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+                    try {
+                        const vars = {
+                            type: [],
+                            search: searchTerm,
+                            status: ['FINISHED', 'RUNNING'],
+                            pageIndex: 0,
+                            itemsPerPage: 50,
+                            orderBy: 'createdAt_desc'
+                        };
+                        if (activeCentres) {
+                            vars.centres = activeCentres;
+                        }
+                        const resp = await fetch(endpoint, {
+                            method: 'POST',
+                            headers: {
+                                'content-type': 'application/json',
+                                'authorization': bearerHeader,
+                                'token': rawTokenHeader
                             },
-                            query
-                        }),
-                        signal: ctrl.signal
-                    });
-                    if (!resp.ok) {
-                        if (isAuthErrorPayload(resp.status, null)) {
-                            authFailed = true;
+                            body: JSON.stringify({
+                                operationName: 'classesMissAttendOrComment',
+                                variables: vars,
+                                query
+                            }),
+                            signal: ctrl.signal
+                        });
+                        if (!resp.ok) {
+                            if (isAuthErrorPayload(resp.status, null)) {
+                                authFailed = true;
+                                out[code] = Array.from({ length: maxSlots }, () => ({ fetch_error: true }));
+                                return;
+                            }
+                            if (attempt === 0) {
+                                await new Promise((r) => setTimeout(r, 300));
+                                continue;
+                            }
                             out[code] = Array.from({ length: maxSlots }, () => ({ fetch_error: true }));
                             return;
                         }
+                        const payload = await resp.json();
+                        if (payload && Array.isArray(payload.errors) && payload.errors.length > 0) {
+                            if (isAuthErrorPayload(resp.status, payload)) {
+                                authFailed = true;
+                                out[code] = Array.from({ length: maxSlots }, () => ({ fetch_error: true }));
+                                return;
+                            }
+                            if (attempt === 0) {
+                                await new Promise((r) => setTimeout(r, 300));
+                                continue;
+                            }
+                            out[code] = Array.from({ length: maxSlots }, () => ({ fetch_error: true }));
+                            return;
+                        }
+                        const list = (((payload || {}).data || {}).classesMissAttendOrComment || {}).data || [];
+                        const matched = list.filter((item) => {
+                            const itemName = String((item && item.name) || '').trim().toUpperCase();
+                            return itemName === code;
+                        });
+                        if (matched.length > 1) {
+                            out[code] = Array.from({ length: maxSlots }, () => ({
+                                fetch_error: true,
+                                duplicate_class: true
+                            }));
+                            return;
+                        }
+                        if (matched.length === 0) {
+                            candidateResolvedZero = true;
+                            break;
+                        }
+                        out[code] = formatItemSlots(matched[0], code);
+                        return;
+                    } catch (_) {
                         if (attempt === 0) {
                             await new Promise((r) => setTimeout(r, 300));
                             continue;
                         }
                         out[code] = Array.from({ length: maxSlots }, () => ({ fetch_error: true }));
                         return;
+                    } finally {
+                        clearTimeout(timer);
                     }
-                    const payload = await resp.json();
-                    if (payload && Array.isArray(payload.errors) && payload.errors.length > 0) {
-                        if (isAuthErrorPayload(resp.status, payload)) {
-                            authFailed = true;
-                            out[code] = Array.from({ length: maxSlots }, () => ({ fetch_error: true }));
-                            return;
-                        }
-                        if (attempt === 0) {
-                            await new Promise((r) => setTimeout(r, 300));
-                            continue;
-                        }
-                        out[code] = Array.from({ length: maxSlots }, () => ({ fetch_error: true }));
-                        return;
-                    }
-                    const list = (((payload || {}).data || {}).classesMissAttendOrComment || {}).data || [];
-                    const matched = list.filter((item) => {
-                        const itemName = String((item && item.name) || '').trim().toUpperCase();
-                        return itemName === code;
-                    });
-                    if (matched.length > 1) {
-                        out[code] = Array.from({ length: maxSlots }, () => ({
-                            fetch_error: true,
-                            duplicate_class: true
-                        }));
-                        return;
-                    }
-                    if (matched.length === 0) {
-                        out[code] = Array.from({ length: maxSlots }, () => ({
-                            fetch_error: true,
-                            missing_class: true
-                        }));
-                        return;
-                    }
-                    out[code] = formatItemSlots(matched[0], code);
+                }
+                if (!candidateResolvedZero) {
                     return;
-                } catch (_) {
-                    if (attempt === 0) {
-                        await new Promise((r) => setTimeout(r, 300));
-                        continue;
-                    }
-                    out[code] = Array.from({ length: maxSlots }, () => ({ fetch_error: true }));
-                } finally {
-                    clearTimeout(timer);
                 }
             }
+            out[code] = Array.from({ length: maxSlots }, () => ({
+                fetch_error: true,
+                missing_class: true
+            }));
         };
         const remainingCodes = classCodes.filter((code) => !out[code]);
         if (remainingCodes.length > 0) {
@@ -5282,7 +5410,7 @@ def inspect_and_attach_quality_issues(
             slot_evaluated
             and isinstance(comments_meta, Mapping)
             and str(comments_meta.get("status") or "").strip().upper()
-            in {"COMPLETE", "REVIEW", "MISSING", "EXEMPT"}
+            in {"COMPLETE", "REVIEW", "MISSING", "MISSING_ATTENDANCE", "EXEMPT"}
         )
         spck_meta = result.get("lms_spck")
         spck_status = (
@@ -5309,7 +5437,15 @@ def inspect_and_attach_quality_issues(
             )
         )
         spck_superseded = slot_evaluated and (
-            spck_status in {"NOT_REQUIRED", "COMPLETE", "PARTIAL", "MISSING", "EXEMPT"}
+            spck_status
+            in {
+                "NOT_REQUIRED",
+                "COMPLETE",
+                "PARTIAL",
+                "MISSING",
+                "MISSING_ATTENDANCE",
+                "EXEMPT",
+            }
             or spck_attendance_unverified
         )
         lms_eval_indeterminate = (
@@ -5320,6 +5456,18 @@ def inspect_and_attach_quality_issues(
         )
         if lms_eval_indeterminate and prior_lms_issues:
             seen_lms = {issue_text(x) for x in lms_issues if issue_text(x)}
+            current_lms_codes = {issue_code(x) for x in lms_issues if issue_code(x)}
+            current_has_summary_note = ISSUE_CODE_LMS_SUMMARY_NOTE in current_lms_codes or any(
+                "dien tom tat bai" in fold_text(issue_text(x)) for x in lms_issues
+            )
+            dedup_semantic_codes = {
+                ISSUE_CODE_LMS_SUMMARY_NOTE,
+                ISSUE_CODE_LMS_COMMENT_NOTE,
+                ISSUE_CODE_LMS_ATTENDANCE_CONFLICT_NOTE,
+                ISSUE_CODE_LMS_SPCK_MISSING,
+                ISSUE_CODE_LMS_SPCK_COMMENT_MISSING,
+                ISSUE_CODE_LMS_SPCK_NOTE,
+            }
             spck_codes = {
                 ISSUE_CODE_LMS_SPCK_MISSING,
                 ISSUE_CODE_LMS_SPCK_COMMENT_MISSING,
@@ -5328,14 +5476,21 @@ def inspect_and_attach_quality_issues(
             for prior_l in prior_lms_issues:
                 pt = issue_text(prior_l)
                 if pt and pt not in seen_lms:
+                    prior_code = issue_code(prior_l)
                     is_prior_spck = (
-                        issue_code(prior_l) in spck_codes
+                        prior_code in spck_codes
                         or pt.upper().startswith("[SPCK]")
                         or "spck" in fold_text(pt)
                     )
-                    if slot_evaluated and (
-                        (is_prior_spck and spck_superseded)
-                        or (not is_prior_spck and comments_verified)
+                    is_semantically_superseded = (
+                        prior_code == ISSUE_CODE_LMS_SUMMARY_NOTE and current_has_summary_note
+                    ) or (prior_code in dedup_semantic_codes and prior_code in current_lms_codes)
+                    if is_semantically_superseded or (
+                        slot_evaluated
+                        and (
+                            (is_prior_spck and spck_superseded)
+                            or (not is_prior_spck and comments_verified)
+                        )
                     ):
                         previous = list(result.get("lms_previous_quality_issues") or [])
                         if pt not in {issue_text(item) for item in previous}:

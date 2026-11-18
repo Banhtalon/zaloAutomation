@@ -283,6 +283,7 @@ def _short_url_issue(value: str) -> str:
         .replace("[Zalo] ", "")
         .replace("[SPCK] ", "SPCK ")
     )
+    s = s.replace("Chưa điểm danh", "Chưa ĐD LMS")
     s = s.replace("Chưa ghi nội dung bài học", "Thiếu ND")
     s = s.replace("Điền tóm tắt bài", "Thiếu ND")
     s = s.replace("Nhận xét HS sơ sài, thiếu đủ 3 ý", "NX thiếu ý")
@@ -336,6 +337,8 @@ def _prepare_email_row_fields(idx: int, row: dict[str, Any]) -> dict[str, str]:
         or is_stale_not_found_review
         or "lms_comments" in row
         or "lms_comments" in st
+        or "lms_attendance" in row
+        or "lms_attendance" in st
         or raw_eval
         in {
             "❌ Chưa nộp SPCK trên LMS",

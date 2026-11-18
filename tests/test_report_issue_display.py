@@ -391,6 +391,82 @@ class ReportIssueDisplayTests(unittest.TestCase):
         self.assertIn("[SPCK] Bổ sung tên SP, ảnh", parsed.items)
         self.assertIn("[LMS] Điền tóm tắt bài", parsed.items)
 
+    def test_legacy_and_muc_a_dedup_and_missing_attendance_email_csv_display(self):
+        from services.report_email_service import _short_url_issue
+
+        self.assertEqual(_short_url_issue("[LMS] Chưa điểm danh"), "Chưa ĐD LMS")
+
+        # 1. Legacy + Mức A summary & manual-check deduplicate cleanly, preferring Mức A regardless of order
+        row_rob_dup = {
+            "class_code": "VT-KIND-ROB4B04",
+            "teacher": "Giảng viên R",
+            "lesson": "12",
+            "class_date": "15/11/2026",
+            "zalo_status": "✅ Đã nộp – Có minh chứng",
+            "lms_status": "⏳ Chờ xác minh điểm danh/nhận xét LMS",
+            "qc_issue_note": (
+                "QC nhắc riêng | [LMS] Chưa ghi nội dung bài học; "
+                "[LMS] Không tải được đầy đủ dữ liệu buổi học từ LMS, cần kiểm tra thủ công; "
+                "[Zalo] Báo cáo không ghi ngày/buổi"
+            ),
+            "lms_quality_issues": [
+                {"code": "LMS_SUMMARY_NOTE", "severity": "NOTE", "text": "[LMS] Điền tóm tắt bài"},
+                {"code": "LMS_MANUAL_CHECK", "severity": "NOTE", "text": "[LMS] Kiểm tra tay trên LMS"},
+            ],
+            "zalo_content_issues": [
+                {"code": "ZALO_REPORT_NO_DATE", "severity": "NOTE", "text": "[Zalo] Thiếu ngày/buổi"}
+            ],
+        }
+        self.assertEqual(
+            _split_display_issues(_resolve_row_issue_description(row_rob_dup, st={})),
+            [
+                "QC nhắc riêng",
+                "[LMS] Điền tóm tắt bài",
+                "[LMS] Kiểm tra tay trên LMS",
+                "[Zalo] Thiếu ngày/buổi",
+            ],
+        )
+
+        # Reverse order + compound Mức A summary note ([LMS] Điền tóm tắt bài, viết kỹ NX)
+        row_compound = {
+            "qc_issue_note": "[LMS] Chưa ghi nội dung bài học",
+            "lms_quality_issues": ["[LMS] Điền tóm tắt bài, viết kỹ NX", "[LMS] Chưa ghi nội dung bài học"],
+        }
+        self.assertEqual(
+            _resolve_row_issue_description(row_compound, st={}),
+            "[LMS] Điền tóm tắt bài, viết kỹ NX",
+        )
+
+        # 2. MISSING_ATTENDANCE row renders ❌ Chưa điểm danh LMS and [LMS] Chưa điểm danh in Email & CSV
+        missing_att_row = {
+            "class_code": "VT-KIND-ROB4B04",
+            "teacher": "Giảng viên R",
+            "lesson": "12",
+            "class_date": "15/11/2026",
+            "zalo_status": "✅ Đã nộp – Có minh chứng",
+            "evidence_state": "SUBMITTED_VERIFIED",
+            "lms_attendance": {
+                "status": "MISSING_ATTENDANCE",
+                "attended_count": 0,
+                "absent_count": 0,
+                "unverified_count": 0,
+                "exempt_count": 0,
+                "total_count": 0,
+                "active_student_count": 6,
+            },
+            "lms_comments": {"status": "MISSING_ATTENDANCE", "submitted_count": 0},
+            "lms_spck": {"status": "MISSING_ATTENDANCE", "submitted_count": 0},
+            "lms_quality_issues": [
+                {"code": "LMS_QUALITY_FAIL", "severity": "FAIL", "text": "[LMS] Chưa điểm danh"}
+            ],
+        }
+        fields = _prepare_email_row_fields(1, missing_att_row)
+        self.assertEqual(fields["lms_status"], "❌ Chưa điểm danh LMS")
+        self.assertEqual(fields["issue_description"], "[LMS] Chưa điểm danh")
+        csv_text = build_weekly_summary_csv([missing_att_row])
+        self.assertIn("❌ Chưa điểm danh LMS", csv_text)
+        self.assertIn("[LMS] Chưa điểm danh", csv_text)
+
 
 if __name__ == "__main__":
     unittest.main()

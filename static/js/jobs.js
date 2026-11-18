@@ -1087,7 +1087,7 @@
             if (!r || typeof r !== 'object') return false;
             const st = r.scan_target && typeof r.scan_target === 'object' ? r.scan_target : {};
             const spck = r.lms_spck || st.lms_spck;
-            if (spck && ['NOT_REQUIRED', 'EXEMPT', 'UNVERIFIED', 'MISSING'].includes(spck.status)) {
+            if (spck && ['NOT_REQUIRED', 'EXEMPT', 'UNVERIFIED', 'MISSING', 'MISSING_ATTENDANCE'].includes(spck.status)) {
                 return false;
             }
             if (spck && Number.isInteger(spck.missing_comment_count)) {
@@ -1320,6 +1320,12 @@
             const st = r.scan_target && typeof r.scan_target === 'object' ? r.scan_target : {};
             const comments = r.lms_comments || st.lms_comments;
             const attendance = r.lms_attendance || st.lms_attendance;
+            if (
+                (attendance && attendance.status === 'MISSING_ATTENDANCE')
+                || (comments && comments.status === 'MISSING_ATTENDANCE')
+            ) {
+                return '❌ Chưa điểm danh LMS';
+            }
             if (comments && comments.status) {
                 if (comments.status === 'EXEMPT') {
                     if (attendance && attendance.status === 'EXEMPT') return '✅ Không áp dụng nhận xét LMS (toàn bộ học viên nghỉ)';
@@ -1351,7 +1357,9 @@
             if (!r || typeof r !== 'object') return '';
             const st = r.scan_target && typeof r.scan_target === 'object' ? r.scan_target : {};
             const parts = [];
-            const seen = new Set();
+            const keyToIdx = new Map();
+            const preferredKeys = new Set();
+            let hasCompoundSummary = false;
             const normKey = text => {
                 const rawStr = String(text || '').trim();
                 const isSpck = /^\[SPCK\]\s*/i.test(rawStr);
@@ -1362,6 +1370,48 @@
                     .toLowerCase()
                     .replace(/\s+/g, ' ');
                 return isSpck && body ? `[spck] ${body}` : body;
+            };
+            const semanticDedupInfo = text => {
+                const s = String(text || '').trim();
+                if (/^\[LMS\]\s*Chưa\s+ghi\s+nội\s+dung\s+bài\s+học\.?$/i.test(s)) {
+                    return { key: '[lms:summary_note]', preferred: false, compoundSummary: false };
+                }
+                if (/^\[LMS\]\s*Điền\s+tóm\s+tắt\s+bài\.?$/i.test(s)) {
+                    return { key: '[lms:summary_note]', preferred: true, compoundSummary: false };
+                }
+                if (/^\[LMS\]\s*Điền\s+tóm\s+tắt\s+bài\s*,/i.test(s)) {
+                    return { key: normKey(s), preferred: true, compoundSummary: true };
+                }
+                if (/^\[LMS\]\s*(?!.*SPCK).*cần\s+kiểm\s+tra\s+thủ\s+công\.?$/i.test(s)) {
+                    return { key: '[lms:manual_check]', preferred: false, compoundSummary: false };
+                }
+                if (/^\[LMS\]\s*Kiểm\s+tra\s+tay(?:\s+trên\s+LMS)?\.?$/i.test(s)) {
+                    return { key: '[lms:manual_check]', preferred: true, compoundSummary: false };
+                }
+                if (
+                    /^\[(?:LMS|SPCK)\]\s*(?=.*SPCK).*cần\s+kiểm\s+tra\s+thủ\s+công\.?$/i.test(s)
+                    || /^\[SPCK\]\s*.*cần\s+kiểm\s+tra\s+thủ\s+công\.?$/i.test(s)
+                ) {
+                    return { key: '[spck:manual_check]', preferred: false, compoundSummary: false };
+                }
+                if (/^\[SPCK\]\s*Kiểm\s+tra\s+tay(?:\s+trên\s+LMS)?\.?$/i.test(s)) {
+                    return { key: '[spck:manual_check]', preferred: true, compoundSummary: false };
+                }
+                if (/^\[Zalo\]\s*Báo\s+cáo\s+không\s+ghi\s+ngày\/buổi\.?$/i.test(s)) {
+                    return { key: '[zalo:no_date]', preferred: false, compoundSummary: false };
+                }
+                if (/^\[Zalo\]\s*Thiếu\s+ngày\/buổi\.?$/i.test(s)) {
+                    return { key: '[zalo:no_date]', preferred: true, compoundSummary: false };
+                }
+                const legWd = s.match(/^\[Zalo\]\s*Báo\s+cáo\s+ghi\s+sai\s+ngày\s*\(\s*([^)]+?)\s*\)\.?$/i);
+                if (legWd) {
+                    return { key: `[zalo:wrong_date:${legWd[1].trim().toLowerCase()}]`, preferred: false, compoundSummary: false };
+                }
+                const newWd = s.match(/^\[Zalo\]\s*Sai\s+ngày\s*\(\s*([^)]+?)\s*\)\.?$/i);
+                if (newWd) {
+                    return { key: `[zalo:wrong_date:${newWd[1].trim().toLowerCase()}]`, preferred: true, compoundSummary: false };
+                }
+                return { key: normKey(s), preferred: false, compoundSummary: false };
             };
             const legacyDupRe = /^\[LMS\]\s*(?:Nhận|Nhan)\s+x[eé]t\s+HS\s+copy-paste\s+tr[uù]ng\s+l[aặ]p\b/i;
             const addOne = (seg, isAuto = false) => {
@@ -1376,11 +1426,31 @@
                 if (isAuto || /^(?:\[LMS\]|\[Zalo\]|\[SPCK\])\s*/i.test(cleaned)) {
                     cleaned = normalizeAutoIssueTextInJs(cleaned);
                 }
-                const key = normKey(cleaned);
-                if (key && !seen.has(key)) {
-                    seen.add(key);
-                    parts.push(cleaned);
+                const { key, preferred, compoundSummary } = semanticDedupInfo(cleaned);
+                if (!key) return;
+                if (key === '[lms:summary_note]' && hasCompoundSummary) return;
+                if (compoundSummary) {
+                    hasCompoundSummary = true;
+                    if (keyToIdx.has('[lms:summary_note]') && !keyToIdx.has(key)) {
+                        const sumIdx = keyToIdx.get('[lms:summary_note]');
+                        keyToIdx.delete('[lms:summary_note]');
+                        preferredKeys.delete('[lms:summary_note]');
+                        parts[sumIdx] = cleaned;
+                        keyToIdx.set(key, sumIdx);
+                        preferredKeys.add(key);
+                        return;
+                    }
                 }
+                if (keyToIdx.has(key)) {
+                    if (preferred && !preferredKeys.has(key)) {
+                        parts[keyToIdx.get(key)] = cleaned;
+                        preferredKeys.add(key);
+                    }
+                    return;
+                }
+                keyToIdx.set(key, parts.length);
+                if (preferred) preferredKeys.add(key);
+                parts.push(cleaned);
             };
             const addVal = (val, splitSemi = false) => {
                 if (!val) return;
@@ -1427,6 +1497,7 @@
             const spck = r.lms_spck || st.lms_spck;
             if (!spck || spck.status === 'NOT_REQUIRED') return '';
             if (spck.status === 'EXEMPT') return 'SPCK không áp dụng (toàn bộ học viên nghỉ)';
+            if (spck.status === 'MISSING_ATTENDANCE') return 'SPCK khóa (chưa điểm danh)';
             if (spck.status === 'UNVERIFIED') return 'SPCK chờ xác minh';
             if (!['COMPLETE', 'MISSING', 'PARTIAL'].includes(spck.status)) return '';
             if (![spck.submitted_count, spck.attended_count, spck.exempt_count].every(n => Number.isInteger(n) && n >= 0)) return 'SPCK chờ xác minh';
@@ -1485,21 +1556,35 @@
             const spck = r.lms_spck || st.lms_spck;
             const attendance = r.lms_attendance || st.lms_attendance;
             const commentsStatus = comments && typeof comments === 'object' ? comments.status : null;
+            const attStatus = attendance && typeof attendance === 'object' ? attendance.status : null;
             if (zaloDone) {
                 if (commentsStatus === 'UNVERIFIED' || lmsStatus === '⏳ Chờ xác minh điểm danh/nhận xét LMS') {
                     return '⏳ Chờ xác minh điểm danh/nhận xét LMS';
                 }
-                if (commentsStatus === 'EXEMPT' && attendance && attendance.status === 'EXEMPT') {
+                if (commentsStatus === 'EXEMPT' && attStatus === 'EXEMPT') {
                     return '✅ Không áp dụng LMS (toàn bộ học viên nghỉ)';
                 }
-                if (['COMPLETE', 'MISSING', 'REVIEW', 'EXEMPT'].includes(commentsStatus)) {
+                if (
+                    ['COMPLETE', 'MISSING', 'MISSING_ATTENDANCE', 'REVIEW', 'EXEMPT'].includes(commentsStatus)
+                    || attStatus === 'MISSING_ATTENDANCE'
+                ) {
                     explicitEval = '';
                 }
-                if (commentsStatus !== 'MISSING' && !lmsFailedOrWarn) {
+                if (
+                    !['MISSING', 'MISSING_ATTENDANCE'].includes(commentsStatus)
+                    && attStatus !== 'MISSING_ATTENDANCE'
+                    && !lmsFailedOrWarn
+                ) {
                     if (hasRowSpckMissingFail(r)) return '⚠️ Chưa nộp SPCK trên LMS';
                     if (hasRowSpckCommentMissingFail(r)) return '⚠️ SPCK chưa có nhận xét trên LMS';
                 }
-                if (spck && spck.status === 'UNVERIFIED' && commentsStatus !== 'MISSING' && !lmsFailedOrWarn) {
+                if (
+                    spck
+                    && spck.status === 'UNVERIFIED'
+                    && !['MISSING', 'MISSING_ATTENDANCE'].includes(commentsStatus)
+                    && attStatus !== 'MISSING_ATTENDANCE'
+                    && !lmsFailedOrWarn
+                ) {
                     return '⏳ Chờ xác minh SPCK trên LMS';
                 }
             }
@@ -1548,7 +1633,11 @@
             }
             const st = r.scan_target && typeof r.scan_target === 'object' ? r.scan_target : {};
             const comments = r.lms_comments || st.lms_comments;
-            if (comments && ['MISSING', 'UNVERIFIED'].includes(comments.status)) {
+            const attendance = r.lms_attendance || st.lms_attendance;
+            if (
+                (comments && ['MISSING', 'MISSING_ATTENDANCE', 'UNVERIFIED'].includes(comments.status))
+                || (attendance && attendance.status === 'MISSING_ATTENDANCE')
+            ) {
                 return false;
             }
             const allowedCodes = new Set([

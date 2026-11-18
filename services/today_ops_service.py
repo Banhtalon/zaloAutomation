@@ -1065,6 +1065,11 @@ def _compute_today_kpis(items: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             for it in items
             if str((it.get("lms_comments") or {}).get("status") or "").upper() in {"MISSING", "REVIEW"}
         ),
+        "missing_attendance_count": sum(
+            1
+            for it in items
+            if str((it.get("lms_attendance") or {}).get("status") or "").upper() == "MISSING_ATTENDANCE"
+        ),
         "attendance_unverified": sum(
             1
             for it in items

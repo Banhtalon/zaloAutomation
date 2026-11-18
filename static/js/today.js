@@ -85,7 +85,14 @@ function isTodayItemMissingLms(item) {
     if (!item || typeof item !== 'object') return false;
     const attStatus = String(item.lms_attendance?.status || '').toUpperCase();
     const comStatus = String(item.lms_comments?.status || '').toUpperCase();
-    if (attStatus === 'UNVERIFIED' || comStatus === 'MISSING' || comStatus === 'REVIEW' || comStatus === 'UNVERIFIED') {
+    if (
+        attStatus === 'MISSING_ATTENDANCE'
+        || attStatus === 'UNVERIFIED'
+        || comStatus === 'MISSING_ATTENDANCE'
+        || comStatus === 'MISSING'
+        || comStatus === 'REVIEW'
+        || comStatus === 'UNVERIFIED'
+    ) {
         return true;
     }
     if (item.phase === 'ENDED' && item.is_spck_session && !isTodaySpckComplete(item)) {
@@ -247,10 +254,15 @@ function renderTodayKpis(kpis) {
     );
 
     setTodayText('today-kpi-lms', Number(lms.ready_for_tick || 0));
-    setTodayText(
-        'today-kpi-lms-sub',
-        `ĐD chưa XM ${Number(lms.attendance_unverified || 0)} · Thiếu NX ${Number(lms.comment_issue_count || 0)}`,
+    const lmsSubParts = [];
+    if (Number(lms.missing_attendance_count || 0) > 0) {
+        lmsSubParts.push(`Chưa ĐD ${Number(lms.missing_attendance_count || 0)}`);
+    }
+    lmsSubParts.push(
+        `ĐD chưa XM ${Number(lms.attendance_unverified || 0)}`,
+        `Thiếu NX ${Number(lms.comment_issue_count || 0)}`,
     );
+    setTodayText('today-kpi-lms-sub', lmsSubParts.join(' · '));
 
     const codingTotal = Number(spck.coding_total || 0);
     const codingComplete = Number(spck.coding_complete || 0);
@@ -493,11 +505,14 @@ function buildTodayTableRow(item) {
     );
     const att = item?.lms_attendance || {};
     if (att.status) {
+        const isMissingAtt = String(att.status).toUpperCase() === 'MISSING_ATTENDANCE';
         tdLms.appendChild(
             makeTodayEl(
                 'div',
-                'text-[11px] font-semibold text-slate-700',
-                `Điểm danh: ${Number(att.attended_count || 0)} đi học · ${Number(att.absent_count || 0)} nghỉ (${att.status})`,
+                isMissingAtt ? 'text-[11px] font-bold text-rose-700' : 'text-[11px] font-semibold text-slate-700',
+                isMissingAtt
+                    ? `Điểm danh: Chưa điểm danh (${Number(att.active_student_count || att.total_count || 0)} HS đăng ký)`
+                    : `Điểm danh: ${Number(att.attended_count || 0)} đi học · ${Number(att.absent_count || 0)} nghỉ (${att.status})`,
             ),
         );
     }
@@ -834,11 +849,15 @@ function collectTodayMissingReasons(item) {
     }
     const attStatus = String(item?.lms_attendance?.status || '').toUpperCase();
     const comStatus = String(item?.lms_comments?.status || '').toUpperCase();
-    if (attStatus === 'UNVERIFIED') reasons.push('Chưa điểm danh LMS');
-    if (comStatus === 'MISSING' || comStatus === 'REVIEW') reasons.push('Thiếu nhận xét LMS');
-    if (item?.is_spck_session && !isTodaySpckComplete(item)) {
-        const spckNote = Array.isArray(item?.lms_spck?.detail_notes) ? item.lms_spck.detail_notes[0] : '';
-        reasons.push(spckNote || item?.lms_spck?.summary_text || `Chưa đủ SPCK B${item.lesson || ''}`);
+    if (attStatus === 'MISSING_ATTENDANCE' || comStatus === 'MISSING_ATTENDANCE') {
+        reasons.push('Chưa điểm danh LMS');
+    } else {
+        if (attStatus === 'UNVERIFIED') reasons.push('Chưa điểm danh LMS');
+        if (comStatus === 'MISSING' || comStatus === 'REVIEW') reasons.push('Thiếu nhận xét LMS');
+        if (item?.is_spck_session && !isTodaySpckComplete(item)) {
+            const spckNote = Array.isArray(item?.lms_spck?.detail_notes) ? item.lms_spck.detail_notes[0] : '';
+            reasons.push(spckNote || item?.lms_spck?.summary_text || `Chưa đủ SPCK B${item.lesson || ''}`);
+        }
     }
     return reasons;
 }

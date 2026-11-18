@@ -10,6 +10,7 @@ from services.lms_quality_service import (
 )
 from services.report_status import (
     ISSUE_CODE_LMS_MANUAL_CHECK,
+    ISSUE_CODE_LMS_QUALITY_FAIL,
     ISSUE_CODE_LMS_SPCK_MISSING,
     SEVERITY_FAIL,
     SEVERITY_NOTE,
@@ -309,6 +310,105 @@ class LmsAttendanceQualityTests(unittest.TestCase):
             self.assertIn("QC ghi tay", merged)
             self.assertNotIn(old_text, merged)
             self.assertIn("[LMS] Kiểm tra tay trên LMS", merged)
+
+    def test_missing_attendance_emits_only_chua_diem_danh_and_supersedes_old_notes(self):
+        # Case (a): empty studentAttendance=[] with activeClassStudentCount > 0 (e.g. VT-KIND-ROB4B04 B12)
+        for class_code in ("VT-KIND-ROB4B04", "VT-C4K-PTI11", "VT-C4K-PTB15"):
+            for lesson in (3, 4, 12, 14):
+                with self.subTest(class_code=class_code, lesson=lesson):
+                    res = evaluate_lms_slot_quality(
+                        {
+                            "summary": "",
+                            "studentAttendance": [],
+                            "activeClassStudentCount": 6,
+                            "studentWorks": [],
+                        },
+                        class_code=class_code,
+                        khoi="Robotics" if "ROB" in class_code else "Coding",
+                        lesson=lesson,
+                    )
+                    self.assertEqual(
+                        res["lms_attendance"],
+                        {
+                            "status": "MISSING_ATTENDANCE",
+                            "attended_count": 0,
+                            "absent_count": 0,
+                            "unverified_count": 0,
+                            "exempt_count": 0,
+                            "total_count": 0,
+                            "active_student_count": 6,
+                        },
+                    )
+                    self.assertEqual(
+                        res["lms_comments"]["status"],
+                        "EXEMPT" if lesson == 14 else "MISSING_ATTENDANCE",
+                    )
+                    if lesson >= 12 and "PTB" not in class_code:
+                        self.assertEqual(res["lms_spck"]["status"], "MISSING_ATTENDANCE")
+                    else:
+                        self.assertEqual(res["lms_spck"]["status"], "NOT_REQUIRED")
+                    # Strictly [LMS] Chưa điểm danh ONLY — no [LMS] Điền tóm tắt bài or [SPCK] tail!
+                    self.assertEqual(
+                        [(issue_code(x), issue_severity(x), issue_text(x)) for x in res["issues"]],
+                        [(ISSUE_CODE_LMS_QUALITY_FAIL, SEVERITY_FAIL, "[LMS] Chưa điểm danh")],
+                    )
+
+        # Case (b): explicit unmarked statuses ("", "NONE", "NOT_ATTENDED", "UNMARKED", "PENDING", "NULL")
+        unmarked_rows = [
+            {"studentKey": "stu_1", "status": ""},
+            {"studentKey": "stu_2", "status": "NOT_ATTENDED"},
+            {"studentKey": "stu_3", "status": "UNMARKED"},
+            {"studentKey": "stu_4", "status": "NONE"},
+            {"studentKey": "stu_5", "status": "PENDING"},
+            {"studentKey": "stu_6", "status": "null"},
+        ]
+        res_unmarked = evaluate_lms_slot_quality(
+            {"summary": "", "studentAttendance": unmarked_rows, "studentWorks": []},
+            class_code="VT-C4K-PTI11",
+            lesson=12,
+        )
+        self.assertEqual(res_unmarked["lms_attendance"]["status"], "MISSING_ATTENDANCE")
+        self.assertEqual(res_unmarked["lms_attendance"]["active_student_count"], 6)
+        self.assertEqual(res_unmarked["lms_comments"]["status"], "MISSING_ATTENDANCE")
+        self.assertEqual(res_unmarked["lms_spck"]["status"], "MISSING_ATTENDANCE")
+        self.assertEqual(
+            [issue_text(x) for x in res_unmarked["issues"]],
+            ["[LMS] Chưa điểm danh"],
+        )
+
+        # Mixed marked + unmarked, duplicate studentKey, or partial flag stays UNVERIFIED
+        for uncertain_slot in (
+            {
+                "summary": "Lập trình vòng lặp và kiểm tra điều kiện dừng",
+                "studentAttendance": [
+                    {"studentKey": "stu_1", "status": "ATTENDED", "comment": GOOD_COMMENT},
+                    {"studentKey": "stu_2", "status": "NOT_ATTENDED", "comment": ""},
+                ],
+                "activeClassStudentCount": 2,
+            },
+            {
+                "summary": "Lập trình vòng lặp và kiểm tra điều kiện dừng",
+                "studentAttendance": [
+                    {"studentKey": "stu_1", "status": ""},
+                    {"studentKey": "stu_1", "status": ""},
+                ],
+                "activeClassStudentCount": 2,
+            },
+            {
+                "summary": "Lập trình vòng lặp và kiểm tra điều kiện dừng",
+                "studentAttendance": [],
+                "activeClassStudentCount": 5,
+                "truncated": True,
+            },
+        ):
+            res_unc = evaluate_lms_slot_quality(
+                uncertain_slot, class_code="VT-C4K-PTI11", lesson=5
+            )
+            self.assertEqual(res_unc["lms_attendance"]["status"], "UNVERIFIED")
+            self.assertEqual(
+                [issue_code(x) for x in res_unc["issues"]],
+                [ISSUE_CODE_LMS_MANUAL_CHECK],
+            )
 
 
 if __name__ == "__main__":

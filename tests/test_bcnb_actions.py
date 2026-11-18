@@ -2815,6 +2815,92 @@ class BcnbActionTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(issues_outage, ["[SPCK] Chưa nộp (0/4)"])
 
+    def test_missing_attendance_supersedes_legacy_notes_and_unverified_dedups_summary_in_collect(
+        self,
+    ):
+        from services.bcnb_safety import merge_checker_issue_note
+        from services.zalo_bcnb_service import _collect_row_verifiable_auto_issues
+
+        proven_prior = [
+            "[LMS] Chưa ghi nội dung bài học",
+            "[LMS] Điền tóm tắt bài",
+            "[LMS] Kiểm tra tay trên LMS",
+            "[SPCK] Chưa nộp (0/6)",
+        ]
+        existing_teaching = (
+            "QC ghi tay | [LMS] Chưa ghi nội dung bài học; "
+            "[LMS] Điền tóm tắt bài; [LMS] Kiểm tra tay trên LMS; [SPCK] Chưa nộp (0/6)"
+        )
+
+        # 1. MISSING_ATTENDANCE replaces all prior LMS/SPCK notes with strictly [LMS] Chưa điểm danh
+        row_missing_att = {
+            "evidence_state": "SUBMITTED_VERIFIED",
+            "lesson": "12",
+            "lms_attendance": {"status": "MISSING_ATTENDANCE", "active_student_count": 6},
+            "lms_comments": {"status": "MISSING_ATTENDANCE"},
+            "lms_spck": {"status": "MISSING_ATTENDANCE"},
+            "lms_quality_issues": [
+                {"code": "LMS_QUALITY_FAIL", "severity": "FAIL", "text": "[LMS] Chưa điểm danh"}
+            ],
+            "quality_issues": [
+                {"code": "LMS_QUALITY_FAIL", "severity": "FAIL", "text": "[LMS] Chưa điểm danh"}
+            ],
+            "zalo_content_issues": [],
+            "scan_target": {"class_code": "VT-KIND-ROB4B04", "lesson": "12"},
+        }
+        effective, should_sync = _collect_row_verifiable_auto_issues(
+            row_missing_att,
+            existing_note=existing_teaching,
+            lms_slots_by_class={"VT-KIND-ROB4B04": [{"activeClassStudentCount": 6}]},
+            proven_auto_issues=proven_prior,
+        )
+        self.assertTrue(should_sync)
+        self.assertEqual([str(x.get("text") if isinstance(x, dict) else x) for x in effective], ["[LMS] Chưa điểm danh"])
+        merged_note = merge_checker_issue_note(
+            existing_teaching, effective, proven_auto_issues=proven_prior
+        )
+        self.assertEqual(merged_note, "QC ghi tay | [LMS] Chưa điểm danh")
+
+        # 2. When UNVERIFIED (e.g. partial fetch), legacy [LMS] Chưa ghi nội dung bài học is dropped
+        #    when current raw_lms already has [LMS] Điền tóm tắt bài
+        row_unverified = {
+            "evidence_state": "SUBMITTED_VERIFIED",
+            "lesson": "12",
+            "lms_attendance": {"status": "UNVERIFIED", "unverified_count": 1},
+            "lms_comments": {"status": "UNVERIFIED"},
+            "lms_spck": {"status": "UNVERIFIED"},
+            "lms_quality_issues": [
+                {"code": "LMS_SUMMARY_NOTE", "severity": "NOTE", "text": "[LMS] Điền tóm tắt bài"},
+                {"code": "LMS_MANUAL_CHECK", "severity": "NOTE", "text": "[LMS] Kiểm tra tay trên LMS"},
+            ],
+            "quality_issues": [
+                "[LMS] Chưa ghi nội dung bài học",
+                {"code": "LMS_SUMMARY_NOTE", "severity": "NOTE", "text": "[LMS] Điền tóm tắt bài"},
+                {"code": "LMS_MANUAL_CHECK", "severity": "NOTE", "text": "[LMS] Kiểm tra tay trên LMS"},
+            ],
+            "zalo_content_issues": [],
+            "scan_target": {"class_code": "VT-KIND-ROB4B04", "lesson": "12"},
+        }
+        eff_unv, sync_unv = _collect_row_verifiable_auto_issues(
+            row_unverified,
+            existing_note=(
+                "QC ghi tay | [LMS] Chưa ghi nội dung bài học; "
+                "[LMS] Không tải được đầy đủ dữ liệu buổi học từ LMS, cần kiểm tra thủ công"
+            ),
+            lms_slots_by_class={"VT-KIND-ROB4B04": [{"truncated": True}]},
+            proven_auto_issues=[
+                "[LMS] Chưa ghi nội dung bài học",
+                "[LMS] Không tải được đầy đủ dữ liệu buổi học từ LMS, cần kiểm tra thủ công",
+            ],
+        )
+        self.assertTrue(sync_unv)
+        eff_texts = [x.get("text") if isinstance(x, dict) else str(x) for x in eff_unv]
+        self.assertEqual(eff_texts, ["[LMS] Điền tóm tắt bài", "[LMS] Kiểm tra tay trên LMS"])
+        self.assertNotIn(
+            "[LMS] Chưa ghi nội dung bài học",
+            [x.get("text") if isinstance(x, dict) else str(x) for x in row_unverified["quality_issues"]],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1864,6 +1864,70 @@ class ReportStatusSingleSourceTests(unittest.IsolatedAsyncioTestCase):
             "",
         )
 
+    def test_missing_attendance_status_is_failed_and_blocks_bcnb_lms_tick(self) -> None:
+        from services.report_status import (
+            ISSUE_CODE_LMS_QUALITY_FAIL,
+            SEVERITY_FAIL,
+            SUBMITTED_VERIFIED,
+            _adapt_legacy_issue,
+            is_failed,
+            is_lms_ready_for_bcnb_tick,
+            resolve_lms_status,
+            resolve_spck_status,
+        )
+
+        adapted = _adapt_legacy_issue("[LMS] Chưa điểm danh")
+        self.assertEqual(adapted["code"], ISSUE_CODE_LMS_QUALITY_FAIL)
+        self.assertEqual(adapted["severity"], SEVERITY_FAIL)
+
+        # Regular & SPCK sessions (including Lesson 14 when teacher hasn't taken attendance)
+        for lesson in ("5", "12", "14"):
+            row = {
+                "class_code": "VT-KIND-ROB4B04",
+                "lesson": lesson,
+                "status": "✅ Đã báo cáo",
+                "evidence_state": SUBMITTED_VERIFIED,
+                "lms_attendance": {
+                    "status": "MISSING_ATTENDANCE",
+                    "attended_count": 0,
+                    "absent_count": 0,
+                    "unverified_count": 0,
+                    "exempt_count": 0,
+                    "total_count": 0,
+                    "active_student_count": 6,
+                },
+                "lms_comments": {
+                    "status": "EXEMPT" if lesson == "14" else "MISSING_ATTENDANCE",
+                    "submitted_count": 0,
+                },
+                "lms_spck": {
+                    "status": "MISSING_ATTENDANCE" if lesson in {"12", "14"} else "NOT_REQUIRED",
+                    "submitted_count": 0,
+                    "attended_count": 0,
+                    "exempt_count": 0,
+                },
+                "lms_quality_issues": ["[LMS] Chưa điểm danh"],
+            }
+            self.assertEqual(resolve_lms_status(row), "❌ Chưa điểm danh LMS")
+            self.assertTrue(is_failed(row))
+            ready, _reason = is_lms_ready_for_bcnb_tick(row)
+            self.assertFalse(ready)
+            if lesson in {"12", "14"}:
+                self.assertEqual(resolve_spck_status(row), "SPCK khóa (chưa điểm danh)")
+            else:
+                self.assertEqual(resolve_spck_status(row), "")
+
+        # Deferred session still yields ⏳ Chưa tới giờ kiểm tra and is_failed=False
+        deferred_row = {
+            "class_code": "VT-KIND-ROB4B04",
+            "lesson": "12",
+            "session_deferred": True,
+            "lms_attendance": {"status": "MISSING_ATTENDANCE"},
+            "lms_comments": {"status": "MISSING_ATTENDANCE"},
+        }
+        self.assertEqual(resolve_lms_status(deferred_row), "⏳ Chưa tới giờ kiểm tra")
+        self.assertFalse(is_failed(deferred_row))
+
 
 if __name__ == "__main__":
     unittest.main()

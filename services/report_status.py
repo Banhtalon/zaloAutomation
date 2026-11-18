@@ -170,6 +170,10 @@ _LMS_SUMMARY_NOTE_RE = re.compile(
     r"^\[LMS\]\s*(?:Chưa\s+ghi\s+nội\s+dung\s+bài\s+học\b|Điền\s+tóm\s+tắt\s+bài(?:\s*\.?$))",
     flags=re.IGNORECASE,
 )
+_LMS_MISSING_ATTENDANCE_RE = re.compile(
+    r"^\[LMS\]\s*Chưa\s+điểm\s+danh\b",
+    flags=re.IGNORECASE,
+)
 _LMS_ATTENDANCE_CONFLICT_NOTE_RE = re.compile(
     r"^\[LMS\]\s*(?:Lỗi\s+điểm\s+danh\b|(?:Điền\s+tóm\s+tắt\s+bài\s*,\s*)?Kiểm\s+tra\s+điểm\s+danh-NX\b)",
     flags=re.IGNORECASE,
@@ -453,6 +457,12 @@ def _adapt_legacy_issue(issue: Any) -> dict[str, str]:
         return {
             "code": ISSUE_CODE_LMS_SUMMARY_NOTE,
             "severity": SEVERITY_NOTE,
+            "text": text,
+        }
+    if _LMS_MISSING_ATTENDANCE_RE.match(text):
+        return {
+            "code": ISSUE_CODE_LMS_QUALITY_FAIL,
+            "severity": SEVERITY_FAIL,
             "text": text,
         }
     if _D2_NO_DATE_RE.match(text):
@@ -778,7 +788,13 @@ def has_spck_comment_missing_fail(row: Any) -> bool:
     st: Mapping[str, Any] = raw_st if isinstance(raw_st, Mapping) else {}
     spck = row.get("lms_spck", st.get("lms_spck"))
     if isinstance(spck, Mapping):
-        if spck.get("status") in {"NOT_REQUIRED", "EXEMPT", "UNVERIFIED", "MISSING"}:
+        if spck.get("status") in {
+            "NOT_REQUIRED",
+            "EXEMPT",
+            "UNVERIFIED",
+            "MISSING",
+            "MISSING_ATTENDANCE",
+        }:
             return False
         if "missing_comment_count" in spck:
             mc = spck.get("missing_comment_count")
@@ -823,6 +839,18 @@ def resolve_lms_status(row: Mapping[str, Any], fallback: str = "") -> str:
     st = raw_st if isinstance(raw_st, Mapping) else {}
     comments = row.get("lms_comments", st.get("lms_comments"))
     attendance = row.get("lms_attendance", st.get("lms_attendance"))
+    att_status = (
+        str(attendance.get("status") or "").strip().upper()
+        if isinstance(attendance, Mapping)
+        else ""
+    )
+    comm_status = (
+        str(comments.get("status") or "").strip().upper()
+        if isinstance(comments, Mapping)
+        else ""
+    )
+    if att_status == "MISSING_ATTENDANCE" or comm_status == "MISSING_ATTENDANCE":
+        return "❌ Chưa điểm danh LMS"
     if not isinstance(comments, Mapping):
         return fallback
     status = comments.get("status")
@@ -861,6 +889,8 @@ def resolve_spck_status(row: Mapping[str, Any]) -> str:
         return ""
     if spck.get("status") == "EXEMPT":
         return "SPCK không áp dụng (toàn bộ học viên nghỉ)"
+    if spck.get("status") == "MISSING_ATTENDANCE":
+        return "SPCK khóa (chưa điểm danh)"
     if spck.get("status") == "UNVERIFIED":
         return "SPCK chờ xác minh"
     if spck.get("status") not in {"COMPLETE", "MISSING", "PARTIAL"}:

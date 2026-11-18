@@ -2778,3 +2778,53 @@ class TodayOpsServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(by_code["VT-PTA01"]["scan_status"], "VERIFIED")
         self.assertEqual(by_code["VT-PTB01"]["scan_status"], "FAILED")
         self.assertEqual(by_code["VT-PTB01"]["error_code"], TARGET_TIMEOUT)
+
+    def test_today_normalize_and_kpis_for_missing_attendance(self) -> None:
+        from services.today_ops_service import _compute_today_kpis, _normalize_today_item
+
+        now_dt = datetime(2026, 11, 14, 15, 0, tzinfo=BUSINESS_TIMEZONE)
+        ended_missing_att = _normalize_today_item(
+            {
+                "week": 45,
+                "year": 2026,
+                "is_current_week": False,
+                "class_code": "VT-KIND-ROB4B04",
+                "lesson": "12",
+                "class_date": "14/11/2026",
+                "class_date_iso": "2026-11-14",
+                "group_name": "MindX - VT-KIND-ROB4B04 (08:00-10:00)",
+                "person": "GV Robotics",
+                "khoi": "Robotics",
+                "bcnb_session_id": "sess-rob-12",
+                "status": "✅ Đã nộp báo cáo",
+                "evidence_state": "SUBMITTED_VERIFIED",
+                "lms_attendance": {
+                    "status": "MISSING_ATTENDANCE",
+                    "attended_count": 0,
+                    "absent_count": 0,
+                    "unverified_count": 0,
+                    "exempt_count": 0,
+                    "total_count": 0,
+                    "active_student_count": 6,
+                },
+                "lms_comments": {"status": "MISSING_ATTENDANCE", "submitted_count": 0},
+                "lms_spck": {"status": "MISSING_ATTENDANCE", "submitted_count": 0},
+                "lms_quality_issues": [
+                    {"code": "LMS_QUALITY_FAIL", "severity": "FAIL", "text": "[LMS] Chưa điểm danh"}
+                ],
+            },
+            now_dt=now_dt,
+        )
+        self.assertEqual(ended_missing_att["phase"], "ENDED")
+        self.assertEqual(ended_missing_att["lms_status_text"], "❌ Chưa điểm danh LMS")
+        self.assertEqual(
+            ended_missing_att["lms_spck"]["summary_text"], "SPCK khóa (chưa điểm danh)"
+        )
+        self.assertFalse(ended_missing_att["lms_ready_for_tick"])
+        self.assertEqual(ended_missing_att["fail_count"], 1)
+        self.assertEqual(
+            [it["text"] for it in ended_missing_att["issues"]], ["[LMS] Chưa điểm danh"]
+        )
+        kpis = _compute_today_kpis([ended_missing_att])
+        self.assertEqual(kpis["lms"]["missing_attendance_count"], 1)
+        self.assertEqual(kpis["lms"]["ready_for_tick"], 0)

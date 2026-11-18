@@ -11,12 +11,14 @@ import unittest
 from unittest.mock import patch
 
 from services.lms_quality_service import (
+    evaluate_lms_slot_quality,
     evaluate_lms_spck_quality,
     fetch_lms_class_slots_via_page,
     fetch_and_evaluate_lms_quality,
 )
 from services.report_status import (
     ISSUE_CODE_LMS_MANUAL_CHECK,
+    ISSUE_CODE_LMS_QUALITY_FAIL,
     ISSUE_CODE_LMS_SPCK_MISSING,
     ISSUE_CODE_LMS_SPCK_NOTE,
     issue_code,
@@ -44,9 +46,36 @@ const good = (i, cls = 'cls', session = 'slot') => ({
         comment: '1. Ý tưởng: Sản phẩm thiết kế giao diện rõ ràng, có bố cục đẹp. 2. Chức năng: Hoàn thành tốt tính năng và tương tác.'}
 });
 const response = (data) => ({ok: true, status: 200, json: async () => data});
+const globalClassQueries = [];
 global.fetch = async (_url, req) => {
     const b = JSON.parse(req.body);
     if (b.operationName === 'classesMissAttendOrComment') {
+        globalClassQueries.push(b.variables);
+        if (mode === 'tier2_short_token_and_centres') {
+            const qSearch = String(b.variables.search || '');
+            const qCentres = Array.isArray(b.variables.centres) ? b.variables.centres : [];
+            if (!qCentres.includes('62d170076063450019b720be')) {
+                return response({data: {classesMissAttendOrComment: {data: []}}});
+            }
+            if (qSearch === 'VT-KIND-ROB4B04') {
+                return response({data: {classesMissAttendOrComment: {data: [{
+                    id: 'cls_rob', name: 'VT-KIND-ROB4B04', students: roster,
+                    slots: [{ _id: 'slot_rob_12', index: 11, date: '2020-01-01T00:00:00Z', summary: '', studentAttendance: [] }]
+                }]}}});
+            }
+            if (qSearch === 'PTI11') {
+                return response({data: {classesMissAttendOrComment: {data: [
+                    { id: 'cls_other_centre', name: 'HN-C4K-PTI11', students: roster, slots: [{ _id: 'slot_hn', index: 4, date: '2020-01-01T00:00:00Z', summary: 'HN', studentAttendance: [] }] },
+                    { id: 'cls_pti', name: 'VT-C4K-PTI11', students: roster, slots: [{ _id: 'slot_pti_5', index: 4, date: '2020-01-01T00:00:00Z', summary: 'Buổi 5: Python cơ bản', studentAttendance: [] }] }
+                ]}}});
+            }
+            if (qSearch === 'GB42') {
+                return response({data: {classesMissAttendOrComment: {data: [
+                    { id: 'cls_gb42', name: 'VT-C4K-GB42-HB', students: roster, slots: [{ _id: 'slot_gb_3', index: 2, date: '2020-01-01T00:00:00Z', summary: 'Buổi 3: Scratch', studentAttendance: [] }] }
+                ]}}});
+            }
+            return response({data: {classesMissAttendOrComment: {data: []}}});
+        }
         const codes = mode === 'budget' ? args.classCodes : [args.classCodes[0]];
         return response({data: {classesMissAttendOrComment: {data: codes.map((name, n) => ({
             id: 'cls' + (mode === 'budget' ? n : ''), name, students: roster,
@@ -97,7 +126,7 @@ global.fetch = async (_url, req) => {
 };
 (async () => {
     const data = await eval('(' + script + ')')(args);
-    process.stdout.write(JSON.stringify({data, requests}));
+    process.stdout.write(JSON.stringify({data, requests, classQueries: globalClassQueries}));
 })().catch((err) => {process.stderr.write(String(err)); process.exitCode = 1;});
 """
 
@@ -109,6 +138,7 @@ class _NodePage:
         self.mode = mode
         self.count = count
         self.requests: list[dict] = []
+        self.class_queries: list[dict] = []
 
     async def evaluate(self, script: str, args: dict) -> dict:
         payload = (
@@ -137,6 +167,7 @@ class _NodePage:
         )
         parsed = json.loads(result.stdout)
         self.requests = parsed["requests"]
+        self.class_queries = parsed.get("classQueries") or []
         return parsed["data"]
 
 
@@ -303,3 +334,53 @@ class SpckSessionFetchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(res_dup["bad_title_count"], 3)
         self.assertEqual([issue_code(v) for v in res_dup["issues"]], [ISSUE_CODE_LMS_SPCK_NOTE])
         self.assertEqual([issue_text(v) for v in res_dup["issues"]], ["[SPCK] Bổ sung tên SP"])
+
+    async def test_tier2_selective_rescan_passes_centres_falls_back_to_short_token_and_flags_missing_attendance(
+        self,
+    ) -> None:
+        from googleform_autosubmit.config import Config
+
+        page = _NodePage("tier2_short_token_and_centres", 6)
+        lms_url_with_centres = (
+            'https://lms.mindx.edu.vn/admin/class-sessions?centres=["62d170076063450019b720be"]'
+        )
+        with (
+            patch.dict(os.environ, {"ZALO_QUALITY_ISOLATED": "0"}),
+            patch.object(Config, "LMS_URL", lms_url_with_centres),
+        ):
+            data = await fetch_lms_class_slots_via_page(
+                page,
+                class_names=["VT-KIND-ROB4B04", "VT-C4K-PTI11", "VT-C4K-GB42-HB"],
+            )
+
+        self.assertNotIn("Synthetic Person", json.dumps(data))
+        self.assertNotIn("raw_", json.dumps(data))
+        # Every Tier-2 query must include centres from LMS_URL
+        self.assertTrue(page.class_queries)
+        for q_vars in page.class_queries:
+            self.assertEqual(q_vars.get("centres"), ["62d170076063450019b720be"])
+        searched_terms = [q.get("search") for q in page.class_queries]
+        self.assertIn("VT-C4K-PTI11", searched_terms)
+        self.assertIn("PTI11", searched_terms)
+        self.assertIn("VT-C4K-GB42-HB", searched_terms)
+        self.assertIn("GB42-HB", searched_terms)
+        self.assertIn("GB42", searched_terms)
+
+        # Exact class identity preserved (HN-C4K-PTI11 decoy ignored, VT-C4K-PTI11 matched)
+        self.assertFalse(data["VT-C4K-PTI11"][0].get("fetch_error", False))
+        self.assertEqual(data["VT-C4K-PTI11"][0]["_id"], "slot_pti_5")
+        self.assertEqual(data["VT-C4K-PTI11"][0]["activeClassStudentCount"], 6)
+        self.assertFalse(data["VT-C4K-GB42-HB"][0].get("fetch_error", False))
+        self.assertEqual(data["VT-C4K-GB42-HB"][0]["_id"], "slot_gb_3")
+
+        # VT-KIND-ROB4B04 B12 has activeClassStudentCount=6 (ignoring 20 inactiveInClass=false) and studentAttendance=[]
+        rob_slot = data["VT-KIND-ROB4B04"][0]
+        self.assertEqual(rob_slot["activeClassStudentCount"], 6)
+        rob_eval = evaluate_lms_slot_quality(
+            rob_slot, class_code="VT-KIND-ROB4B04", khoi="Robotics", lesson=12
+        )
+        self.assertEqual(rob_eval["lms_attendance"]["status"], "MISSING_ATTENDANCE")
+        self.assertEqual(
+            [(issue_code(x), issue_text(x)) for x in rob_eval["issues"]],
+            [(ISSUE_CODE_LMS_QUALITY_FAIL, "[LMS] Chưa điểm danh")],
+        )

@@ -3592,6 +3592,38 @@ async function checkTodayLivePageWorkflow() {
         lms_quality_issues: ['[LMS] Chưa NX (1/4)', '[SPCK] Chưa NX (1/4)'],
       };
       const splitMucA = splitCheckerIssueNoteInJs('QC ghi chú tay | [LMS] Điền tóm tắt bài; [SPCK] Bổ sung tên SP; [Zalo] Thiếu ngày/buổi');
+      const missingAttendanceRow = {
+        lesson: '12',
+        status: '✅ Đã nộp – Có minh chứng',
+        evidence_state: 'SUBMITTED_VERIFIED',
+        lms_attendance: { status: 'MISSING_ATTENDANCE', attended_count: 0, absent_count: 0, active_student_count: 6 },
+        lms_comments: { status: 'MISSING_ATTENDANCE', submitted_count: 0 },
+        lms_spck: { status: 'MISSING_ATTENDANCE', submitted_count: 0 },
+        lms_quality_issues: [{ code: 'LMS_QUALITY_FAIL', severity: 'FAIL', text: '[LMS] Chưa điểm danh' }],
+      };
+      const todayMissingAtt = {
+        phase: 'ENDED',
+        lesson: '12',
+        is_robotics: true,
+        is_spck_session: true,
+        requires_spck: true,
+        zalo_category: 'DONE',
+        lms_checked: true,
+        lms_ready_for_tick: false,
+        lms_attendance: { status: 'MISSING_ATTENDANCE', attended_count: 0, absent_count: 0, active_student_count: 6 },
+        lms_comments: { status: 'MISSING_ATTENDANCE', submitted_count: 0 },
+        lms_spck: { status: 'MISSING_ATTENDANCE', summary_text: 'SPCK khóa (chưa điểm danh)', detail_notes: [] },
+        issues: [{ code: 'LMS_QUALITY_FAIL', severity: 'FAIL', text: '[LMS] Chưa điểm danh' }],
+      };
+      const legacyPlusMucARow = {
+        qc_issue_note: 'QC nhắc riêng | [LMS] Chưa ghi nội dung bài học; [LMS] Không tải được đầy đủ dữ liệu buổi học từ LMS, cần kiểm tra thủ công; [Zalo] Báo cáo không ghi ngày/buổi',
+        lms_quality_issues: ['[LMS] Điền tóm tắt bài', '[LMS] Kiểm tra tay trên LMS'],
+        zalo_content_issues: ['[Zalo] Thiếu ngày/buổi'],
+      };
+      const compoundSummaryDedupRow = {
+        qc_issue_note: '[LMS] Chưa ghi nội dung bài học',
+        lms_quality_issues: ['[LMS] Điền tóm tắt bài, viết kỹ NX', '[LMS] Chưa ghi nội dung bài học'],
+      };
       return collectTodayMissingReasons(ongoingB13).length === 0
         && !isTodayItemMissingLms(ongoingB13)
         && isTodaySpckComplete(allAbsentExempt)
@@ -3599,6 +3631,21 @@ async function checkTodayLivePageWorkflow() {
         && !isTodaySpckComplete(missingSpckComments)
         && isTodayItemMissingLms(missingSpckComments)
         && collectTodayMissingReasons(missingSpckComments).includes('[SPCK] Chưa NX (2/4)')
+        && resolveDashboardRowLmsStatus(missingAttendanceRow) === '❌ Chưa điểm danh LMS'
+        && resolveDashboardRowSpckStatus(missingAttendanceRow) === 'SPCK khóa (chưa điểm danh)'
+        && resolveRowIsFailed(missingAttendanceRow) === true
+        && resolveRowIssueSeverity(missingAttendanceRow) === 'FAIL'
+        && resolveDashboardRowIssueDescription(missingAttendanceRow) === '[LMS] Chưa điểm danh'
+        && !isRowSpckOnlyWarningFail(
+          missingAttendanceRow,
+          resolveRowCategory(missingAttendanceRow),
+          resolveDashboardRowLmsStatus(missingAttendanceRow),
+          resolveDashboardRowIssueDescription(missingAttendanceRow),
+        )
+        && isTodayItemMissingLms(todayMissingAtt)
+        && JSON.stringify(collectTodayMissingReasons(todayMissingAtt)) === JSON.stringify(['Chưa điểm danh LMS'])
+        && resolveDashboardRowIssueDescription(legacyPlusMucARow) === 'QC nhắc riêng; [LMS] Điền tóm tắt bài; [LMS] Kiểm tra tay trên LMS; [Zalo] Thiếu ngày/buổi'
+        && resolveDashboardRowIssueDescription(compoundSummaryDedupRow) === '[LMS] Điền tóm tắt bài, viết kỹ NX'
         && hasRowSpckMissingFail(mucASpckOnlyRow)
         && isRowSpckOnlyWarningFail(
           mucASpckOnlyRow,

@@ -25,6 +25,7 @@ from services.bcnb_actions import (
 )
 from services.bcnb_safety import (
     extract_bcnb_extended_row_fields,
+    fold_text,
     merge_checker_issue_note,
     preserve_bcnb_note_text,
     resolve_extended_bcnb_columns,
@@ -48,10 +49,13 @@ from services.report_status import (
     CATEGORY_EXEMPT,
     CATEGORY_LATE,
     ISSUE_CODE_LEGACY_UNCLASSIFIED_FAIL,
+    ISSUE_CODE_LMS_ATTENDANCE_CONFLICT_NOTE,
+    ISSUE_CODE_LMS_COMMENT_NOTE,
     ISSUE_CODE_LMS_MANUAL_CHECK,
     ISSUE_CODE_LMS_SPCK_COMMENT_MISSING,
     ISSUE_CODE_LMS_SPCK_MISSING,
     ISSUE_CODE_LMS_SPCK_NOTE,
+    ISSUE_CODE_LMS_SUMMARY_NOTE,
     SUBMITTED_EVIDENCE_STATES,
     VERIFIED_EVIDENCE_STATES,
     categorize_row,
@@ -857,7 +861,13 @@ def _collect_row_verifiable_auto_issues(
         if isinstance(comments_meta, Mapping)
         else ""
     )
-    comments_verified = comments_status in {"COMPLETE", "REVIEW", "MISSING", "EXEMPT"}
+    comments_verified = comments_status in {
+        "COMPLETE",
+        "REVIEW",
+        "MISSING",
+        "MISSING_ATTENDANCE",
+        "EXEMPT",
+    }
     spck_status = (
         str(spck.get("status") or "").strip().upper()
         if isinstance(spck, Mapping)
@@ -888,6 +898,7 @@ def _collect_row_verifiable_auto_issues(
             "COMPLETE",
             "PARTIAL",
             "MISSING",
+            "MISSING_ATTENDANCE",
             "EXEMPT",
         }
         or spck_attendance_unverified
@@ -924,6 +935,18 @@ def _collect_row_verifiable_auto_issues(
     )
 
     current_raw_texts = {issue_text(item) for item in raw_lms if issue_text(item)}
+    raw_lms_codes = {issue_code(item) for item in raw_lms if issue_code(item)}
+    raw_lms_has_summary_note = ISSUE_CODE_LMS_SUMMARY_NOTE in raw_lms_codes or any(
+        "dien tom tat bai" in fold_text(issue_text(item)) for item in raw_lms
+    )
+    dedup_semantic_codes = {
+        ISSUE_CODE_LMS_SUMMARY_NOTE,
+        ISSUE_CODE_LMS_COMMENT_NOTE,
+        ISSUE_CODE_LMS_ATTENDANCE_CONFLICT_NOTE,
+        ISSUE_CODE_LMS_SPCK_MISSING,
+        ISSUE_CODE_LMS_SPCK_COMMENT_MISSING,
+        ISSUE_CODE_LMS_SPCK_NOTE,
+    }
     superseded_items: list[Any] = []
     if spck_superseded:
         superseded_items.extend(
@@ -933,11 +956,24 @@ def _collect_row_verifiable_auto_issues(
         superseded_items.extend(
             item for item in existing_lms_auto if not _is_spck_issue_item(item)
         )
+    if not (lms_slots_by_class is None or lms_unavailable):
+        already_superseded_ids = {id(item) for item in superseded_items}
+        for item in existing_lms_auto:
+            if id(item) in already_superseded_ids:
+                continue
+            c_existing = issue_code(item)
+            if (
+                c_existing == ISSUE_CODE_LMS_SUMMARY_NOTE and raw_lms_has_summary_note
+            ) or (c_existing in dedup_semantic_codes and c_existing in raw_lms_codes):
+                superseded_items.append(item)
+    superseded_texts: set[str] = set()
     if superseded_items:
         history = list(result.get("lms_previous_quality_issues") or [])
         history_texts = {issue_text(item) for item in history}
         for item in superseded_items:
             t_txt = issue_text(item)
+            if t_txt and t_txt not in current_raw_texts:
+                superseded_texts.add(t_txt)
             if t_txt and t_txt not in history_texts and t_txt not in current_raw_texts:
                 history_texts.add(t_txt)
                 history.append(item)
@@ -959,11 +995,18 @@ def _collect_row_verifiable_auto_issues(
         ]
     elif has_lms_manual_check or comments_unverified or spck_unverified:
         # Preserve prior verified [LMS] FAIL issues while also writing the
-        # single-class/slot LMS_MANUAL_CHECK NOTE issue to Mô tả vấn đề (D4).
+        # single-class/slot LMS_MANUAL_CHECK NOTE issue to Mô tả vấn đề (D4),
+        # dropping any legacy duplicate already represented in raw_lms.
         lms_auto = [
             x
             for x in existing_lms_auto
             if issue_code(x) != ISSUE_CODE_LMS_MANUAL_CHECK
+            and not (
+                issue_code(x) == ISSUE_CODE_LMS_SUMMARY_NOTE and raw_lms_has_summary_note
+            )
+            and not (
+                issue_code(x) in dedup_semantic_codes and issue_code(x) in raw_lms_codes
+            )
         ]
         seen_lms_auto = {issue_text(x) for x in lms_auto if issue_text(x)}
         for item in raw_lms:
@@ -973,6 +1016,21 @@ def _collect_row_verifiable_auto_issues(
                 lms_auto.append(item)
     else:
         lms_auto = list(raw_lms)
+
+    if superseded_texts:
+        for list_field in ("lms_quality_issues", "quality_issues"):
+            if isinstance(result.get(list_field), list):
+                result[list_field] = [
+                    x for x in result[list_field] if issue_text(x) not in superseded_texts
+                ]
+            if isinstance(result.get("scan_target"), dict) and isinstance(
+                result["scan_target"].get(list_field), list
+            ):
+                result["scan_target"][list_field] = [
+                    x
+                    for x in result["scan_target"][list_field]
+                    if issue_text(x) not in superseded_texts
+                ]
 
     combined = [*zalo_auto, *lms_auto]
     if existing_auto and (zalo_indeterminate or lms_indeterminate):

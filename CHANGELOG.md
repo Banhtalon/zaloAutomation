@@ -4,6 +4,24 @@ Tài liệu này ghi lại toàn bộ quá trình hình thành, phát triển ki
 
 ---
 
+## [2026-11-18] — Sửa cắt khung ảnh minh chứng Zalo, phát hiện `[LMS] Chưa điểm danh` (`MISSING_ATTENDANCE`), sửa Tier-2 `fetchOneCode` & Khử trùng Legacy + Mức A (`DEC-051`)
+
+- **Sửa cắt khung ảnh minh chứng Zalo không mất chữ bên trái & loại bỏ khoảng trống xám bên phải (`services/zalo_scan_evidence.py`, `tests/test_zalo_scan_evidence.py`)**:
+  - Ưu tiên neo trực tiếp khung chat bên phải (`#messageView`, `#chatView`, `#main-tab`, `main` hoặc cột chứa header / `#richInput` / `#input_line_0`) trước khi fallback sang tổ tiên `#contact-search-input` (`220 <= width <= 385`, bỏ cộng lấn `+16px`); áp dụng chốt chặn vô điều kiện `chatLeft <= minContentLeft - 24` (loại trừ `sidebarRoot`) để không bao giờ cắt lẹm tiêu đề nhóm, avatar, tin nhắn hoặc thanh nhập liệu.
+  - Xử lý các phần tử bọc rộng toàn khung chat (`r.width >= (vpW - chatLeft) * 0.85` như dòng mốc ngày căn giữa) bằng cách đo biên phải của phần tử nội dung con thực tế thay vì kéo `clipRight` ra sát `vpW` (`1920px`).
+- **Phát hiện `MISSING_ATTENDANCE` (`[LMS] Chưa điểm danh`) & Đồng bộ trạng thái lỗi (`services/lms_quality_service.py`, `services/report_status.py`, `services/zalo_bcnb_service.py`, `repositories/report_repository.py`, `services/report_email_service.py`, `services/today_ops_service.py`, `static/js/jobs.js`, `static/js/today.js`)**:
+  - Tính số nguyên `activeClassStudentCount` (`0` PII) cho từng lớp trong `formatItemSlots`; nhận diện sạch `MISSING_ATTENDANCE` khi buổi học đã kết thúc tải hợp lệ (`!partial`) có học viên đang theo học nhưng `studentAttendance == []` hoặc toàn bộ dòng mang trạng thái chưa điểm danh tường minh (`""`, `"NONE"`, `"NOT_ATTENDED"`, `"UNMARKED"`, `"PENDING"`, `"NULL"`).
+  - Thực thi đúng quy tắc câu chữ của Owner: trên Teaching và kết quả đánh giá slot chỉ xuất duy nhất **`[LMS] Chưa điểm danh`** (`ISSUE_CODE_LMS_QUALITY_FAIL`, `SEVERITY_FAIL`), bỏ toàn bộ phần đuôi `[LMS] Điền tóm tắt bài` / `[SPCK]` phụ và tự động thay thế sạch ghi chú `[LMS]`/`[SPCK]` cũ trên Teaching.
+  - Chuẩn hóa hiển thị `"❌ Chưa điểm danh LMS"` (`is_failed=True`, chặn tuyệt đối tích `NX LMS`), `"SPCK khóa (chưa điểm danh)"`, rút gọn URL Gmail `"Chưa ĐD LMS"` và cập nhật KPI/nhắc việc trên `Lớp Hôm Nay`.
+- **Sửa Tier-2 Selective Rescan (`fetchOneCode`) & Khử trùng câu chữ Legacy + Mức A (`services/lms_quality_service.py`, `services/zalo_bcnb_service.py`, `repositories/report_repository.py`, `static/js/jobs.js`)**:
+  - Bổ sung `centres: activeCentres` và `itemsPerPage: 50` cho Tier-2 `fetchOneCode` (khi quét chọn lọc `<= 3` lớp); tự động thử lại theo hậu tố mã lớp ngắn (kể cả lớp `-HB` như `VT-C4K-PTI11 -> PTI11`, `VT-C4K-GB42-HB -> GB42-HB -> GB42`) khi `search: code` trả `0` kết quả mà vẫn giữ lọc khớp tuyệt đối `itemName === code`.
+  - Khử trùng tương đương ngữ nghĩa giữa ghi chú lịch sử và ghi chú Mức A (`[LMS] Chưa ghi nội dung bài học` -> `[LMS] Điền tóm tắt bài`, `cần kiểm tra thủ công` -> `Kiểm tra tay trên LMS`, `[Zalo] Báo cáo không ghi ngày/buổi` -> `[Zalo] Thiếu ngày/buổi`) trên Teaching, Dashboard, Báo cáo tuần, CSV và Email Quản lý.
+- **Tệp thay đổi (21 files)**: `repositories/report_repository.py`, `services/{lms_quality_service,report_email_service,report_status,today_ops_service,zalo_bcnb_service,zalo_scan_evidence}.py`, `static/js/{jobs,today}.js`, `tests/{check_template_js.js,test_bcnb_actions,test_lms_attendance_quality,test_lms_quality_service,test_report_issue_display,test_report_status,test_spck_session_fetch,test_today_ops_service,test_zalo_scan_evidence}.py`, `CHANGELOG.md`, `PROJECT_DECISIONS.md`, `PROJECT_STATE.md`.
+- **Bằng chứng kiểm chứng (`[FULL GATE]`)**:
+  - `.\CHECK_QUALITY.ps1 -Isolated`: `exit 0` (`QUALITY GATE PASSED`), `770/770` regression tests `OK` (`308.379s`), branch coverage `80.1%`, Ruff `0`, Mypy `0` lỗi trên `80` source files, Phase 3/4/5/6/7/8/9/9A/9B PASS, `secrets=0`, `migrations=[1, 2, 3, 4]`.
+  - `node tests/check_template_js.js` -> `template-js-contract-ok scripts=8 handlers=46 behavior=14` (`exit 0`); offline `graphify update .` -> `5176` nodes, `15639` edges, `180` communities (`exit 0`).
+  - Review độc lập (`verifier-2` trên Carbon High, read-only swarm `#25`): `VERDICT: PASS` (`[P0]=0, [P1]=0, [P2]=0`).
+
 ## [2026-11-18] — Tối ưu tốc độ Phase 3 BCNB, lưu `complete_write` từng dòng, Quy tắc Tiêu đề SPCK mới & Chuẩn Ghi chú QC ngắn gọn Mức A (`DEC-050`)
 
 - **Chặng 1 — Tốc độ Phase 3 BCNB, lưu trạng thái ghi từng dòng & nâng đệm timeout (`services/zalo_bcnb_service.py`, `services/zalo_parallel_service.py`, `core/settings.py`, `googleform_autosubmit/config.py`, `.env.example`)**:
