@@ -47,7 +47,7 @@ class AppSettings:
     lock_root: str = "runtime/locks"
     max_concurrent_jobs: int = 1
     max_queued_jobs: int = 8
-    job_timeout_seconds: int = 30 * 60
+    job_timeout_seconds: int = 60 * 60
     lease_timeout_seconds: int = 90
     shutdown_grace_seconds: int = 20
     queue_poll_seconds: float = 0.25

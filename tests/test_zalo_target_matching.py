@@ -70,7 +70,7 @@ class ZaloTargetMatchingTests(unittest.TestCase):
         self.assertTrue(match.matches)
         self.assertEqual(match.decision, TARGET_DATE_TYPO_CORRECTED)
         self.assertTrue(match.corrected_teacher_date)
-        self.assertIn("ghi sai ngày 18/10", match.note or "")
+        self.assertEqual(match.note, "[Zalo] Sai ngày (18/10)")
 
     def test_ambiguous_candidate_without_corroborating_lesson_does_not_match(self) -> None:
         target = self._target()
@@ -97,7 +97,7 @@ class ZaloTargetMatchingTests(unittest.TestCase):
         )
         self.assertTrue(m_no_date.matches)
         self.assertEqual(m_no_date.decision, TARGET_SAME_DAY_NO_DATE)
-        self.assertEqual(m_no_date.note, "[Zalo] Báo cáo không ghi ngày/buổi")
+        self.assertEqual(m_no_date.note, "[Zalo] Thiếu ngày/buổi")
 
         # 2. Same day, wrong date (18/10) without conflicting lesson -> matches with TARGET_SAME_DAY_WRONG_DATE
         m_wrong_date = resolve_report_target(
@@ -110,7 +110,7 @@ class ZaloTargetMatchingTests(unittest.TestCase):
         self.assertTrue(m_wrong_date.matches)
         self.assertEqual(m_wrong_date.decision, TARGET_SAME_DAY_WRONG_DATE)
         self.assertTrue(m_wrong_date.corrected_teacher_date)
-        self.assertEqual(m_wrong_date.note, "[Zalo] Báo cáo ghi sai ngày (18/10)")
+        self.assertEqual(m_wrong_date.note, "[Zalo] Sai ngày (18/10)")
 
         # 3. Same day, future wrong date (28/10) without conflicting lesson -> matches with TARGET_SAME_DAY_WRONG_DATE
         m_future_wrong = resolve_report_target(
@@ -122,7 +122,7 @@ class ZaloTargetMatchingTests(unittest.TestCase):
         )
         self.assertTrue(m_future_wrong.matches)
         self.assertEqual(m_future_wrong.decision, TARGET_SAME_DAY_WRONG_DATE)
-        self.assertEqual(m_future_wrong.note, "[Zalo] Báo cáo ghi sai ngày (28/10)")
+        self.assertEqual(m_future_wrong.note, "[Zalo] Sai ngày (28/10)")
 
         # 3b. Same day, wrong date (18/10) WITH matching lesson (Buổi 5) -> still TARGET_SAME_DAY_WRONG_DATE (NOTE, not FAIL)
         m_same_day_lesson_match_wrong_date = resolve_report_target(
@@ -139,7 +139,7 @@ class ZaloTargetMatchingTests(unittest.TestCase):
         )
         self.assertEqual(
             m_same_day_lesson_match_wrong_date.note,
-            "[Zalo] Báo cáo ghi sai ngày (18/10)",
+            "[Zalo] Sai ngày (18/10)",
         )
 
         # 4. Unreadable ui_sent_at -> REVIEW (TARGET_SESSION_AMBIGUOUS)
@@ -199,7 +199,7 @@ class ZaloTargetMatchingTests(unittest.TestCase):
         self.assertTrue(m_late_valid.matches)
         self.assertEqual(m_late_valid.decision, TARGET_EXACT)
 
-        # 9. Exact lesson on a later day without a date uses clean "không ghi ngày" wording
+        # 9. Exact lesson on a later day without a date uses concise "[Zalo] Thiếu ngày" wording
         m_late_no_date_with_lesson = resolve_report_target(
             target,
             ui_sent_at=datetime(2026, 10, 26, tzinfo=BUSINESS_TIMEZONE),
@@ -209,7 +209,7 @@ class ZaloTargetMatchingTests(unittest.TestCase):
         )
         self.assertTrue(m_late_no_date_with_lesson.matches)
         self.assertEqual(m_late_no_date_with_lesson.decision, TARGET_DATE_TYPO_CORRECTED)
-        self.assertIn("không ghi ngày", m_late_no_date_with_lesson.note or "")
+        self.assertEqual(m_late_no_date_with_lesson.note, "[Zalo] Thiếu ngày")
         self.assertNotIn("ghi sai ngày không rõ ngày", m_late_no_date_with_lesson.note or "")
 
 

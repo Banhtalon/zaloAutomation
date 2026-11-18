@@ -4205,6 +4205,195 @@ class LandingReadinessTests(unittest.IsolatedAsyncioTestCase):
                     "LESSON_14_EXEMPTION",
                 )
 
+    async def test_mid_week_cancellation_preserves_verified_row_in_sqlite_batch_repository(self):
+        import os
+        from pathlib import Path
+        import tempfile
+        from core.settings import AppSettings
+        from db import database
+        from googleform_autosubmit.config import Config
+        from repositories.zalo_batch_repository import ZaloBatchRepository
+
+        if "JOB_TIMEOUT_SECONDS" not in os.environ:
+            self.assertEqual(Config.JOB_TIMEOUT_SECONDS, 3600)
+            self.assertEqual(AppSettings.from_config().job_timeout_seconds, 3600)
+
+        targets = [
+            {
+                "group_name": "MindX - VT-JSB01",
+                "person": "GV 1",
+                "class_code": "VT-JSB01",
+                "lesson": "5",
+                "class_date": "11/11/2026",
+                "class_date_iso": "2026-11-11",
+                "week": 46,
+                "year": 2026,
+            },
+            {
+                "group_name": "MindX - VT-JSB02",
+                "person": "GV 2",
+                "class_code": "VT-JSB02",
+                "lesson": "6",
+                "class_date": "12/11/2026",
+                "class_date_iso": "2026-11-12",
+                "week": 46,
+                "year": 2026,
+            },
+        ]
+        scan_plan = {
+            "selected_weeks": [{"week": 45, "year": 2026}, {"week": 46, "year": 2026}],
+            "latest_week": {"week": 46, "year": 2026},
+            "targets": targets,
+        }
+
+        async def _fake_scan(_page, *, target, **_kwargs):
+            return {
+                "group": target["group_name"],
+                "person": target["person"],
+                "status": "✅ Đã nộp – Có minh chứng",
+                "evidence_state": "SUBMITTED_VERIFIED",
+                "scan_target": dict(target),
+                "evidence": {
+                    "screenshot_path": f"/api/evidence/530/{target['class_code']}.png",
+                    "artifact_sha256": "f" * 64,
+                    "classifier_result": {"decision": "SUBMITTED", "matched_ui_sent_at": target["class_date"]},
+                    "date_context": {
+                        "target_week": target["week"],
+                        "target_year": target["year"],
+                        "target_lesson": target["lesson"],
+                        "target_class_date": target["class_date_iso"],
+                    },
+                },
+            }
+
+        def _make_bcnb_row(target: dict) -> dict:
+            cb = AsyncMock()
+            cb.count.return_value = 1
+            cb.is_checked.return_value = False
+            cell = SimpleNamespace(locator=lambda _sel: SimpleNamespace(first=cb))
+            return {
+                "row": SimpleNamespace(),
+                "cells": [cell] * 10,
+                "week": 46,
+                "year": 2026,
+                "ma_lop": target["class_code"],
+                "buoi_so": target["lesson"],
+                "ngay_hoc": target["class_date"],
+                "ngay_hoc_iso": target["class_date_iso"],
+                "zalo_deadline": f"20:00 {target['class_date']}",
+                "bcnb_session_id": f"sid-{target['class_code']}",
+                "nx_zalo_checked": False,
+                "nx_lms_checked": True,
+                "qc_issue_note": "",
+                "checker_note_unreadable": False,
+            }
+
+        tick_calls = 0
+
+        async def _tick_then_timeout(**kwargs):
+            nonlocal tick_calls
+            tick_calls += 1
+            if tick_calls == 1:
+                return "VERIFIED"
+            raise asyncio.CancelledError("JOB_TIMEOUT_SECONDS exceeded on target 2")
+
+        browser = FakeParallelBrowser([{}, {}, {}, {}])
+        runtime = SimpleNamespace(
+            external=SimpleNamespace(browser=browser, lms_quality=None),
+            zalo_scan_concurrency=1,
+            bcnb_write_concurrency=1,
+            batch_systemic_failure_limit=3,
+            batch_abnormal_percent_limit=20,
+        )
+        job_repo = SimpleNamespace(
+            ensure_not_cancelled=AsyncMock(),
+            update_job=AsyncMock(),
+        )
+        audit_repo = SimpleNamespace(
+            record_intent=AsyncMock(return_value=({"id": 1, "outcome": "INTENT_RECORDED"}, True)),
+            complete_action=AsyncMock(),
+            list_checker_note_audits_for_class=AsyncMock(return_value=[]),
+        )
+        evidence_repo = SimpleNamespace(register_scan_results=AsyncMock())
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            db_file = str(Path(tmp_dir) / "mid_week_cancel.db")
+            with (
+                patch.object(database, "DB_PATH", db_file),
+                patch.object(parallel_service, "_create_production_backup", AsyncMock()),
+                patch.object(
+                    parallel_service,
+                    "ensure_zalo_history_synced",
+                    AsyncMock(return_value={"verified": True, "reason": "fixture"}),
+                ),
+                patch.object(parallel_service, "_login_bcnb_if_needed", AsyncMock()),
+                patch.object(parallel_service, "_scan_one_target", side_effect=_fake_scan),
+                patch.object(
+                    parallel_service,
+                    "fetch_and_evaluate_lms_quality",
+                    AsyncMock(return_value={"VT-JSB01": [], "VT-JSB02": []}),
+                ),
+                patch(
+                    "services.zalo_bcnb_service._read_bcnb_schedule_rows",
+                    AsyncMock(
+                        side_effect=lambda _p, *, week, **_kw: (
+                            [_make_bcnb_row(targets[0]), _make_bcnb_row(targets[1])]
+                            if int(week) == 46
+                            else []
+                        )
+                    ),
+                ),
+                patch(
+                    "services.zalo_bcnb_service.resolve_report_columns",
+                    AsyncMock(return_value=(1, 2, 5)),
+                ),
+                patch(
+                    "services.zalo_bcnb_service.execute_verified_checkbox_action",
+                    AsyncMock(side_effect=_tick_then_timeout),
+                ),
+                patch(
+                    "services.zalo_bcnb_service.fetch_and_evaluate_lms_quality",
+                    AsyncMock(return_value={"VT-JSB01": [], "VT-JSB02": []}),
+                ),
+                patch.object(parallel_service, "log_message"),
+            ):
+                database.init_db()
+                async with database.get_db_connection() as db:
+                    await db.execute(
+                        "INSERT INTO scan_jobs (id, job_type, status, created_at) "
+                        "VALUES (530, 'ZALO_SCAN', 'RUNNING', '2026-11-15T10:00:00Z')"
+                    )
+                    await db.commit()
+
+                with self.assertRaises(asyncio.CancelledError):
+                    await parallel_service.run_and_finalize_parallel_zalo_batch(
+                        job_id=530,
+                        execution_mode="production",
+                        scan_plan=scan_plan,
+                        today=datetime(2026, 11, 15, 0, 0, tzinfo=BUSINESS_TIMEZONE),
+                        scan_started_at=datetime(2026, 11, 15, 10, 0, tzinfo=BUSINESS_TIMEZONE),
+                        evidence_root=tmp_dir,
+                        screenshots_dir=tmp_dir,
+                        runtime=runtime,
+                        job_repo=job_repo,
+                        audit_repo=audit_repo,
+                        evidence_repo=evidence_repo,
+                        reconciliation_only=False,
+                    )
+
+                persisted_rows = await ZaloBatchRepository().list_for_job(530)
+
+        self.assertEqual(len(persisted_rows), 2)
+        row_1, row_2 = persisted_rows[0], persisted_rows[1]
+        self.assertEqual(row_1["class_code"], "VT-JSB01")
+        self.assertEqual(row_1["write_status"], "VERIFIED")
+        self.assertIsNone(row_1["error_code"])
+        self.assertIs(row_1["result"].get("nx_zalo_checked"), True)
+
+        self.assertEqual(row_2["class_code"], "VT-JSB02")
+        self.assertEqual(row_2["write_status"], "OUTCOME_UNKNOWN")
+        self.assertEqual(row_2["error_code"], "PARENT_INTERRUPTED")
+
 
 
 if __name__ == "__main__":

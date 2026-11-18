@@ -1,22 +1,26 @@
 # PROJECT STATE — Zalo Automation
 
-> Snapshot trạng thái hiện hành, cập nhật **2026-11-15**. Source/runtime kiểm chứng mới có độ tin cậy cao hơn tài liệu. Không dùng file này làm quyền chạy thao tác thật trên hệ thống ngoài. Toàn bộ lịch sử phát triển theo thời gian xem tại [CHANGELOG.md](CHANGELOG.md); các quyết định kiến trúc & quy trình xem tại [PROJECT_DECISIONS.md](PROJECT_DECISIONS.md).
+> Snapshot trạng thái hiện hành, cập nhật **2026-11-18**. Source/runtime kiểm chứng mới có độ tin cậy cao hơn tài liệu. Không dùng file này làm quyền chạy thao tác thật trên hệ thống ngoài. Toàn bộ lịch sử phát triển theo thời gian xem tại [CHANGELOG.md](CHANGELOG.md); các quyết định kiến trúc & quy trình xem tại [PROJECT_DECISIONS.md](PROJECT_DECISIONS.md).
 
 ## Tổng quan kiểm chứng & năng lực hiện hành
 
-| Hạng mục | Trạng thái đã kiểm chứng gần nhất (`2026-11-15`) |
+| Hạng mục | Trạng thái đã kiểm chứng gần nhất (`2026-11-18`) |
 |---|---|
-| Cổng chất lượng cô lập (`.\CHECK_QUALITY.ps1 -Isolated`) | `QUALITY GATE PASSED` (exit `0`), `752/752` regression tests `OK`, branch coverage `79.5%` |
+| Cổng chất lượng cô lập (`.\CHECK_QUALITY.ps1 -Isolated`) | `QUALITY GATE PASSED` (exit `0`), `761/761` regression tests `OK`, branch coverage `79.9%` |
 | Static analysis & Bảo mật | Ruff `0` lỗi, Mypy `0` lỗi trên `80` source files, `secrets=0`, `migrations=[1, 2, 3, 4]` |
 | Hợp đồng Frontend JS (`node tests/check_template_js.js`) | `template-js-contract-ok scripts=8 handlers=46 behavior=14` (exit `0`) |
 | Trang riêng `Lớp Hôm Nay` (Live LMS, Zalo & SPCK B12–14) | Đã triển khai & hotfix Live Zalo (`DEC-048`): timeline 2 tuần, `TODAY_REALTIME_SYNC` chỉ đọc landing Zalo **sau** `chat.zalo.me`, cô lập `ZaloSetupError` -> `PARTIAL_SUCCESS` (`zalo_setup_notice`) giữ nguyên LMS/SPCK/BCNB, retry `TargetSearchError` 1x + timeout từng target; chưa chạy ghi production |
-| Auto Discovery, Quét Zalo song song & Tích BCNB | Đã triển khai đầy đủ: quét chọn lọc (`selected_target_keys`), duyệt tay 1-Click có vết SHA-256, hoãn buổi học chưa kết thúc (`⏳ Chưa tới giờ kiểm tra`), AI gợi ý báo cáo Zalo (`DEC-036`, `DEC-045`) |
-| Kiểm định chất lượng LMS, SPCK & Ghi chú QC Teaching | Đã triển khai: Tier-1 Bulk GraphQL + Phễu 2 tầng AI nhận xét LMS khử PII, kiểm định SPCK Buổi 12–14 theo điểm danh (miễn PTB/CSB `DEC-044`, quy tắc Robotics `DEC-045`), tự động hợp nhất & ghi `Mô tả vấn đề (TE/TF/QC)` có read-back (`DEC-038`) |
-| Báo cáo tuần, Xuất CSV lỗi & Email Quản lý | Đã triển khai: bảng 9 cột, lỗi thiếu Zalo mức đỏ nặng nhất (`❌ Chưa nhận xét`, `#dc2626` bọc `<span>` tương thích Webmail BizFly Cloud), cảnh báo vàng `⚠️` (`#b45309`) cho SPCK thiếu nộp/thiếu nhận xét (`DEC-046`), khóa cứng `MANAGER_EMAIL_ALLOWLIST` |
+| Auto Discovery, Quét Zalo song song & Tích BCNB | Đã triển khai đầy đủ: quét chọn lọc (`selected_target_keys`), duyệt tay 1-Click có vết SHA-256, hoãn buổi học chưa kết thúc (`⏳ Chưa tới giờ kiểm tra`), tăng tốc Phase 3 BCNB (`dom_dirty` + 1-IPC `page.evaluate`), lưu `complete_write` từng dòng & `JOB_TIMEOUT_SECONDS=3600` (`DEC-036`, `DEC-045`, `DEC-050`) |
+| Kiểm định chất lượng LMS, SPCK & Ghi chú QC Teaching | Đã triển khai: Tier-1 Bulk GraphQL + Phễu 2 tầng AI nhận xét LMS khử PII, kiểm định SPCK Buổi 12–14 (bỏ bắt buộc tên HS trong tiêu đề, chỉ bắt placeholder/trùng tiêu đề `>= 2` HS qua `rawTitleKey` không PII, miễn PTB/CSB `DEC-044`, Robotics `DEC-045`), ghi chú QC ngắn gọn Mức A (`[Zalo]` · `[LMS]` · `[SPCK]`) có read-back & tương thích ngược provenance (`DEC-038`, `DEC-050`) |
+| Báo cáo tuần, Xuất CSV lỗi & Email Quản lý | Đã triển khai: bảng 9 cột, lỗi thiếu Zalo mức đỏ nặng nhất (`❌ Chưa nhận xét`, `#dc2626` bọc `<span>` tương thích Webmail BizFly Cloud), cảnh báo vàng `⚠️` (`#b45309`) cho `[SPCK] Chưa nộp` / `[SPCK] Chưa NX` (`DEC-046`, `DEC-050`), khóa cứng `MANAGER_EMAIL_ALLOWLIST` |
 | Tick LMS tự động & Nộp Google Form | Đã triển khai: quét Web LMS lập kế hoạch chọn từng lớp (`selection_digest`), lấy học viên trực tiếp từ LMS cho Google Form kèm idempotency & ảnh bằng chứng ẩn danh |
-| Quy trình điều phối AI & Đồng bộ mã nguồn | Cơ chế 2 luồng `[FAST-TRACK]` / `[FULL GATE]` (`DEC-047`), review độc lập **`Argon High`** (`gemini-4-argon-high` read-only `swarm`, `DEC-049`), nhánh chính `main` (`origin/main`) làm Source of Truth (`DEC-040`) |
+| Quy trình điều phối AI & Đồng bộ mã nguồn | Cơ chế 2 luồng `[FAST-TRACK]` / `[FULL GATE]` (`DEC-047`), review độc lập read-only `swarm` (`DEC-049`), nhánh chính `main` (`origin/main`) làm Source of Truth (`DEC-040`) |
 
 ## Các mốc cập nhật gần nhất
+
+- **2026-11-18 (Tối ưu tốc độ Phase 3 BCNB, lưu `complete_write` từng dòng, Quy tắc Tiêu đề SPCK mới & Ghi chú QC ngắn gọn Mức A — `DEC-050`, `[FULL GATE]`)**:
+  - Loại bỏ đọc lại bảng BCNB `O(N^2)` qua `dom_dirty` + `latest_bcnb_rows` và fast-path 1-IPC `_READ_BCNB_ROWS_FAST_JS` trong `_read_bcnb_schedule_rows`; thêm `on_row_finalized` lưu `complete_write` từng dòng ngay khi xong Stage A+B+C để bảo toàn các dòng `VERIFIED` nếu job bị ngắt giữa tuần; nâng mặc định `JOB_TIMEOUT_SECONDS=3600`.
+  - Bỏ yêu cầu tên học viên trong tiêu đề SPCK (chỉ nhắc `tên SP` khi trống/placeholder bypass hoặc copy-paste trùng `>= 2` HS cùng buổi qua `rawTitleKey` không PII) và chuẩn hóa ghi chú QC ngắn gọn Mức A theo thẻ `[Zalo]` · `[LMS]` · `[SPCK]` tương thích ngược hoàn toàn với provenance `external_action_audit` & `DEC-046` (`.\CHECK_QUALITY.ps1 -Isolated` `761/761 PASS`, branch coverage `79.9%`, `node tests/check_template_js.js` PASS, `graphify update .` `5160` nodes, `verifier` `#11` `VERDICT: PASS`).
 
 - **2026-11-15 (Wave 7 Live Hotfix — Sửa `TimeoutError` `about:blank` & Cô lập setup Zalo trên `Lớp Hôm Nay` — `[FULL GATE]`)**:
   - Sửa `_scan_ended_zalo_targets` & `run_today_realtime_sync` (`services/today_ops_service.py`): không gọi `landing_facts_provider` trước khi `_setup_scan_page` điều hướng `https://chat.zalo.me/`, truyền callback đã bind page (`landing_provider_for`), retry transient setup (`MAX_SETUP_ATTEMPTS`), cô lập `ZaloSetupError` thành `PARTIAL_SUCCESS` (`zalo_setup_notice`, giữ toàn bộ dữ liệu live LMS/SPCK/BCNB, giữ Zalo fail-closed), retry `TargetSearchError` 1x trên trang mới, timeout từng target (`TARGET_TIMEOUT`), giữ nguyên `error_code` trong `finalize_registered_scan`. Thêm 3 tests mới trong `tests/test_today_ops_service.py` (`33/33` targeted `OK`, `.\CHECK_QUALITY.ps1 -Isolated` `752/752 PASS`, branch coverage `79.5%`, `Argon High` `reviewer-75` `#47` `VERDICT: PASS`).

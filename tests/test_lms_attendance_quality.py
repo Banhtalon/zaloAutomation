@@ -186,7 +186,7 @@ class LmsAttendanceQualityTests(unittest.TestCase):
         rows = [{"studentKey": f"stu_{i}", "status": "ATTENDED"} for i in range(51)]
         result = evaluate_lms_spck_quality(slot(rows, studentWorks=[]), lesson=12)
         self.assertEqual(result["status"], "UNVERIFIED")
-        self.assertIn("vượt giới hạn", issue_text(result["issues"][0]))
+        self.assertEqual(issue_text(result["issues"][0]), "[LMS] Kiểm tra tay trên LMS")
 
     def test_spck_owner_and_source_must_be_verified_even_when_zero_works(self):
         for works in ([], None, [None]):
@@ -251,7 +251,7 @@ class LmsAttendanceQualityTests(unittest.TestCase):
         self.assertEqual(result["missing_count"], 0)
         self.assertEqual(result["review_reasons"]["nhận xét sơ sài"], 2)
         self.assertEqual(issue_severity(result["issues"][0]), SEVERITY_NOTE)
-        self.assertEqual(issue_text(result["issues"][0]), "[LMS] Nhận xét sơ sài (2/2 HS)")
+        self.assertEqual(issue_text(result["issues"][0]), "[LMS] Viết kỹ NX")
         self.assertNotIn(short, issue_text(result["issues"][0]))
 
     def test_current_unverified_does_not_reactivate_old_spck_failure(self):
@@ -308,7 +308,7 @@ class LmsAttendanceQualityTests(unittest.TestCase):
             merged = merge_checker_issue_note("QC ghi tay | " + old_text, effective, proven_auto_issues=[old_text])
             self.assertIn("QC ghi tay", merged)
             self.assertNotIn(old_text, merged)
-            self.assertIn("kiểm tra thủ công", merged)
+            self.assertIn("[LMS] Kiểm tra tay trên LMS", merged)
 
 
 if __name__ == "__main__":

@@ -639,7 +639,7 @@ def _resolve_row_evaluation_status(
 
 def _split_display_issues(text: str) -> list[str]:
     """Split display messages at source-tag boundaries, keeping semicolons in reasons."""
-    segments = re.split(r"\s*[;|]\s*(?=\[(?:LMS|Zalo)\])", text, flags=re.IGNORECASE)
+    segments = re.split(r"\s*[;|]\s*(?=\[(?:LMS|Zalo|SPCK)\])", text, flags=re.IGNORECASE)
     return [part.strip() for part in segments if part.strip()]
 
 
@@ -654,9 +654,12 @@ def _resolve_row_issue_description(
     seen_norm: set[str] = set()
 
     def _norm_issue_key(text: str) -> str:
-        stripped = re.sub(r"^\[[^\]]+\]\s*", "", text.strip())
+        raw_s = text.strip()
+        is_spck = bool(re.match(r"^\[spck\]\s*", raw_s, flags=re.IGNORECASE))
+        stripped = re.sub(r"^\[[^\]]+\]\s*", "", raw_s)
         stripped = stripped.replace(" — ", "; ").strip(" .;").lower()
-        return " ".join(stripped.split())
+        norm = " ".join(stripped.split())
+        return f"[spck] {norm}" if (is_spck and norm) else norm
 
     legacy_dup_re = re.compile(
         r"^\[LMS\]\s*(?:Nhận|Nhan)\s+x[eé]t\s+HS\s+copy-paste\s+tr[uù]ng\s+l[aặ]p\b",
@@ -675,7 +678,7 @@ def _resolve_row_issue_description(
             )
         ):
             return
-        if is_auto or re.match(r"^\[(?:LMS|Zalo)\]\s*", cleaned, flags=re.IGNORECASE):
+        if is_auto or re.match(r"^\[(?:LMS|Zalo|SPCK)\]\s*", cleaned, flags=re.IGNORECASE):
             cleaned = normalize_auto_issue_text(cleaned)
         key = _norm_issue_key(cleaned)
         if key and key not in seen_norm:

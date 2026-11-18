@@ -28,6 +28,7 @@ import os
 import re
 import time
 from typing import Any
+import unicodedata
 from urllib.parse import parse_qs, urlsplit
 
 from core.time_utils import BUSINESS_TIMEZONE, now_business
@@ -42,6 +43,7 @@ from services.report_status import (
     ISSUE_CODE_LMS_SPCK_MISSING,
     ISSUE_CODE_LMS_SPCK_NOTE,
     ISSUE_CODE_LMS_SUMMARY_NOTE,
+    ISSUE_CODE_ZALO_CONTENT_FAIL,
     ISSUE_CODE_ZALO_REPORT_NO_DATE,
     ISSUE_CODE_ZALO_REPORT_WRONG_DATE,
     SEVERITY_FAIL,
@@ -49,6 +51,7 @@ from services.report_status import (
     SUBMITTED_EVIDENCE_STATES,
     VERIFIED_EVIDENCE_STATES,
     StructuredIssueStr,
+    identity_tokens,
     is_lesson_14,
     issue_code,
     issue_text,
@@ -355,7 +358,7 @@ def evaluate_lms_slot_summary(summary_raw: str | None) -> dict[str, Any]:
     """Check whether `slot.summary` contains substantive lesson content (Requirement #3)."""
     summary_issue = make_structured_issue(
         ISSUE_CODE_LMS_SUMMARY_NOTE,
-        "[LMS] Chưa ghi nội dung bài học",
+        "[LMS] Điền tóm tắt bài",
         severity=SEVERITY_NOTE,
     )
     clean_text = _strip_html(summary_raw)
@@ -1401,7 +1404,6 @@ def _evaluate_lms_attendance(
             "attendanceAmbiguous",
         )
     )
-    overflow = len(rows) > MAX_LMS_STUDENTS_PER_SLOT
     attended: list[dict[str, Any]] = []
     absent = 0
     unknown = 0
@@ -1436,13 +1438,13 @@ def _evaluate_lms_attendance(
     }
     issues = []
     if unverified:
-        if overflow:
-            text = f"[LMS] Danh sách học viên vượt giới hạn kiểm tra ({len(rows)} > {MAX_LMS_STUDENTS_PER_SLOT} HS), cần kiểm tra thủ công"
-        elif not rows:
-            text = "[LMS] Chưa kiểm tra được danh sách học viên trên LMS, cần kiểm tra thủ công"
-        else:
-            text = "[LMS] Điểm danh chưa đầy đủ hoặc chưa xác định, cần kiểm tra thủ công"
-        issues.append(make_structured_issue(ISSUE_CODE_LMS_MANUAL_CHECK, text))
+        issues.append(
+            make_structured_issue(
+                ISSUE_CODE_LMS_MANUAL_CHECK,
+                "[LMS] Kiểm tra tay trên LMS",
+                severity=SEVERITY_NOTE,
+            )
+        )
     return metadata, attended, issues
 
 
@@ -1608,7 +1610,7 @@ def evaluate_lms_student_comments(
         issues.append(
             make_structured_issue(
                 ISSUE_CODE_LMS_QUALITY_FAIL,
-                f"[LMS] Chưa nhận xét học viên ({missing_count}/{attended_count} HS)",
+                f"[LMS] Chưa NX ({missing_count}/{attended_count})",
                 severity=SEVERITY_FAIL,
             )
         )
@@ -1616,7 +1618,7 @@ def evaluate_lms_student_comments(
         issues.append(
             make_structured_issue(
                 ISSUE_CODE_LMS_ATTENDANCE_CONFLICT_NOTE,
-                f"[LMS] Lỗi điểm danh: tích Đi học/Đến muộn nhưng nhận xét ghi học viên nghỉ ({attendance_conflict_count} HS)",
+                "[LMS] Kiểm tra điểm danh-NX",
                 severity=SEVERITY_NOTE,
             )
         )
@@ -1624,7 +1626,7 @@ def evaluate_lms_student_comments(
         issues.append(
             make_structured_issue(
                 ISSUE_CODE_LMS_COMMENT_NOTE,
-                "[LMS] Nhận xét Checkpoint chưa đủ cấu trúc năng lực",
+                "[LMS] Đủ khung Checkpoint",
                 severity=SEVERITY_NOTE,
             )
         )
@@ -1632,7 +1634,7 @@ def evaluate_lms_student_comments(
         issues.append(
             make_structured_issue(
                 ISSUE_CODE_LMS_COMMENT_NOTE,
-                f"[LMS] Nhận xét sơ sài ({shallow_count}/{attended_count} HS)",
+                "[LMS] Viết kỹ NX",
                 severity=SEVERITY_NOTE,
             )
         )
@@ -1783,21 +1785,154 @@ _SLIDE_NAME_KEYWORDS = (
 )
 
 
-def _is_spck_title_empty_or_placeholder(work: Mapping[str, Any]) -> bool:
-    """Return True when StudentWork.title is empty, dot/punctuation-only, or a trivial placeholder."""
+_SPCK_CLASS_CODE_TOKEN_RE = re.compile(
+    r"^(?:vt|hn|hcm|dn|hp|bh|bd|ct|onl|c4k|rob\d+|pt[bia]\d+|js[bia]\d+|cs[bia]\d+|"
+    r"g[bia]\d+|s[bia]\d+|arm[bia]?\d+|semi[bia]?\d+|pre[bia]?\d+|web\d+|app\d+|py\d+|hb)$",
+    flags=re.IGNORECASE,
+)
+
+_SPCK_CONNECTOR_SINGLE_NFC = frozenset(
+    {"của", "cua", "bạn", "ban", "em", "hs", "hv", "lớp", "lop", "nhóm", "nhom"}
+)
+
+_SPCK_CONNECTOR_BIGRAMS_NFC = frozenset(
+    {("học", "viên"), ("hoc", "vien"), ("học", "sinh"), ("hoc", "sinh")}
+)
+
+_SPCK_GENERIC_BYPASS_RE = re.compile(
+    r"^(?:"
+    r"spck|san\s+pham(?:\s+cuoi\s+khoa)?|du\s+an(?:\s+cuoi\s+khoa)?|"
+    r"final\s+project|project\s+final|project(?:\s+cuoi\s+khoa)?|final|"
+    r"bai\s+(?:cuoi\s+khoa|lam(?:\s+cuoi\s+khoa)?|nop(?:\s+cuoi\s+khoa)?|tap(?:\s+cuoi\s+khoa)?|thi(?:\s+cuoi\s+khoa)?|kiem\s+tra(?:\s+cuoi\s+khoa)?)|"
+    r"nop\s+(?:bai|spck|san\s+pham|du\s+an)|cuoi\s+khoa|bai|nop|"
+    r"test|demo|untitled|n/?a|none|null"
+    r")(?:\s+(?:va|cho)?\s*(?:"
+    r"spck|san\s+pham(?:\s+cuoi\s+khoa)?|du\s+an(?:\s+cuoi\s+khoa)?|"
+    r"final\s+project|project\s+final|project(?:\s+cuoi\s+khoa)?|final|"
+    r"bai\s+(?:cuoi\s+khoa|lam(?:\s+cuoi\s+khoa)?|nop(?:\s+cuoi\s+khoa)?|tap(?:\s+cuoi\s+khoa)?|thi(?:\s+cuoi\s+khoa)?|kiem\s+tra(?:\s+cuoi\s+khoa)?)|"
+    r"nop\s+(?:bai|spck|san\s+pham|du\s+an)|cuoi\s+khoa|bai|nop|"
+    r"test|demo|untitled|n/?a|none|null"
+    r"))*$",
+    flags=re.IGNORECASE,
+)
+
+
+def _strip_subsequence_tokens(
+    tokens: list[str],
+    folded_tokens: list[str],
+    target_seq: list[str],
+) -> tuple[list[str], list[str], bool]:
+    if not target_seq or len(target_seq) > len(tokens):
+        return tokens, folded_tokens, False
+    t_len = len(target_seq)
+    out_tok: list[str] = []
+    out_fold: list[str] = []
+    matched = False
+    idx = 0
+    while idx < len(tokens):
+        if idx + t_len <= len(tokens) and folded_tokens[idx : idx + t_len] == target_seq:
+            matched = True
+            idx += t_len
+            continue
+        out_tok.append(tokens[idx])
+        out_fold.append(folded_tokens[idx])
+        idx += 1
+    return out_tok, out_fold, matched
+
+
+def _is_spck_title_empty_or_placeholder(
+    work: Mapping[str, Any],
+    *,
+    student_full_name: str = "",
+    class_code: str = "",
+) -> bool:
+    """Return True when StudentWork.title is empty, punctuation-only, or a generic bypass placeholder."""
     raw_title = _strip_html(str(work.get("title") or "")).strip()
     if not raw_title:
         return True
-    no_hs = re.sub(r"\[hs\]", " ", raw_title, flags=re.IGNORECASE).strip()
-    folded_full = fold_text(raw_title).strip(" -–—:.,;!?()[]{}\"'/_*")
-    if not folded_full or len(re.findall(r"[a-z0-9]", folded_full)) < 2:
+    explicit_flag = work.get("hasStudentInfoInTitle")
+    has_hs_tag = bool(re.search(r"\[hs\]", raw_title, flags=re.IGNORECASE))
+
+    nfc_no_hs = unicodedata.normalize(
+        "NFC",
+        re.sub(r"\[hs\]", " ", raw_title, flags=re.IGNORECASE),
+    ).lower()
+    nfc_spaced = re.sub(r"[-–—|:.,;!?()\[\]{}\"'/_*+]+", " ", nfc_no_hs)
+    tokens = [tok for tok in nfc_spaced.split() if tok]
+    folded_tokens = [fold_text(tok) for tok in tokens]
+
+    matched_stu_name = False
+    if student_full_name:
+        stu_folded = [t for t in fold_text(student_full_name).split() if t]
+        if stu_folded and len("".join(stu_folded)) >= 3:
+            tokens, folded_tokens, hit_full = _strip_subsequence_tokens(
+                tokens, folded_tokens, stu_folded
+            )
+            matched_stu_name = matched_stu_name or hit_full
+        if len(stu_folded) >= 2 and len("".join(stu_folded[-2:])) >= 4:
+            tokens, folded_tokens, hit_tail = _strip_subsequence_tokens(
+                tokens, folded_tokens, stu_folded[-2:]
+            )
+            matched_stu_name = matched_stu_name or hit_tail
+
+    has_student_name = bool(
+        explicit_flag is True
+        or matched_stu_name
+        or (has_hs_tag and explicit_flag is not False)
+    )
+
+    # Strip NFC/ASCII connectors before folding so accented words like "cửa"/"bắn" stay intact.
+    filtered_tokens: list[str] = []
+    t_idx = 0
+    while t_idx < len(tokens):
+        if (
+            t_idx + 1 < len(tokens)
+            and (tokens[t_idx], tokens[t_idx + 1]) in _SPCK_CONNECTOR_BIGRAMS_NFC
+        ):
+            t_idx += 2
+            continue
+        if tokens[t_idx] in _SPCK_CONNECTOR_SINGLE_NFC:
+            t_idx += 1
+            continue
+        filtered_tokens.append(tokens[t_idx])
+        t_idx += 1
+
+    folded_rem = fold_text(" ".join(filtered_tokens))
+    code_token_set = {t.lower() for t in identity_tokens(class_code) if len(t) >= 2}
+    rem_words: list[str] = []
+    for word in folded_rem.split():
+        if word in code_token_set or _SPCK_CLASS_CODE_TOKEN_RE.fullmatch(word):
+            continue
+        rem_words.append(word)
+
+    substance = " ".join(rem_words)
+    substance = re.sub(
+        r"\b(?:(?:buoi|lesson|session|slot)\s*(?:hoc\s*)?(?:so\s*)?\d{1,2}|bai\s*(?:hoc\s*)?(?:so\s*)?(?:12|13|14)|b(?:12|13|14))\b",
+        " ",
+        substance,
+    )
+    substance = " ".join(substance.split())
+    substance = re.sub(r"(?:\s+\d+)+$", "", substance).strip()
+
+    if not substance:
+        return not has_student_name
+    if _SPCK_GENERIC_BYPASS_RE.fullmatch(substance):
         return True
-    folded_no_hs = fold_text(no_hs).strip(" -–—:.,;!?()[]{}\"'/_*")
-    if folded_no_hs and any(re.fullmatch(pat, folded_no_hs) for pat in SPCK_EMPTY_TITLE_PATTERNS):
-        return True
-    if any(re.fullmatch(pat, folded_full) for pat in SPCK_EMPTY_TITLE_PATTERNS):
+    if len(re.findall(r"[a-z0-9]", substance)) < 2:
         return True
     return False
+
+
+def _resolve_spck_duplicate_title_key(work: Mapping[str, Any]) -> str:
+    """Resolve deterministic comparison key for detecting duplicate copy-pasted SPCK titles."""
+    raw_key = str(work.get("rawTitleKey") or "").strip()
+    if raw_key:
+        return raw_key
+    clean_title = _strip_html(str(work.get("title") or "")).strip()
+    if not clean_title or "[hs]" in clean_title.lower():
+        return ""
+    folded = fold_text(clean_title).strip(" -–—|:.,;!?()[]{}\"'/_*+")
+    return " ".join(folded.split())
 
 
 def _has_spck_student_info_in_title(
@@ -1805,44 +1940,11 @@ def _has_spck_student_info_in_title(
     *,
     student_full_name: str = "",
 ) -> bool:
-    """Return True when StudentWork.title includes student identity/info (not empty or generic placeholder)."""
-    raw_title = _strip_html(str(work.get("title") or "")).strip()
-    if not raw_title or len(raw_title) < 3:
-        return False
-    folded_title = fold_text(raw_title).strip(" -–—:.,;!?()[]{}\"'")
-    if not folded_title:
-        return False
-    for pattern in SPCK_TITLE_PLACEHOLDER_PATTERNS:
-        if re.fullmatch(pattern, folded_title):
-            return False
-    explicit_flag = work.get("hasStudentInfoInTitle")
-    if isinstance(explicit_flag, bool):
-        return explicit_flag
-    if "[hs]" in raw_title.lower():
-        return True
-    if student_full_name:
-        folded_name = fold_text(student_full_name).strip()
-        if len(folded_name) >= 3 and folded_name in folded_title:
-            return True
-        name_tokens = [t for t in folded_name.split() if t]
-        if len(name_tokens) >= 2:
-            tail_two = " ".join(name_tokens[-2:])
-            if len(tail_two) >= 4 and tail_two in folded_title:
-                return True
-        return False
-    parts = [p.strip() for p in re.split(r"\s*(?:[-–—|:]|_)\s*", raw_title) if p.strip()]
-    if len(parts) >= 2:
-        non_generic_parts = 0
-        for part in parts:
-            fp = fold_text(part).strip(" -–—:.,;!?()[]{}\"'")
-            if not fp:
-                continue
-            if any(re.fullmatch(pat, fp) for pat in SPCK_TITLE_PLACEHOLDER_PATTERNS):
-                continue
-            non_generic_parts += 1
-        if non_generic_parts >= 2:
-            return True
-    return False
+    """Backward-compatible helper returning True when StudentWork.title is substantive (not placeholder)."""
+    return not _is_spck_title_empty_or_placeholder(
+        work,
+        student_full_name=student_full_name,
+    )
 
 
 def _has_spck_thumbnail(work: Mapping[str, Any]) -> bool:
@@ -1974,6 +2076,8 @@ def _merge_student_works(works: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         return dict(works[0])
     merged: dict[str, Any] = dict(works[0])
     best_title = ""
+    best_raw_title_key = ""
+    best_title_has_info = False
     has_info_flags: list[bool] = []
     best_thumb = ""
     images: list[str] = []
@@ -1986,12 +2090,17 @@ def _merge_student_works(works: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         if isinstance(flag, bool):
             has_info_flags.append(flag)
         t = str(w.get("title") or "").strip()
+        rtk = str(w.get("rawTitleKey") or "").strip()
         if t and (
             not best_title
-            or (flag is True and not merged.get("hasStudentInfoInTitle"))
-            or len(t) > len(best_title)
+            or (flag is True and not best_title_has_info)
+            or (bool(flag) == best_title_has_info and len(t) > len(best_title))
         ):
             best_title = t
+            best_raw_title_key = rtk
+            best_title_has_info = flag is True
+        elif not best_raw_title_key and rtk:
+            best_raw_title_key = rtk
         th = str(w.get("thumbnail") or "").strip()
         if len(th) >= 5 and not best_thumb:
             best_thumb = th
@@ -2011,6 +2120,10 @@ def _merge_student_works(works: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         if len(c) > len(best_comment):
             best_comment = c
     merged["title"] = best_title
+    if best_raw_title_key:
+        merged["rawTitleKey"] = best_raw_title_key
+    else:
+        merged.pop("rawTitleKey", None)
     if has_info_flags:
         merged["hasStudentInfoInTitle"] = any(has_info_flags)
     merged["thumbnail"] = best_thumb
@@ -2045,6 +2158,8 @@ def evaluate_lms_spck_quality(
         "missing_submission_count": 0,
         "no_title_count": 0,
         "missing_student_name_in_title_count": 0,
+        "duplicate_title_count": 0,
+        "bad_title_count": 0,
         "missing_student_info_count": 0,
         "missing_both_image_count": 0,
         "missing_capture_image_count": 0,
@@ -2087,7 +2202,8 @@ def evaluate_lms_spck_quality(
             "issues": [
                 make_structured_issue(
                     ISSUE_CODE_LMS_MANUAL_CHECK,
-                    "[LMS] Chưa kiểm tra được dữ liệu SPCK trên LMS, cần kiểm tra thủ công",
+                    "[SPCK] Kiểm tra tay trên LMS",
+                    severity=SEVERITY_NOTE,
                 )
             ],
         }
@@ -2100,7 +2216,8 @@ def evaluate_lms_spck_quality(
                 "issues": [
                     make_structured_issue(
                         ISSUE_CODE_LMS_MANUAL_CHECK,
-                        "[LMS] Dữ liệu SPCK không đầy đủ, cần kiểm tra thủ công",
+                        "[SPCK] Kiểm tra tay trên LMS",
+                        severity=SEVERITY_NOTE,
                     )
                 ],
             }
@@ -2113,8 +2230,10 @@ def evaluate_lms_spck_quality(
     def _entry_student_name(entry: Mapping[str, Any]) -> str:
         stu = entry.get("student")
         if isinstance(stu, Mapping):
-            return str(stu.get("fullName") or "").strip()
-        return ""
+            name = str(stu.get("fullName") or "").strip()
+            if name:
+                return name
+        return str(entry.get("studentName") or entry.get("fullName") or "").strip()
 
     attended_by_key: dict[str, str] = {}
     attended_ordered_keys: list[str] = []
@@ -2161,7 +2280,8 @@ def evaluate_lms_spck_quality(
             "issues": [
                 make_structured_issue(
                     ISSUE_CODE_LMS_MANUAL_CHECK,
-                    "[LMS] Dữ liệu SPCK trên LMS có bài nộp không xác định được học viên đi học, cần kiểm tra thủ công",
+                    "[SPCK] Kiểm tra tay trên LMS",
+                    severity=SEVERITY_NOTE,
                 )
             ],
         }
@@ -2184,7 +2304,7 @@ def evaluate_lms_spck_quality(
         issues.append(
             make_structured_issue(
                 ISSUE_CODE_LMS_SPCK_MISSING,
-                f"[LMS] Chưa nộp SPCK ({attended_count}/{attended_count} HS)",
+                f"[SPCK] Chưa nộp (0/{attended_count})",
                 severity=SEVERITY_FAIL,
             )
         )
@@ -2197,17 +2317,9 @@ def evaluate_lms_spck_quality(
             "issues": issues,
         }
 
-    if missing_submission_count > 0:
-        issues.append(
-            make_structured_issue(
-                ISSUE_CODE_LMS_SPCK_NOTE,
-                f"[LMS] Thiếu nộp SPCK ({missing_submission_count}/{attended_count} HS)",
-                severity=SEVERITY_NOTE,
-            )
-        )
-
     no_title_count = 0
-    missing_student_name_in_title = 0
+    duplicate_title_count = 0
+    bad_title_count = 0
     missing_both_img = 0
     missing_capture_img = 0
     missing_thumb_img = 0
@@ -2218,11 +2330,27 @@ def evaluate_lms_spck_quality(
     missing_slide_count = 0
     spck_gray_zone_items: list[tuple[str, str, str, int]] = []
 
+    dup_title_keys = [_resolve_spck_duplicate_title_key(w) for w, _ in inspected_works]
+    title_key_counts: dict[str, int] = {}
+    if submitted_count >= 2:
+        for tk in dup_title_keys:
+            if tk:
+                title_key_counts[tk] = title_key_counts.get(tk, 0) + 1
+
     for idx, (work_item, stu_name) in enumerate(inspected_works):
-        if _is_spck_title_empty_or_placeholder(work_item):
+        is_placeholder_title = _is_spck_title_empty_or_placeholder(
+            work_item,
+            student_full_name=stu_name,
+            class_code=class_code,
+        )
+        if is_placeholder_title:
             no_title_count += 1
-        elif not _has_spck_student_info_in_title(work_item, student_full_name=stu_name):
-            missing_student_name_in_title += 1
+        tk = dup_title_keys[idx]
+        is_dup_title = bool(submitted_count >= 2 and tk and title_key_counts.get(tk, 0) >= 2)
+        if is_dup_title:
+            duplicate_title_count += 1
+        if is_placeholder_title or is_dup_title:
+            bad_title_count += 1
 
         has_thumb = _has_spck_thumbnail(work_item)
         has_capture = _has_spck_capture_images(work_item)
@@ -2311,95 +2439,42 @@ def evaluate_lms_spck_quality(
             if not _is_substantive_spck_comment(raw_c_str, student_full_name=stu_name):
                 shallow_comment_count += 1
 
-    missing_student_info_count = no_title_count + missing_student_name_in_title
+    missing_student_info_count = bad_title_count
     missing_image_count = missing_both_img + missing_capture_img + missing_thumb_img
 
-    if no_title_count > 0:
-        issues.append(
-            make_structured_issue(
-                ISSUE_CODE_LMS_SPCK_NOTE,
-                f"[LMS] SPCK chưa đặt tên sản phẩm ({no_title_count}/{submitted_count} HS)",
-                severity=SEVERITY_NOTE,
-            )
-        )
-    if missing_student_name_in_title > 0:
-        issues.append(
-            make_structured_issue(
-                ISSUE_CODE_LMS_SPCK_NOTE,
-                f"[LMS] Tiêu đề SPCK chưa ghi kèm tên học viên ({missing_student_name_in_title}/{submitted_count} HS)",
-                severity=SEVERITY_NOTE,
-            )
-        )
-    if missing_both_img > 0:
-        issues.append(
-            make_structured_issue(
-                ISSUE_CODE_LMS_SPCK_NOTE,
-                f"[LMS] SPCK chưa có ảnh sản phẩm ({missing_both_img}/{submitted_count} HS)",
-                severity=SEVERITY_NOTE,
-            )
-        )
-    if missing_capture_img > 0:
-        issues.append(
-            make_structured_issue(
-                ISSUE_CODE_LMS_SPCK_NOTE,
-                f"[LMS] SPCK thiếu ảnh chụp bổ sung ({missing_capture_img}/{submitted_count} HS)",
-                severity=SEVERITY_NOTE,
-            )
-        )
-    if missing_thumb_img > 0:
-        issues.append(
-            make_structured_issue(
-                ISSUE_CODE_LMS_SPCK_NOTE,
-                f"[LMS] SPCK thiếu ảnh đại diện ({missing_thumb_img}/{submitted_count} HS)",
-                severity=SEVERITY_NOTE,
-            )
-        )
-    if missing_attachment_count > 0:
-        attachment_msg = (
-            f"[LMS] SPCK chưa có file code đính kèm ({missing_attachment_count}/{submitted_count} HS)"
-            if is_robotics
-            else f"[LMS] SPCK thiếu file đính kèm ({missing_attachment_count}/{submitted_count} HS)"
-        )
-        issues.append(
-            make_structured_issue(
-                ISSUE_CODE_LMS_SPCK_NOTE,
-                attachment_msg,
-                severity=SEVERITY_NOTE,
-            )
-        )
     if missing_comment_count > 0:
         issues.append(
             make_structured_issue(
                 ISSUE_CODE_LMS_SPCK_COMMENT_MISSING,
-                f"[LMS] SPCK chưa có nhận xét ({missing_comment_count}/{submitted_count} HS)",
+                f"[SPCK] Chưa NX ({missing_comment_count}/{submitted_count})",
                 severity=SEVERITY_FAIL,
             )
         )
+
+    spck_tasks: list[str] = []
+    if missing_submission_count > 0:
+        spck_tasks.append("nộp đủ bài")
+    if bad_title_count > 0:
+        spck_tasks.append("tên SP")
+    if missing_image_count > 0:
+        spck_tasks.append("ảnh")
+    if missing_attachment_count > 0:
+        spck_tasks.append("file code" if is_robotics else "file")
     if shallow_comment_count > 0:
+        spck_tasks.append("viết kỹ NX")
+    if lesson_num in SPCK_SLIDE_YOUTUBE_LESSONS and missing_youtube_count > 0:
+        spck_tasks.append("YouTube")
+    if lesson_num in SPCK_SLIDE_YOUTUBE_LESSONS and not is_robotics and missing_slide_count > 0:
+        spck_tasks.append("Slide")
+
+    if spck_tasks:
         issues.append(
             make_structured_issue(
                 ISSUE_CODE_LMS_SPCK_NOTE,
-                f"[LMS] Nhận xét SPCK sơ sài ({shallow_comment_count}/{submitted_count} HS)",
+                f"[SPCK] Bổ sung {', '.join(spck_tasks)}",
                 severity=SEVERITY_NOTE,
             )
         )
-    if lesson_num in SPCK_SLIDE_YOUTUBE_LESSONS:
-        if missing_youtube_count > 0:
-            issues.append(
-                make_structured_issue(
-                    ISSUE_CODE_LMS_SPCK_NOTE,
-                    f"[LMS] SPCK Buổi 14 thiếu link video YouTube ({missing_youtube_count}/{submitted_count} HS)",
-                    severity=SEVERITY_NOTE,
-                )
-            )
-        if not is_robotics and missing_slide_count > 0:
-            issues.append(
-                make_structured_issue(
-                    ISSUE_CODE_LMS_SPCK_NOTE,
-                    f"[LMS] SPCK Buổi 14 thiếu link/file Slide thuyết trình ({missing_slide_count}/{submitted_count} HS)",
-                    severity=SEVERITY_NOTE,
-                )
-            )
 
     return {
         **empty_res,
@@ -2410,7 +2485,9 @@ def evaluate_lms_spck_quality(
         "submitted_count": submitted_count,
         "missing_submission_count": missing_submission_count,
         "no_title_count": no_title_count,
-        "missing_student_name_in_title_count": missing_student_name_in_title,
+        "missing_student_name_in_title_count": 0,
+        "duplicate_title_count": duplicate_title_count,
+        "bad_title_count": bad_title_count,
         "missing_student_info_count": missing_student_info_count,
         "missing_both_image_count": missing_both_img,
         "missing_capture_image_count": missing_capture_img,
@@ -2448,6 +2525,14 @@ def _lms_quality_metadata(
     }
 
 
+def _lowercase_followup_phrase(phrase: str) -> str:
+    if not phrase:
+        return ""
+    if len(phrase) >= 2 and phrase[:2].isupper():
+        return phrase
+    return phrase[:1].lower() + phrase[1:]
+
+
 def evaluate_lms_slot_quality(
     slot_data: dict[str, Any] | None,
     *,
@@ -2463,21 +2548,16 @@ def evaluate_lms_slot_quality(
     checkpoint = (
         False if lesson_14_flag else is_checkpoint_session(class_code, khoi, lesson, slot_data=data)
     )
-    unavailable_issue = ""
-    if not isinstance(slot_data, dict):
-        unavailable_issue = (
-            "[LMS] Chưa kiểm tra được dữ liệu buổi học trên LMS, cần kiểm tra thủ công"
+    is_unavailable = not isinstance(slot_data, dict) or any(
+        data.get(flag)
+        for flag in (
+            "overflow_class_limit",
+            "duplicate_class",
+            "missing_class",
+            "fetch_error",
         )
-    for flag, text in (
-        ("overflow_class_limit", "Vượt giới hạn số lớp kiểm tra LMS trong một đợt"),
-        ("duplicate_class", "Phát hiện trùng mã lớp trên LMS"),
-        ("missing_class", "Không tìm thấy dữ liệu lớp trên LMS"),
-        ("fetch_error", "Không tải được đầy đủ dữ liệu buổi học từ LMS"),
-    ):
-        if data.get(flag):
-            unavailable_issue = f"[LMS] {text}, cần kiểm tra thủ công"
-            break
-    if unavailable_issue:
+    )
+    if is_unavailable:
         attendance, _, _ = _evaluate_lms_attendance(None)
         return {
             **_lms_quality_metadata(
@@ -2496,7 +2576,13 @@ def evaluate_lms_slot_quality(
             "summary_clean": "",
             "attended_count": 0,
             "failed_comment_count": 0,
-            "issues": [make_structured_issue(ISSUE_CODE_LMS_MANUAL_CHECK, unavailable_issue)],
+            "issues": [
+                make_structured_issue(
+                    ISSUE_CODE_LMS_MANUAL_CHECK,
+                    "[LMS] Kiểm tra tay trên LMS",
+                    severity=SEVERITY_NOTE,
+                )
+            ],
         }
     summary_eval = (
         {"has_valid_summary": True, "summary_clean": "", "issue": ""}
@@ -2522,10 +2608,66 @@ def evaluate_lms_slot_quality(
         ai_reviewer=ai_reviewer,
         verdict_cache=verdict_cache,
     )
-    issues = [summary_eval["issue"]] if summary_eval["issue"] else []
-    for item in [*comments_eval["issues"], *spck_eval["issues"]]:
-        if issue_text(item) not in {issue_text(existing) for existing in issues}:
-            issues.append(item)
+
+    session_fail_issues: list[Any] = []
+    session_manual_issues: list[Any] = []
+    session_note_items: list[Any] = []
+    if summary_eval["issue"]:
+        session_note_items.append(summary_eval["issue"])
+    for item in comments_eval["issues"]:
+        c_code = issue_code(item)
+        if c_code == ISSUE_CODE_LMS_MANUAL_CHECK:
+            session_manual_issues.append(item)
+        elif c_code in {
+            ISSUE_CODE_LMS_SUMMARY_NOTE,
+            ISSUE_CODE_LMS_ATTENDANCE_CONFLICT_NOTE,
+            ISSUE_CODE_LMS_COMMENT_NOTE,
+        }:
+            session_note_items.append(item)
+        else:
+            session_fail_issues.append(item)
+
+    issues: list[Any] = []
+    seen_texts: set[str] = set()
+
+    def _append_unique(entry: Any) -> None:
+        txt = issue_text(entry)
+        if txt and txt not in seen_texts:
+            seen_texts.add(txt)
+            issues.append(entry)
+
+    for fail_item in session_fail_issues:
+        _append_unique(fail_item)
+
+    if session_note_items:
+        note_phrases: list[str] = []
+        note_codes: set[str] = set()
+        for idx_n, n_item in enumerate(session_note_items):
+            note_codes.add(issue_code(n_item))
+            body = re.sub(r"^\[LMS\]\s*", "", issue_text(n_item), flags=re.IGNORECASE).strip()
+            if not body:
+                continue
+            note_phrases.append(body if idx_n == 0 else _lowercase_followup_phrase(body))
+        if note_phrases:
+            if ISSUE_CODE_LMS_COMMENT_NOTE in note_codes:
+                grouped_lms_code = ISSUE_CODE_LMS_COMMENT_NOTE
+            elif ISSUE_CODE_LMS_ATTENDANCE_CONFLICT_NOTE in note_codes:
+                grouped_lms_code = ISSUE_CODE_LMS_ATTENDANCE_CONFLICT_NOTE
+            else:
+                grouped_lms_code = ISSUE_CODE_LMS_SUMMARY_NOTE
+            _append_unique(
+                make_structured_issue(
+                    grouped_lms_code,
+                    f"[LMS] {', '.join(note_phrases)}",
+                    severity=SEVERITY_NOTE,
+                )
+            )
+
+    for manual_item in session_manual_issues:
+        _append_unique(manual_item)
+    for spck_item in spck_eval["issues"]:
+        _append_unique(spck_item)
+
     return {
         **_lms_quality_metadata(comments_eval["attendance"], comments_eval, spck_eval),
         "is_exempt": lesson_14_flag,
@@ -2612,7 +2754,7 @@ def evaluate_zalo_content_issues(
     evidence_state = str(item.get("evidence_state") or "").strip().upper()
     if is_lesson_14(item) or evidence_state not in SUBMITTED_EVIDENCE_STATES:
         return []
-    issues: list[str] = []
+    sub_issues: list[StructuredIssueStr] = []
     seen: set[str] = set()
 
     def _add(msg: str, *, code: str = "", severity: str = "") -> None:
@@ -2626,7 +2768,16 @@ def evaluate_zalo_content_issues(
         norm = fold_text(re.sub(r"^\[[^\]]+\]\s*", "", cleaned))
         if norm and norm not in seen:
             seen.add(norm)
-            issues.append(StructuredIssueStr(cleaned, code=code, severity=severity))
+            resolved_code = code or ISSUE_CODE_ZALO_CONTENT_FAIL
+            resolved_sev = severity or (
+                SEVERITY_NOTE
+                if resolved_code
+                in {ISSUE_CODE_ZALO_REPORT_NO_DATE, ISSUE_CODE_ZALO_REPORT_WRONG_DATE}
+                else SEVERITY_FAIL
+            )
+            sub_issues.append(
+                StructuredIssueStr(cleaned, code=resolved_code, severity=resolved_sev)
+            )
 
     raw_st = item.get("scan_target")
     st: dict[str, Any] = raw_st if isinstance(raw_st, dict) else {}
@@ -2661,8 +2812,8 @@ def evaluate_zalo_content_issues(
     )
     target_match_note = str(ctx.get("target_match_note") or tm.get("note") or "").strip()
     if target_match_note:
-        note_code = ""
-        note_sev = ""
+        note_code = ISSUE_CODE_ZALO_CONTENT_FAIL
+        note_sev = SEVERITY_FAIL
         if target_match_decision == "TARGET_SAME_DAY_NO_DATE":
             note_code = ISSUE_CODE_ZALO_REPORT_NO_DATE
             note_sev = SEVERITY_NOTE
@@ -2683,6 +2834,7 @@ def evaluate_zalo_content_issues(
     folded_match_note = fold_text(target_match_note)
     already_mentions_wrong_lesson = (
         "sai buoi" in folded_match_note
+        or "sai so buoi" in folded_match_note
         or "sai ngay/buoi" in folded_match_note
         or "ngay/buoi ghi trong noi dung khong khop" in folded_match_note
         or (content_lesson is not None and f"bai so {content_lesson}" in folded_match_note)
@@ -2693,9 +2845,7 @@ def evaluate_zalo_content_issues(
         and content_lesson != expected_lesson
         and not already_mentions_wrong_lesson
     ):
-        _add(
-            f"Ghi sai số bài học trong nội dung (ghi Bài {content_lesson}, lịch là Buổi {expected_lesson})"
-        )
+        _add("[Zalo] Sai số buổi", code=ISSUE_CODE_ZALO_CONTENT_FAIL, severity=SEVERITY_FAIL)
 
     reported_title = str(
         ctx.get("reported_lesson_title")
@@ -2720,9 +2870,37 @@ def evaluate_zalo_content_issues(
                 and folded_zalo not in folded_lms
                 and folded_lms not in folded_zalo
             ):
-                _add("Tên bài học trên Zalo không khớp với nội dung bài trên LMS")
+                _add(
+                    "[Zalo] Lệch tên bài với LMS",
+                    code=ISSUE_CODE_ZALO_CONTENT_FAIL,
+                    severity=SEVERITY_FAIL,
+                )
 
-    return issues
+    if not sub_issues:
+        return []
+    if len(sub_issues) == 1:
+        return [sub_issues[0]]
+
+    phrases: list[str] = []
+    for idx_z, sub in enumerate(sub_issues):
+        body = re.sub(r"^\[Zalo\]\s*", "", str(sub), flags=re.IGNORECASE).strip()
+        if not body:
+            continue
+        phrases.append(body if idx_z == 0 else _lowercase_followup_phrase(body))
+    all_notes = all(sub.severity == SEVERITY_NOTE for sub in sub_issues)
+    grouped_code = (
+        (sub_issues[0].code or ISSUE_CODE_ZALO_REPORT_NO_DATE)
+        if all_notes
+        else ISSUE_CODE_ZALO_CONTENT_FAIL
+    )
+    grouped_sev = SEVERITY_NOTE if all_notes else SEVERITY_FAIL
+    return [
+        StructuredIssueStr(
+            f"[Zalo] {', '.join(phrases)}",
+            code=grouped_code,
+            severity=grouped_sev,
+        )
+    ]
 
 
 def _is_usable_lms_token(
@@ -4086,6 +4264,21 @@ async def fetch_lms_class_slots_via_page(
                             const namesList = meta.studentNames || [];
                             const isInactive = Boolean(meta.inactiveStudentIds && meta.inactiveStudentIds.has(rawStuId));
                             const rawTitle = pickStr('title').trim().slice(0, 500);
+                            const rawTitleNorm = foldVi(rawTitle.replace(/<[^>]+>/g, ' '))
+                                .replace(/^[-–—|:.,;!?()[\\]{}"'/_*+ \\t\\r\\n]+|[-–—|:.,;!?()[\\]{}"'/_*+ \\t\\r\\n]+$/g, '');
+                            let rawTitleKey = '';
+                            if (rawTitleNorm) {
+                                let h1 = 0x811c9dc5;
+                                let h2 = 0x01000193;
+                                for (let ti = 0; ti < rawTitleNorm.length; ti++) {
+                                    const ch = rawTitleNorm.charCodeAt(ti);
+                                    h1 ^= ch;
+                                    h1 = Math.imul(h1, 0x01000193) >>> 0;
+                                    h2 ^= (ch + ti) & 0xffff;
+                                    h2 = Math.imul(h2, 0x85ebca6b) >>> 0;
+                                }
+                                rawTitleKey = 'tk_' + h1.toString(16).padStart(8, '0') + h2.toString(16).padStart(8, '0');
+                            }
                             const hasStudentInfo = checkTitleHasStudentName(rawTitle, ownerName, namesList);
                             const cleanTitle = scrubStudentNames(rawTitle, namesList).slice(0, 500);
                             const rawWorkComment = pickStr('comment').slice(0, 15000);
@@ -4099,6 +4292,7 @@ async def fetch_lms_class_slots_via_page(
                                 ...(stuKey ? { studentKey: stuKey } : {}),
                                 ...(isInactive ? { inactiveInClass: true } : {}),
                                 title: cleanTitle,
+                                ...(rawTitleKey ? { rawTitleKey } : {}),
                                 hasStudentInfoInTitle: Boolean(hasStudentInfo),
                                 thumbnail: scrubStudentUrl(rawThumb, namesList),
                                 imageUrl: rawImages
@@ -4674,52 +4868,23 @@ def select_matching_lms_slot(
     Returns ``(matched_slot, None)`` when exactly 1 active slot matches, or
     ``(None, manual_check_issue)`` in all other cases (never falls back by position).
     """
-    if lesson_num > MAX_LMS_SLOTS_PER_CLASS:
-        return (
-            None,
-            make_structured_issue(
-                ISSUE_CODE_LMS_MANUAL_CHECK,
-                f"[LMS] Buổi {lesson_num} vượt giới hạn kiểm tra LMS ({MAX_LMS_SLOTS_PER_CLASS} buổi), cần kiểm tra thủ công",
-            ),
-        )
-    if not target_date_iso:
-        return (
-            None,
-            make_structured_issue(
-                ISSUE_CODE_LMS_MANUAL_CHECK,
-                f"[LMS] Thiếu ngày học của Buổi {lesson_num} để đối chiếu LMS, cần kiểm tra thủ công",
-            ),
-        )
+    manual_check_issue = make_structured_issue(
+        ISSUE_CODE_LMS_MANUAL_CHECK,
+        "[LMS] Kiểm tra tay trên LMS",
+        severity=SEVERITY_NOTE,
+    )
+    if lesson_num > MAX_LMS_SLOTS_PER_CLASS or not target_date_iso:
+        return None, manual_check_issue
     dict_slots = [dict(s) for s in class_slots if isinstance(s, Mapping)]
     if not dict_slots:
-        return (
-            None,
-            make_structured_issue(
-                ISSUE_CODE_LMS_MANUAL_CHECK,
-                "[LMS] Chưa kiểm tra được dữ liệu buổi học trên LMS, cần kiểm tra thủ công",
-            ),
-        )
+        return None, manual_check_issue
     active_slots = [s for s in dict_slots if not _is_lms_slot_cancelled(s)]
     if not active_slots:
-        return (
-            None,
-            make_structured_issue(
-                ISSUE_CODE_LMS_MANUAL_CHECK,
-                f"[LMS] Slot ngày {target_date_iso} (Buổi {lesson_num}) trên LMS đã bị huỷ, cần kiểm tra thủ công",
-            ),
-        )
+        return None, manual_check_issue
     matched_slots: list[dict[str, Any]] = []
-    wrong_lesson_on_date: list[dict[str, Any]] = []
     missing_lesson_on_date: list[dict[str, Any]] = []
-    has_any_valid_date = False
-    cancelled_on_target_date = any(
-        _is_lms_slot_cancelled(s) and _extract_lms_slot_date_iso(s) == target_date_iso
-        for s in dict_slots
-    )
     for slot in active_slots:
         slot_date_iso = _extract_lms_slot_date_iso(slot)
-        if slot_date_iso is not None:
-            has_any_valid_date = True
         if slot_date_iso != target_date_iso:
             continue
         has_lesson, slot_lesson = _extract_lms_slot_lesson_number(slot)
@@ -4727,67 +4892,10 @@ def select_matching_lms_slot(
             missing_lesson_on_date.append(slot)
         elif slot_lesson == lesson_num:
             matched_slots.append(slot)
-        else:
-            wrong_lesson_on_date.append(slot)
 
     if len(matched_slots) == 1 and not missing_lesson_on_date:
         return matched_slots[0], None
-    if len(matched_slots) > 1 or (matched_slots and missing_lesson_on_date):
-        total_ambiguous = len(matched_slots) + len(missing_lesson_on_date)
-        return (
-            None,
-            make_structured_issue(
-                ISSUE_CODE_LMS_MANUAL_CHECK,
-                f"[LMS] Phát hiện {total_ambiguous} slot trùng ngày {target_date_iso} cho Buổi {lesson_num} trên LMS, cần kiểm tra thủ công",
-            ),
-        )
-    if missing_lesson_on_date:
-        return (
-            None,
-            make_structured_issue(
-                ISSUE_CODE_LMS_MANUAL_CHECK,
-                f"[LMS] Thiếu thông tin số buổi của slot ngày {target_date_iso} (Buổi {lesson_num}) trên LMS, cần kiểm tra thủ công",
-            ),
-        )
-    if wrong_lesson_on_date:
-        return (
-            None,
-            make_structured_issue(
-                ISSUE_CODE_LMS_MANUAL_CHECK,
-                f"[LMS] Slot ngày {target_date_iso} trên LMS lệch số buổi so với Buổi {lesson_num}, cần kiểm tra thủ công",
-            ),
-        )
-    if cancelled_on_target_date:
-        return (
-            None,
-            make_structured_issue(
-                ISSUE_CODE_LMS_MANUAL_CHECK,
-                f"[LMS] Slot ngày {target_date_iso} (Buổi {lesson_num}) trên LMS đã bị huỷ, cần kiểm tra thủ công",
-            ),
-        )
-    if any(bool(s.get("truncated")) for s in dict_slots):
-        return (
-            None,
-            make_structured_issue(
-                ISSUE_CODE_LMS_MANUAL_CHECK,
-                f"[LMS] Buổi {lesson_num} vượt giới hạn kiểm tra LMS ({MAX_LMS_SLOTS_PER_CLASS} buổi), cần kiểm tra thủ công",
-            ),
-        )
-    if not has_any_valid_date:
-        return (
-            None,
-            make_structured_issue(
-                ISSUE_CODE_LMS_MANUAL_CHECK,
-                f"[LMS] Thiếu thông tin ngày học của Buổi {lesson_num} trên LMS, cần kiểm tra thủ công",
-            ),
-        )
-    return (
-        None,
-        make_structured_issue(
-            ISSUE_CODE_LMS_MANUAL_CHECK,
-            f"[LMS] Không tìm thấy slot khớp ngày {target_date_iso} (Buổi {lesson_num}) trên LMS, cần kiểm tra thủ công",
-        ),
-    )
+    return None, manual_check_issue
 
 
 def _clear_scan_results_ai_cache(scan_results: Sequence[Any]) -> None:
@@ -5052,18 +5160,12 @@ def inspect_and_attach_quality_issues(
         slot_eval: dict[str, Any] | None = None
         if has_lms_map:
             slot_evaluated = True
-            if not class_code or lesson_num is None:
+            if not class_code or lesson_num is None or class_code not in slots_map:
                 lms_issues = [
                     make_structured_issue(
                         ISSUE_CODE_LMS_MANUAL_CHECK,
-                        "[LMS] Thiếu mã lớp hoặc số buổi để kiểm tra LMS, cần kiểm tra thủ công",
-                    )
-                ]
-            elif class_code not in slots_map:
-                lms_issues = [
-                    make_structured_issue(
-                        ISSUE_CODE_LMS_MANUAL_CHECK,
-                        "[LMS] Chưa kiểm tra được dữ liệu LMS của lớp, cần kiểm tra thủ công",
+                        "[LMS] Kiểm tra tay trên LMS",
+                        severity=SEVERITY_NOTE,
                     )
                 ]
             else:
@@ -5072,7 +5174,8 @@ def inspect_and_attach_quality_issues(
                     lms_issues = [
                         make_structured_issue(
                             ISSUE_CODE_LMS_MANUAL_CHECK,
-                            "[LMS] Chưa kiểm tra được dữ liệu buổi học trên LMS, cần kiểm tra thủ công",
+                            "[LMS] Kiểm tra tay trên LMS",
+                            severity=SEVERITY_NOTE,
                         )
                     ]
                 else:
@@ -5167,7 +5270,7 @@ def inspect_and_attach_quality_issues(
                         seen_prior_zalo.add(txt)
                         prior_zalo_issues.append(item)
                     elif (
-                        upper_txt.startswith("[LMS]")
+                        upper_txt.startswith(("[LMS]", "[SPCK]"))
                         and issue_code(item) != ISSUE_CODE_LMS_MANUAL_CHECK
                         and txt not in seen_prior_lms
                     ):
@@ -5225,7 +5328,11 @@ def inspect_and_attach_quality_issues(
             for prior_l in prior_lms_issues:
                 pt = issue_text(prior_l)
                 if pt and pt not in seen_lms:
-                    is_prior_spck = issue_code(prior_l) in spck_codes or "spck" in fold_text(pt)
+                    is_prior_spck = (
+                        issue_code(prior_l) in spck_codes
+                        or pt.upper().startswith("[SPCK]")
+                        or "spck" in fold_text(pt)
+                    )
                     if slot_evaluated and (
                         (is_prior_spck and spck_superseded)
                         or (not is_prior_spck and comments_verified)

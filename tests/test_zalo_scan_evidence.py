@@ -506,7 +506,7 @@ class ZaloScanEvidenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(context["lesson_date"], "2026-08-02")
         self.assertEqual(context["reported_lesson_date"], "2026-07-26")
         self.assertEqual(context["reported_lesson"], 5)
-        self.assertIn("ghi sai ngày/buổi", result["status_detail"])
+        self.assertIn("[Zalo] Sai ngày/buổi", result["status_detail"])
 
     async def test_old_report_is_not_reused_for_a_later_bcnb_target(self):
         messages = [
@@ -1919,7 +1919,7 @@ class ZaloScanEvidenceTests(unittest.IsolatedAsyncioTestCase):
             first_issue = res_no_date["zalo_content_issues"][0]
             self.assertEqual(issue_code(first_issue), ISSUE_CODE_ZALO_REPORT_NO_DATE)
             self.assertEqual(issue_severity(first_issue), SEVERITY_NOTE)
-            self.assertEqual(issue_text(first_issue), "[Zalo] Báo cáo không ghi ngày/buổi")
+            self.assertEqual(issue_text(first_issue), "[Zalo] Thiếu ngày/buổi")
             self.assertEqual(categorize_row(res_no_date), CATEGORY_DONE)
             self.assertFalse(is_failed(res_no_date))
 
@@ -1948,7 +1948,7 @@ class ZaloScanEvidenceTests(unittest.IsolatedAsyncioTestCase):
             wrong_issue = res_wrong_date["zalo_content_issues"][0]
             self.assertEqual(issue_code(wrong_issue), ISSUE_CODE_ZALO_REPORT_WRONG_DATE)
             self.assertEqual(issue_severity(wrong_issue), SEVERITY_NOTE)
-            self.assertEqual(issue_text(wrong_issue), "[Zalo] Báo cáo ghi sai ngày (28/10)")
+            self.assertEqual(issue_text(wrong_issue), "[Zalo] Sai ngày (28/10)")
             self.assertEqual(categorize_row(res_wrong_date), CATEGORY_DONE)
             self.assertFalse(is_failed(res_wrong_date))
 

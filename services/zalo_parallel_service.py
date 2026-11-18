@@ -2978,7 +2978,7 @@ async def run_parallel_zalo_batch(
                                         )
                                         or ""
                                     ).lower()
-                                    for marker in ("[auto qc:", "[lms]", "[zalo]")
+                                    for marker in ("[auto qc:", "[lms]", "[zalo]", "[spck]")
                                 )
                                 for r in scoped_unclaimed
                             )
@@ -3109,6 +3109,65 @@ async def run_parallel_zalo_batch(
                                             result=res,
                                         )
                     return
+                claimed_by_key: dict[str, dict[str, Any]] = {
+                    str(target["target_key"]): target for target in claimed
+                }
+                completed_claimed_ids: set[int] = set()
+                complete_write_accepts_result = (
+                    "result"
+                    in inspect.signature(repository.complete_write).parameters
+                    or any(
+                        p.kind == inspect.Parameter.VAR_KEYWORD
+                        for p in inspect.signature(
+                            repository.complete_write
+                        ).parameters.values()
+                    )
+                )
+
+                async def finalize_claimed_row(row_outcome: dict[str, Any]) -> None:
+                    try:
+                        outcome_key = canonical_target_key(row_outcome)
+                    except ValueError:
+                        return
+                    target = claimed_by_key.get(outcome_key)
+                    if target is None or int(target["id"]) in completed_claimed_ids:
+                        return
+                    target_id = int(target["id"])
+                    row_res = row_outcome.get("target_result")
+                    if isinstance(row_res, dict):
+                        scan_results_by_key[outcome_key] = row_res
+                    else:
+                        row_res = scan_results_by_key.get(outcome_key)
+                    if (
+                        isinstance(row_res, dict)
+                        and hasattr(repository, "update_target_result")
+                        and outcome_key in scan_result_ids
+                    ):
+                        await repository.update_target_result(
+                            scan_result_ids[outcome_key],
+                            result=row_res,
+                        )
+                    status = str(row_outcome.get("status") or "")
+                    if not status:
+                        return
+                    extra_write_kwargs = (
+                        {"result": row_res}
+                        if complete_write_accepts_result
+                        else {}
+                    )
+                    await repository.complete_write(
+                        target_id,
+                        status=status,
+                        error_code=(
+                            "BCNB_WRITE_FAILED"
+                            if status in {"FAILED_BEFORE_WRITE", "OUTCOME_UNKNOWN"}
+                            else None
+                        ),
+                        error_message=row_outcome.get("error"),
+                        **extra_write_kwargs,
+                    )
+                    completed_claimed_ids.add(target_id)
+
                 try:
 
                     update_params = inspect.signature(update_bcnb_reports).parameters
@@ -3133,6 +3192,8 @@ async def run_parallel_zalo_batch(
                         extra_update_kwargs["lms_ai_reviewer"] = runtime_ai_reviewer
                     if "reset_ai_batch_counter" in update_params or accepts_var_kw:
                         extra_update_kwargs["reset_ai_batch_counter"] = False
+                    if "on_row_finalized" in update_params or accepts_var_kw:
+                        extra_update_kwargs["on_row_finalized"] = finalize_claimed_row
                     summary = await update_bcnb_reports(
                         page,
                         job_id=job_id,
@@ -3176,17 +3237,9 @@ async def run_parallel_zalo_batch(
                         canonical_target_key(item): item
                         for item in summary.get("target_outcomes", [])
                     }
-                    complete_write_accepts_result = (
-                        "result"
-                        in inspect.signature(repository.complete_write).parameters
-                        or any(
-                            p.kind == inspect.Parameter.VAR_KEYWORD
-                            for p in inspect.signature(
-                                repository.complete_write
-                            ).parameters.values()
-                        )
-                    )
                     for target in claimed:
+                        if int(target["id"]) in completed_claimed_ids:
+                            continue
                         outcome = outcome_by_key.get(target["target_key"])
                         extra_write_kwargs = (
                             {
@@ -3228,6 +3281,8 @@ async def run_parallel_zalo_batch(
                         else "FAILED_BEFORE_WRITE"
                     )
                     for target in claimed:
+                        if int(target["id"]) in completed_claimed_ids:
+                            continue
                         await repository.complete_write(
                             target["id"],
                             status=status,
@@ -3242,6 +3297,8 @@ async def run_parallel_zalo_batch(
                         else "FAILED_BEFORE_WRITE"
                     )
                     for target in claimed:
+                        if int(target["id"]) in completed_claimed_ids:
+                            continue
                         await repository.complete_write(
                             target["id"],
                             status=status,

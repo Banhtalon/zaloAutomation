@@ -18,7 +18,9 @@ from services.lms_quality_service import (
 from services.report_status import (
     ISSUE_CODE_LMS_MANUAL_CHECK,
     ISSUE_CODE_LMS_SPCK_MISSING,
+    ISSUE_CODE_LMS_SPCK_NOTE,
     issue_code,
+    issue_text,
 )
 
 
@@ -33,7 +35,11 @@ const roster = Array.from({length: count + 20}, (_, i) => ({
 const good = (i, cls = 'cls', session = 'slot') => ({
     id: 'work_' + i, classId: cls, classSessionId: session, classSessionNumber: null,
     studentId: 'raw_' + i, status: 'pending', isDeleted: false,
-    latestData: {title: 'Synthetic Person ' + i + ' final project',
+    latestData: {title: mode === 'student_name_only_titles'
+        ? ('Synthetic Person ' + i)
+        : (mode === 'duplicate_product_titles'
+            ? (i % 2 === 0 ? 'Game Bắn Thiên Thạch' : 'game ban thien thach')
+            : ('Synthetic Person ' + i + ' - Website thu vien')),
         thumbnail: 'https://cdn.example/clean.png', imageUrl: ['https://cdn.example/screen.png'], attachmentUrls: ['https://cdn.example/file.zip'],
         comment: '1. Ý tưởng: Sản phẩm thiết kế giao diện rõ ràng, có bố cục đẹp. 2. Chức năng: Hoàn thành tốt tính năng và tương tác.'}
 });
@@ -271,3 +277,29 @@ class SpckSessionFetchTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(slot["studentWorksFetchError"])
         result = evaluate_lms_spck_quality(slot, lesson=12)
         self.assertEqual([issue_code(v) for v in result["issues"]], [ISSUE_CODE_LMS_MANUAL_CHECK])
+
+    async def test_raw_title_key_distinguishes_scrubbed_names_and_catches_duplicate_titles(
+        self,
+    ) -> None:
+        # 1. Distinct student names scrubbed to "[HS]" retain distinct non-PII rawTitleKey -> 0 duplicate issues
+        data_names, _ = await self.fetch("student_name_only_titles", count=3)
+        slot_names = data_names["VT-GA38"][0]
+        self.assertNotIn("Synthetic Person", json.dumps(data_names))
+        self.assertEqual([w["title"] for w in slot_names["studentWorks"]], ["[HS]", "[HS]", "[HS]"])
+        raw_keys = {w["rawTitleKey"] for w in slot_names["studentWorks"]}
+        self.assertEqual(len(raw_keys), 3)
+        res_names = evaluate_lms_spck_quality(slot_names, class_code="VT-GA38", lesson=12)
+        self.assertEqual(res_names["duplicate_title_count"], 0)
+        self.assertEqual(res_names["bad_title_count"], 0)
+        self.assertEqual(res_names["issues"], [])
+
+        # 2. Copy-pasted product titles (even differing in case/accents) share rawTitleKey -> [SPCK] Bổ sung tên SP
+        data_dup, _ = await self.fetch("duplicate_product_titles", count=3)
+        slot_dup = data_dup["VT-GA38"][0]
+        dup_keys = {w["rawTitleKey"] for w in slot_dup["studentWorks"]}
+        self.assertEqual(len(dup_keys), 1)
+        res_dup = evaluate_lms_spck_quality(slot_dup, class_code="VT-GA38", lesson=12)
+        self.assertEqual(res_dup["duplicate_title_count"], 3)
+        self.assertEqual(res_dup["bad_title_count"], 3)
+        self.assertEqual([issue_code(v) for v in res_dup["issues"]], [ISSUE_CODE_LMS_SPCK_NOTE])
+        self.assertEqual([issue_text(v) for v in res_dup["issues"]], ["[SPCK] Bổ sung tên SP"])

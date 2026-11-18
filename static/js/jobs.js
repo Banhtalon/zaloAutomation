@@ -1062,7 +1062,7 @@
             const st = r.scan_target && typeof r.scan_target === 'object' ? r.scan_target : {};
             const spck = r.lms_spck || st.lms_spck;
             if (spck && spck.status) return spck.status === 'MISSING';
-            const spckFailRe = /^\[LMS\]\s*Chưa\s+nộp\s+SPCK\b/i;
+            const spckFailRe = /^(?:\[LMS\]\s*Chưa\s+nộp\s+SPCK|\[SPCK\]\s*Chưa\s+nộp)\b/i;
             const checkVal = val => {
                 if (!val) return false;
                 if (Array.isArray(val)) return val.some(checkVal);
@@ -1093,7 +1093,7 @@
             if (spck && Number.isInteger(spck.missing_comment_count)) {
                 return spck.missing_comment_count > 0;
             }
-            const spckCommentFailRe = /^\[LMS\]\s*SPCK\s+chưa\s+có\s+nhận\s+xét\b/i;
+            const spckCommentFailRe = /^(?:\[LMS\]\s*SPCK\s+chưa\s+có\s+nhận\s+xét|\[SPCK\]\s*Chưa\s+(?:có\s+)?(?:nhận\s+xét|NX))\b/i;
             const checkVal = val => {
                 if (!val) return false;
                 if (Array.isArray(val)) return val.some(checkVal);
@@ -1161,7 +1161,7 @@
             const issueText = resolveDashboardRowIssueDescription(r);
             if (
                 issueText
-                && /^\[LMS\]\s*Không tải được đầy đủ dữ liệu buổi học từ LMS,\s*cần kiểm tra thủ công\.?$/i.test(issueText)
+                && /^(?:\[(?:LMS|SPCK)\]\s*Kiểm\s+tra\s+tay(?:\s+trên\s+LMS)?|\[LMS\]\s*Không tải được đầy đủ dữ liệu buổi học từ LMS,\s*cần kiểm tra thủ công)\.?$/i.test(issueText)
             ) {
                 return 'NOTE';
             }
@@ -1294,7 +1294,7 @@
                 remaining = before && after ? `${before} | ${after}` : (before || after);
             }
             const manualChunks = [];
-            const autoTagRe = /^\[(?:LMS|Zalo)\]\s*/i;
+            const autoTagRe = /^(?:\[LMS\]|\[Zalo\]|\[SPCK\])\s*/i;
             remaining.split('|').forEach(pipeChunk => {
                 const chunkManual = [];
                 pipeChunk.split(';').forEach(seg => {
@@ -1352,12 +1352,17 @@
             const st = r.scan_target && typeof r.scan_target === 'object' ? r.scan_target : {};
             const parts = [];
             const seen = new Set();
-            const normKey = text => String(text || '')
-                .replace(/^\[[^\]]+\]\s*/, '')
-                .replace(/\s+—\s+/g, '; ')
-                .replace(/^[.;\s]+|[.;\s]+$/g, '')
-                .toLowerCase()
-                .replace(/\s+/g, ' ');
+            const normKey = text => {
+                const rawStr = String(text || '').trim();
+                const isSpck = /^\[SPCK\]\s*/i.test(rawStr);
+                const body = rawStr
+                    .replace(/^\[[^\]]+\]\s*/, '')
+                    .replace(/\s+—\s+/g, '; ')
+                    .replace(/^[.;\s]+|[.;\s]+$/g, '')
+                    .toLowerCase()
+                    .replace(/\s+/g, ' ');
+                return isSpck && body ? `[spck] ${body}` : body;
+            };
             const legacyDupRe = /^\[LMS\]\s*(?:Nhận|Nhan)\s+x[eé]t\s+HS\s+copy-paste\s+tr[uù]ng\s+l[aặ]p\b/i;
             const addOne = (seg, isAuto = false) => {
                 let cleaned = String(seg || '').replace(/\s+/g, ' ').replace(/^[;\s]+|[;\s]+$/g, '').trim();
@@ -1368,7 +1373,7 @@
                 ) {
                     return;
                 }
-                if (isAuto || /^\[(?:LMS|Zalo)\]\s*/i.test(cleaned)) {
+                if (isAuto || /^(?:\[LMS\]|\[Zalo\]|\[SPCK\])\s*/i.test(cleaned)) {
                     cleaned = normalizeAutoIssueTextInJs(cleaned);
                 }
                 const key = normKey(cleaned);
@@ -1575,9 +1580,9 @@
             ) {
                 return false;
             }
-            const allowedSegRe = /^(?:\[LMS\]\s*(?:Chưa\s+nộp\s+SPCK|SPCK\s+chưa\s+có\s+nhận\s+xét|Thiếu\s+nộp\s+SPCK|Tiêu\s+đề\s+SPCK|SPCK\b|(?:Nhận|Nhan)\s+x[eé]t\s+SPCK|Chưa\s+ghi\s+nội\s+dung\s+bài\s+học|Lỗi\s+điểm\s+danh|Nhận\s+xét\s+(?:sơ\s+sài|học\s+viên\s+trùng\s+lặp|Checkpoint\s+thiếu|Checkpoint\s+chưa\s+đủ|buổi\s+học\s+cần\s+xem\s+lại|cần\s+xem\s+lại)|.*cần\s+kiểm\s+tra\s+thủ\s+công)|\[Zalo\]\s*(?:Báo\s+cáo\s+không\s+ghi\s+ngày\/buổi|Báo\s+cáo\s+ghi\s+sai\s+ngày|Đã\s+báo\s+cáo\s+nhưng\s+ghi\s+sai\s+ngày))/i;
+            const allowedSegRe = /^(?:\[SPCK\]\s*(?:Chưa\s+nộp\b|Chưa\s+(?:có\s+)?(?:nhận\s+xét|NX)\b|Bổ\s+sung\b|Kiểm\s+tra\s+tay\b)|\[LMS\]\s*(?:Chưa\s+nộp\s+SPCK|SPCK\s+chưa\s+có\s+nhận\s+xét|Thiếu\s+nộp\s+SPCK|Tiêu\s+đề\s+SPCK|SPCK\b|(?:Nhận|Nhan)\s+x[eé]t\s+SPCK|Chưa\s+ghi\s+nội\s+dung\s+bài\s+học|Lỗi\s+điểm\s+danh|Nhận\s+xét\s+(?:sơ\s+sài|học\s+viên\s+trùng\s+lặp|Checkpoint\s+thiếu|Checkpoint\s+chưa\s+đủ|buổi\s+học\s+cần\s+xem\s+lại|cần\s+xem\s+lại)|(?:(?:Điền\s+tóm\s+tắt\s+bài|Kiểm\s+tra\s+điểm\s+danh-NX|Viết\s+kỹ\s+NX|Đủ\s+khung\s+Checkpoint)\s*(?:,\s*|$))+|Kiểm\s+tra\s+tay\b|.*cần\s+kiểm\s+tra\s+thủ\s+công)|\[Zalo\]\s*(?:Báo\s+cáo\s+không\s+ghi\s+ngày\/buổi|Thiếu\s+ngày\/buổi|Báo\s+cáo\s+ghi\s+sai\s+ngày|Sai\s+ngày\s*\(|Đã\s+báo\s+cáo\s+nhưng\s+ghi\s+sai\s+ngày))/i;
             const segments = String(resolvedIssue || '')
-                .split(/\s*[;|]\s*(?=\[(?:LMS|Zalo)\])/i)
+                .split(/\s*[;|]\s*(?=\[(?:LMS|Zalo|SPCK)\])/i)
                 .map(s => s.trim())
                 .filter(Boolean);
             return segments.length > 0 && segments.every(seg => allowedSegRe.test(seg));

@@ -890,22 +890,25 @@ def _balance_issue_brackets(text: str) -> str:
 
 
 def _normalize_auto_issue_key(text: str) -> str:
-    stripped = re.sub(r"^\[[^\]]+\]\s*", "", text.strip())
+    raw_stripped = text.strip()
+    is_spck = bool(re.match(r"^\[spck\]\s*", raw_stripped, flags=re.IGNORECASE))
+    stripped = re.sub(r"^\[[^\]]+\]\s*", "", raw_stripped)
     stripped = stripped.replace(" — ", "; ").strip(" .;|").lower()
-    return " ".join(stripped.split())
+    norm = " ".join(stripped.split())
+    return f"[spck] {norm}" if (is_spck and norm) else norm
 
 
 def _provenance_issue_key(text: Any) -> str:
-    """Return a canonical provenance key that requires and preserves the leading [LMS]/[Zalo] tag."""
+    """Return a canonical provenance key that requires and preserves the leading [LMS]/[Zalo]/[SPCK] tag."""
     cleaned = " ".join(issue_text(text).split()).strip(" ;|")
     if not cleaned:
         return ""
-    if not re.match(r"^\[(lms|zalo)\]\s+.+$", cleaned, flags=re.IGNORECASE):
+    if not re.match(r"^\[(lms|zalo|spck)\]\s+.+$", cleaned, flags=re.IGNORECASE):
         return ""
     norm = normalize_auto_issue_text(cleaned)
     norm = re.sub(r"\s*[;|]+\s*", ", ", norm)
     balanced = _balance_issue_brackets(norm).strip(" ;|")
-    tag_match = re.match(r"^\[(lms|zalo)\]\s+(.+)$", balanced, flags=re.IGNORECASE)
+    tag_match = re.match(r"^\[(lms|zalo|spck)\]\s+(.+)$", balanced, flags=re.IGNORECASE)
     if not tag_match:
         return ""
     tag = tag_match.group(1).lower()

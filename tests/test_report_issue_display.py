@@ -309,6 +309,88 @@ class ReportIssueDisplayTests(unittest.TestCase):
         parsed.feed(package["html_table"])
         self.assertEqual(parsed.items, [row["issue_description"]])
 
+    def test_muc_a_spck_lms_zalo_email_coloring_and_non_collision(self):
+        muc_a_spck_missing = {
+            "class_code": "SYNTH-CSI02",
+            "teacher": "Giảng viên D",
+            "lesson": "12",
+            "class_date": "08/11/2026",
+            "zalo_status": "✅ Đã nộp – Có minh chứng",
+            "lms_status": "✅ Đã nhận xét 4/4 HS đi học",
+            "lms_quality_issues": ["[SPCK] Chưa nộp (0/4)"],
+        }
+        muc_a_both_chua_nx = {
+            "class_code": "SYNTH-JSB15",
+            "teacher": "Giảng viên E",
+            "lesson": "13",
+            "class_date": "09/11/2026",
+            "zalo_status": "✅ Đã nộp – Có minh chứng",
+            "lms_status": "❌ Chưa nhận xét đủ HS",
+            "qc_issue_note": "[LMS] Chưa NX (1/4); [SPCK] Chưa NX (1/4); [SPCK] Bổ sung tên SP, ảnh",
+            "lms_quality_issues": [
+                {"code": "LMS_QUALITY_FAIL", "severity": "FAIL", "text": "[LMS] Chưa NX (1/4)"},
+                {
+                    "code": "LMS_SPCK_COMMENT_MISSING",
+                    "severity": "FAIL",
+                    "text": "[SPCK] Chưa NX (1/4)",
+                },
+                {
+                    "code": "LMS_SPCK_NOTE",
+                    "severity": "NOTE",
+                    "text": "[SPCK] Bổ sung tên SP, ảnh",
+                },
+            ],
+        }
+        muc_a_zalo_missing = {
+            "class_code": "SYNTH-GA38",
+            "teacher": "Giảng viên F",
+            "lesson": "12",
+            "class_date": "10/11/2026",
+            "zalo_status": "❌ Chưa tìm thấy trong khoảng đã kiểm chứng – Có minh chứng",
+            "evidence_state": "NOT_FOUND_VERIFIED",
+            "scan_status": "VERIFIED",
+            "write_status": "FAILED_BEFORE_WRITE",
+            "bcnb_update_state": "FAILED_BEFORE_WRITE",
+            "error_code": "EVIDENCE_NOT_READY",
+            "category": "REVIEW",
+            "lms_status": "✅ Đã nhận xét 4/4 HS đi học",
+            "lms_quality_issues": [
+                {"code": "LMS_SUMMARY_NOTE", "severity": "NOTE", "text": "[LMS] Điền tóm tắt bài"},
+                "[Zalo] Chưa gửi báo cáo nhận xét trên nhóm Zalo",
+            ],
+        }
+
+        f_spck = _prepare_email_row_fields(1, muc_a_spck_missing)
+        self.assertEqual(f_spck["evaluation_status"], "⚠️ Chưa nộp SPCK trên LMS")
+
+        # Both [LMS] Chưa NX (1/4) and [SPCK] Chưa NX (1/4) survive deduplication without colliding!
+        desc_both = _resolve_row_issue_description(muc_a_both_chua_nx, st={})
+        self.assertEqual(
+            _split_display_issues(desc_both),
+            ["[LMS] Chưa NX (1/4)", "[SPCK] Chưa NX (1/4)", "[SPCK] Bổ sung tên SP, ảnh"],
+        )
+
+        pkg = build_failed_classes_email_package(
+            week=46,
+            year=2026,
+            failed_rows=[muc_a_spck_missing, muc_a_both_chua_nx, muc_a_zalo_missing],
+            total_rows_count=10,
+            selected_job_id=601,
+            recipients=["owner@example.com"],
+        )
+        parsed = IssueListParser()
+        parsed.feed(pkg["html_table"])
+        red_items = [item for item, style in zip(parsed.items, parsed.styles) if "#dc2626" in style]
+        warn_items = [item for item, style in zip(parsed.items, parsed.styles) if "#b45309" in style]
+        self.assertEqual(red_items, ["[Zalo] Chưa gửi báo cáo nhận xét trên nhóm Zalo"])
+        self.assertEqual(
+            warn_items,
+            ["[SPCK] Chưa nộp (0/4)", "[SPCK] Chưa NX (1/4)"],
+        )
+        self.assertIn("[LMS] Chưa NX (1/4)", parsed.items)
+        self.assertIn("[SPCK] Bổ sung tên SP, ảnh", parsed.items)
+        self.assertIn("[LMS] Điền tóm tắt bài", parsed.items)
+
 
 if __name__ == "__main__":
     unittest.main()

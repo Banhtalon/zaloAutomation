@@ -464,6 +464,74 @@ def _apply_bcnb_deadline_state(
     return True
 
 
+_READ_BCNB_ROWS_FAST_JS = """
+(extCols) => {
+  const cols = extCols || {};
+  const trs = Array.from(document.querySelectorAll("table tr"));
+  const readCheckbox = (tds, idx) => {
+    if (typeof idx !== "number" || idx < 0 || idx >= tds.length) return null;
+    const cb = tds[idx].querySelector('input[type="checkbox"]');
+    return cb ? Boolean(cb.checked) : null;
+  };
+  const readNote = (tds, idx, noteType) => {
+    if (typeof idx !== "number" || idx < 0 || idx >= tds.length) {
+      return { present: false, attrRaw: null, fieldVal: null, textRaw: null };
+    }
+    const td = tds[idx];
+    const noteEl = td.querySelector('.note-cell[data-note-type="' + noteType + '"]');
+    const attrRaw = noteEl ? noteEl.getAttribute("data-current-note") : null;
+    const fieldEl = td.querySelector('textarea, input:not([type="checkbox"]):not([type="hidden"])');
+    const fieldVal = fieldEl && typeof fieldEl.value === "string" ? fieldEl.value : null;
+    const textRaw = typeof td.innerText === "string" ? td.innerText : String(td.textContent || "");
+    return { present: true, attrRaw, fieldVal, textRaw };
+  };
+  const out = [];
+  for (const tr of trs) {
+    if (tr.querySelector("table") !== null) {
+      return null;
+    }
+    const tds = Array.from(tr.querySelectorAll("td"));
+    const texts = tds.map((td) =>
+      typeof td.innerText === "string" ? td.innerText : String(td.textContent || "")
+    );
+    out.push({
+      cellCount: tds.length,
+      texts,
+      sessionId: String(tr.getAttribute("data-session-id") || "").trim(),
+      rowBlock: String(tr.getAttribute("data-block") || "").trim(),
+      nxZaloChecked: readCheckbox(tds, cols.zalo_checkbox_index),
+      nxLmsChecked: readCheckbox(tds, cols.lms_checkbox_index),
+      checkerNote: readNote(tds, cols.checker_note_index, "checker"),
+      instructorNote: readNote(tds, cols.instructor_note_index, "instructor"),
+    });
+  }
+  return out;
+}
+"""
+
+_ZALO_MANUAL_CHECK_MARKERS = ("cần kiểm tra thủ công", "kiểm tra tay")
+
+
+def _resolve_evaluated_note_cell(note_info: Any) -> str | None:
+    if not isinstance(note_info, Mapping) or not note_info.get("present"):
+        return None
+    attr_value: str | None = None
+    raw_attr = note_info.get("attrRaw")
+    if raw_attr is not None:
+        attr_value = preserve_bcnb_note_text(str(raw_attr))
+        if attr_value:
+            return attr_value
+    raw_field = note_info.get("fieldVal")
+    if raw_field is not None:
+        field_value = preserve_bcnb_note_text(str(raw_field))
+        if field_value:
+            return field_value
+    raw_text = note_info.get("textRaw")
+    if raw_text is not None:
+        return preserve_bcnb_note_text(str(raw_text))
+    return attr_value
+
+
 async def _read_bcnb_schedule_rows(
     page,
     *,
@@ -479,11 +547,121 @@ async def _read_bcnb_schedule_rows(
     class_index, lesson_index, date_index, deadline_index = await resolve_schedule_columns(page)
     ext_cols = await resolve_extended_bcnb_columns(page)
     rows = await page.locator("table tr").all()
+    required_index = max(class_index, lesson_index, date_index, deadline_index)
+    is_playwright_page = str(getattr(type(page), "__module__", "")).startswith(
+        "playwright."
+    ) and callable(getattr(page, "evaluate", None))
+    if is_playwright_page:
+        try:
+            raw_rows = await page.evaluate(_READ_BCNB_ROWS_FAST_JS, ext_cols)
+            if not isinstance(raw_rows, list) or len(raw_rows) != len(rows):
+                raise RuntimeError("BCNB fast table read row count mismatch.")
+            fast_snapshot: list[dict[str, Any]] = []
+            cols_map = ext_cols if isinstance(ext_cols, Mapping) else {}
+            block_idx = cols_map.get("block_index")
+            lms_dl_idx = cols_map.get("lms_deadline_index")
+            eval_idx = cols_map.get("evaluation_status_index")
+            for row, raw_item in zip(rows, raw_rows, strict=True):
+                await job_repo.ensure_not_cancelled(job_id)
+                if not isinstance(raw_item, Mapping):
+                    raise RuntimeError("BCNB fast table read row payload invalid.")
+                texts = raw_item.get("texts")
+                if not isinstance(texts, list):
+                    raise RuntimeError("BCNB fast table read texts invalid.")
+                cell_count = int(raw_item.get("cellCount", len(texts)))
+                if cell_count != len(texts):
+                    raise RuntimeError("BCNB fast table read cell count mismatch.")
+                if cell_count <= required_index:
+                    continue
+                class_code = str(texts[class_index] or "").strip()
+                class_date = str(texts[date_index] or "").strip()
+                if not class_code or not class_date:
+                    continue
+                parsed_class_date = _parse_bcnb_date(class_date, today=today)
+                iso_date = (
+                    parsed_class_date.date().isoformat() if parsed_class_date else None
+                )
+                khoi = (
+                    str(texts[block_idx] or "").strip()
+                    if isinstance(block_idx, int) and 0 <= block_idx < cell_count
+                    else ""
+                )
+                if not khoi:
+                    khoi = str(raw_item.get("rowBlock") or "").strip()
+                lms_deadline = (
+                    str(texts[lms_dl_idx] or "").strip()
+                    if isinstance(lms_dl_idx, int) and 0 <= lms_dl_idx < cell_count
+                    else ""
+                )
+                evaluation_status = (
+                    re.sub(r"\s+", " ", str(texts[eval_idx] or "")).strip()
+                    if isinstance(eval_idx, int) and 0 <= eval_idx < cell_count
+                    else ""
+                )
+                raw_zalo_chk = raw_item.get("nxZaloChecked")
+                raw_lms_chk = raw_item.get("nxLmsChecked")
+                full_ext: dict[str, Any] = {
+                    "bcnb_session_id": str(raw_item.get("sessionId") or "").strip(),
+                    "khoi": khoi,
+                    "nx_zalo_checked": (
+                        raw_zalo_chk if isinstance(raw_zalo_chk, bool) else None
+                    ),
+                    "nx_lms_checked": (
+                        raw_lms_chk if isinstance(raw_lms_chk, bool) else None
+                    ),
+                    "lms_deadline": lms_deadline,
+                    "qc_issue_note": _resolve_evaluated_note_cell(
+                        raw_item.get("checkerNote")
+                    ),
+                    "instructor_note": _resolve_evaluated_note_cell(
+                        raw_item.get("instructorNote")
+                    ),
+                    "evaluation_status": evaluation_status,
+                }
+                ext_fields = {
+                    k: v
+                    for k, v in full_ext.items()
+                    if (
+                        isinstance(v, bool)
+                        or (
+                            isinstance(v, str)
+                            and (
+                                bool(v.strip())
+                                or k in {"qc_issue_note", "instructor_note"}
+                            )
+                        )
+                    )
+                }
+                checker_note_unreadable = (
+                    "qc_issue_note" not in ext_fields
+                    or not isinstance(ext_fields.get("qc_issue_note"), str)
+                )
+                cells = [row.locator("td").nth(i) for i in range(cell_count)]
+                fast_snapshot.append(
+                    {
+                        "row": row,
+                        "cells": cells,
+                        "week": week,
+                        "year": year,
+                        "ma_lop": class_code,
+                        "buoi_so": str(texts[lesson_index] or "").strip(),
+                        "ngay_hoc": class_date,
+                        "ngay_hoc_iso": iso_date,
+                        "zalo_deadline": str(texts[deadline_index] or "").strip(),
+                        "checker_note_unreadable": checker_note_unreadable,
+                        **ext_fields,
+                    }
+                )
+            return fast_snapshot
+        except JobCancelledError:
+            raise
+        except Exception:
+            pass
+
     snapshot: list[dict[str, Any]] = []
     for row in rows:
         await job_repo.ensure_not_cancelled(job_id)
         cells = await row.locator("td").all()
-        required_index = max(class_index, lesson_index, date_index, deadline_index)
         if len(cells) <= required_index:
             continue
         class_code = (await cells[class_index].inner_text()).strip()
@@ -568,7 +746,11 @@ def _is_zalo_scan_indeterminate(
     raw_zalo: Sequence[Any],
 ) -> bool:
     """Return True when the Zalo scan could not reach a verified verdict."""
-    if any("cần kiểm tra thủ công" in issue_text(x) for x in raw_zalo):
+    if any(
+        marker in issue_text(x).lower()
+        for x in raw_zalo
+        for marker in _ZALO_MANUAL_CHECK_MARKERS
+    ):
         return True
     if str(result.get("error_code") or "").strip():
         return True
@@ -624,7 +806,12 @@ def _collect_row_verifiable_auto_issues(
         ]
     else:
         zalo_auto = [
-            x for x in raw_zalo if "cần kiểm tra thủ công" not in issue_text(x)
+            x
+            for x in raw_zalo
+            if not any(
+                marker in issue_text(x).lower()
+                for marker in _ZALO_MANUAL_CHECK_MARKERS
+            )
         ]
 
     raw_lms = [
@@ -663,7 +850,7 @@ def _collect_row_verifiable_auto_issues(
     existing_lms_auto: list[Any] = [
         x
         for x in existing_auto
-        if issue_text(x).upper().startswith("[LMS]")
+        if issue_text(x).upper().startswith(("[LMS]", "[SPCK]"))
     ]
     comments_status = (
         str(comments_meta.get("status") or "").strip().upper()
@@ -862,6 +1049,7 @@ async def update_bcnb_reports(
     period_filter: set[tuple[int, int]] | None = None,
     should_halt: Callable[[], bool] | None = None,
     on_target_outcome: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+    on_row_finalized: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     lms_quality_gateway: Any = None,
     lms_slots_by_class: dict[str, list[dict[str, Any]]] | None = None,
     notes_only: bool | None = False,
@@ -1053,12 +1241,15 @@ async def update_bcnb_reports(
         ]
         return candidates[0] if len(candidates) == 1 else None
 
-    async def _ensure_row_lms_evaluated(target_result: dict[str, Any], row_obj: Mapping[str, Any]) -> None:
+    async def _ensure_row_lms_evaluated(
+        target_result: dict[str, Any], row_obj: Mapping[str, Any]
+    ) -> bool:
         nonlocal resolved_lms_slots
         row_code = str(row_obj.get("ma_lop") or "").strip().upper()
         row_date_iso = str(row_obj.get("ngay_hoc_iso") or "").strip()
         if row_date_iso and not target_result.get("ngay_hoc_iso"):
             target_result["ngay_hoc_iso"] = row_date_iso
+        page_used_for_lms = False
         if (
             lms_slots_by_class is None
             and row_code
@@ -1079,6 +1270,7 @@ async def update_bcnb_reports(
                 reset_ai_batch_counter=False,
             )
             if isinstance(extra_lms_slots, dict):
+                page_used_for_lms = True
                 if isinstance(resolved_lms_slots, dict):
                     resolved_lms_slots.update(extra_lms_slots)
                 else:
@@ -1091,6 +1283,7 @@ async def update_bcnb_reports(
             latest_week=latest_pair,
             reset_ai_batch_counter=False,
         )
+        return page_used_for_lms
 
     async def _maybe_update_row_checker_note(
         target_result: dict[str, Any] | None,
@@ -1098,7 +1291,7 @@ async def update_bcnb_reports(
         *,
         selected_week: int,
         selected_year: int,
-    ) -> None:
+    ) -> bool:
         nonlocal checker_note_updated_count
         if (
             target_result is None
@@ -1106,11 +1299,11 @@ async def update_bcnb_reports(
             or audit_repo is None
             or not hasattr(audit_repo, "record_intent")
         ):
-            return
+            return False
         row_code = str(bcnb_row.get("ma_lop") or "").strip().upper()
         row_lesson = str(bcnb_row.get("buoi_so") or "").strip()
         row_date_iso = str(bcnb_row.get("ngay_hoc_iso") or "").strip()
-        await _ensure_row_lms_evaluated(target_result, bcnb_row)
+        lms_used_page = await _ensure_row_lms_evaluated(target_result, bcnb_row)
         has_readable_note = (
             isinstance(bcnb_row.get("qc_issue_note"), str)
             and not bool(bcnb_row.get("checker_note_unreadable"))
@@ -1141,7 +1334,7 @@ async def update_bcnb_reports(
             proven_auto_issues=proven_auto_issues,
         )
         if not should_sync:
-            return
+            return lms_used_page
         if not has_readable_note:
             err_msg = (
                 "Không đọc được ô Mô tả vấn đề hiện tại trên BCNB; "
@@ -1173,7 +1366,7 @@ async def update_bcnb_reports(
                 week=selected_week,
                 year=selected_year,
             )
-            return
+            return lms_used_page
         if should_halt is not None and should_halt():
             halt_outcome = {
                 "class_code": row_code,
@@ -1187,7 +1380,7 @@ async def update_bcnb_reports(
             }
             checker_note_outcomes.append(halt_outcome)
             target_result["checker_note_outcome"] = "BLOCKED_BATCH_HALT"
-            return
+            return lms_used_page
 
         merged_note = merge_checker_issue_note(
             existing_note,
@@ -1291,10 +1484,10 @@ async def update_bcnb_reports(
                 year=selected_year,
                 error_type=type(note_error).__name__,
             )
-            return
+            return execution_mode == "production" or lms_used_page
 
         if note_outcome == "NO_CHANGE":
-            return
+            return lms_used_page
         checker_note_updated_count += 1
         target_result["checker_note_outcome"] = note_outcome
         if note_outcome == "VERIFIED":
@@ -1314,6 +1507,7 @@ async def update_bcnb_reports(
                 "status": note_outcome,
             }
         )
+        return execution_mode == "production" or lms_used_page
 
     log_message(
         "Đối chiếu BCNB theo các tuần: "
@@ -1337,6 +1531,8 @@ async def update_bcnb_reports(
             if (notes_only or check_only)
             else await resolve_report_columns(page)
         )
+        latest_bcnb_rows = bcnb_rows
+        dom_dirty = False
         is_current_week = (selected_week, selected_year) == latest_pair
         log_message(
             f"Đã kiểm chứng BCNB ở Tuần {selected_week} / {selected_year}: "
@@ -1344,6 +1540,7 @@ async def update_bcnb_reports(
         )
 
         async def _relocate_fresh_row(reference_row: dict[str, Any]) -> dict[str, Any] | None:
+            nonlocal latest_bcnb_rows, dom_dirty, report_index
             refreshed_rows = await _read_bcnb_schedule_rows(
                 page,
                 week=selected_week,
@@ -1352,6 +1549,10 @@ async def update_bcnb_reports(
                 today=today,
                 job_repo=job_repo,
             )
+            if not notes_only and not check_only:
+                _, _, report_index = await resolve_report_columns(page)
+            latest_bcnb_rows = refreshed_rows
+            dom_dirty = False
             return _match_refreshed_row(refreshed_rows, reference_row)
 
         for bcnb_row in bcnb_rows:
@@ -1423,9 +1624,12 @@ async def update_bcnb_reports(
                             continue
                         is_ineligible_current_week = True
             if execution_mode == "production" and not check_only:
-                refreshed = await _relocate_fresh_row(bcnb_row)
-                if not notes_only:
-                    _, _, report_index = await resolve_report_columns(page)
+                if dom_dirty:
+                    refreshed = await _relocate_fresh_row(bcnb_row)
+                elif latest_bcnb_rows is not bcnb_rows:
+                    refreshed = _match_refreshed_row(latest_bcnb_rows, bcnb_row)
+                else:
+                    refreshed = bcnb_row
                 if refreshed is None:
                     log_message(
                         f"Không tìm lại được dòng BCNB {bcnb_row['ma_lop']}/{bcnb_row['buoi_so']}; "
@@ -1453,7 +1657,7 @@ async def update_bcnb_reports(
             if len(meta_row_matches) == 1:
                 matching_bcnb_rows = [
                     candidate_row
-                    for candidate_row in bcnb_rows
+                    for candidate_row in latest_bcnb_rows
                     if _result_matches_bcnb_row_for_metadata(
                         meta_row_matches[0],
                         candidate_row,
@@ -1514,12 +1718,14 @@ async def update_bcnb_reports(
                 if row_is_lesson_14 and note_target is None:
                     note_target = _apply_lesson_14_result(scan_results, bcnb_row)
                     _attach_bcnb_row_metadata(note_target, bcnb_row)
-                await _maybe_update_row_checker_note(
+                if await _maybe_update_row_checker_note(
                     note_target,
                     bcnb_row,
                     selected_week=selected_week,
                     selected_year=selected_year,
-                )
+                ):
+                    if execution_mode == "production":
+                        dom_dirty = True
                 continue
             is_submitted = False
 
@@ -1549,6 +1755,21 @@ async def update_bcnb_reports(
             report_tick_failed = False
             lms_tick_failed = False
             halt_blocked = False
+            row_stage_a_outcome: dict[str, Any] | None = None
+
+            async def _record_stage_a_outcome(item: dict[str, Any]) -> None:
+                nonlocal row_stage_a_outcome
+                row_stage_a_outcome = item
+                await emit_outcome(item)
+
+            async def _finalize_row_if_needed() -> None:
+                if row_stage_a_outcome is not None and on_row_finalized is not None:
+                    await on_row_finalized(
+                        {
+                            **row_stage_a_outcome,
+                            "target_result": matched_result,
+                        }
+                    )
 
             # Stage A: BCNB NX Zalo checkbox tick
             if is_submitted:
@@ -1561,7 +1782,7 @@ async def update_bcnb_reports(
                         matched_result["nx_zalo_checked"] = True
                         if isinstance(matched_result.get("scan_target"), dict):
                             matched_result["scan_target"]["nx_zalo_checked"] = True
-                    await emit_outcome(
+                    await _record_stage_a_outcome(
                         {
                             "class_code": class_code,
                             "lesson": lesson,
@@ -1573,7 +1794,7 @@ async def update_bcnb_reports(
                     )
                 elif should_halt is not None and should_halt():
                     halt_blocked = True
-                    await emit_outcome(
+                    await _record_stage_a_outcome(
                         {
                             "class_code": class_code,
                             "lesson": lesson,
@@ -1592,6 +1813,8 @@ async def update_bcnb_reports(
                     candidate = candidates[-1] if candidates else {}
                     evidence_path, evidence_sha256 = get_evidence_reference(matched_result)
                     try:
+                        if execution_mode == "production":
+                            dom_dirty = True
                         outcome = await execute_verified_checkbox_action(
                             page=page,
                             checkbox=checkbox,
@@ -1649,7 +1872,8 @@ async def update_bcnb_reports(
                     except Exception as action_error:
                         report_tick_failed = True
                         unknown = isinstance(action_error, BcnbOutcomeUnknownError)
-                        if execution_mode == "production" and unknown:
+                        if execution_mode == "production":
+                            dom_dirty = True
                             need_row_refresh = True
                         failure_code = (
                             "BCNB_REPORT_OUTCOME_UNKNOWN"
@@ -1670,7 +1894,7 @@ async def update_bcnb_reports(
                             "error": failure_safe_error,
                         }
                         failures.append(failure)
-                        await emit_outcome(
+                        await _record_stage_a_outcome(
                             {
                                 **failure,
                                 "class_date_iso": bcnb_row.get("ngay_hoc_iso"),
@@ -1705,12 +1929,13 @@ async def update_bcnb_reports(
                         updated_count += 1
                         if outcome == "VERIFIED":
                             if execution_mode == "production":
+                                dom_dirty = True
                                 need_row_refresh = True
                             if matched_result is not None:
                                 matched_result["nx_zalo_checked"] = True
                                 if isinstance(matched_result.get("scan_target"), dict):
                                     matched_result["scan_target"]["nx_zalo_checked"] = True
-                        await emit_outcome(
+                        await _record_stage_a_outcome(
                             {
                                 "class_code": class_code,
                                 "lesson": lesson,
@@ -1733,6 +1958,7 @@ async def update_bcnb_reports(
                             )
 
             if halt_blocked:
+                await _finalize_row_if_needed()
                 continue
 
             # Stage B: BCNB NX LMS checkbox tick (positive verification required)
@@ -1748,11 +1974,15 @@ async def update_bcnb_reports(
                 and not _is_missing_zalo_group_result(lms_target)
                 and not is_lms_fetch_unavailable(resolved_lms_slots)
             ):
-                await _ensure_row_lms_evaluated(lms_target, bcnb_row)
+                if await _ensure_row_lms_evaluated(lms_target, bcnb_row):
+                    if execution_mode == "production":
+                        dom_dirty = True
+                        need_row_refresh = True
                 lms_ready, lms_ready_reason = is_lms_ready_for_bcnb_tick(lms_target)
                 if lms_ready:
                     if need_row_refresh:
                         refreshed_after_report = await _relocate_fresh_row(bcnb_row)
+                        need_row_refresh = False
                         if refreshed_after_report is None:
                             lms_tick_failed = True
                             lms_missing_err = (
@@ -1777,8 +2007,8 @@ async def update_bcnb_reports(
                         else:
                             bcnb_row = refreshed_after_report
                             cells = bcnb_row["cells"]
-                            need_row_refresh = False
                     if not lms_tick_failed:
+                        lms_action_invoked = False
                         try:
                             _, lms_index = await resolve_lms_columns(page)
                             lms_checkbox = cells[lms_index].locator('input[type="checkbox"]').first
@@ -1823,6 +2053,9 @@ async def update_bcnb_reports(
                                     if isinstance(raw_lms_spck, dict)
                                     else {}
                                 )
+                                lms_action_invoked = True
+                                if execution_mode == "production":
+                                    dom_dirty = True
                                 lms_outcome = await execute_verified_checkbox_action(
                                     page=page,
                                     checkbox=lms_checkbox,
@@ -1860,6 +2093,7 @@ async def update_bcnb_reports(
                                 lms_updated_count += 1
                                 if lms_outcome == "VERIFIED":
                                     if execution_mode == "production":
+                                        dom_dirty = True
                                         need_row_refresh = True
                                     lms_target["nx_lms_checked"] = True
                                     if isinstance(lms_target.get("scan_target"), dict):
@@ -1890,7 +2124,8 @@ async def update_bcnb_reports(
                         except Exception as lms_error:
                             lms_tick_failed = True
                             lms_unknown = isinstance(lms_error, BcnbOutcomeUnknownError)
-                            if execution_mode == "production" and lms_unknown:
+                            if execution_mode == "production" and lms_action_invoked:
+                                dom_dirty = True
                                 need_row_refresh = True
                             lms_status = (
                                 "OUTCOME_UNKNOWN"
@@ -1938,6 +2173,7 @@ async def update_bcnb_reports(
                             )
 
             if halt_blocked:
+                await _finalize_row_if_needed()
                 continue
 
             # Stage C: Checker note update (skipped if any checkbox tick on this row failed)
@@ -1961,24 +2197,30 @@ async def update_bcnb_reports(
                         "error": "Bỏ qua cập nhật Mô tả vấn đề vì bước tick báo cáo hoặc NX LMS thất bại.",
                     }
                 )
+                await _finalize_row_if_needed()
                 continue
 
             if need_row_refresh:
                 refreshed_for_note = await _relocate_fresh_row(bcnb_row)
+                need_row_refresh = False
                 if refreshed_for_note is None:
                     log_message(
                         f"Không tìm lại được dòng {class_code}/{lesson} sau tick để ghi Mô tả vấn đề.",
                         level="WARNING",
                     )
+                    await _finalize_row_if_needed()
                     continue
                 bcnb_row = refreshed_for_note
 
-            await _maybe_update_row_checker_note(
+            if await _maybe_update_row_checker_note(
                 note_target,
                 bcnb_row,
                 selected_week=selected_week,
                 selected_year=selected_year,
-            )
+            ):
+                if execution_mode == "production":
+                    dom_dirty = True
+            await _finalize_row_if_needed()
 
     await inspect_and_attach_quality_issues_async(
         scoped_results,

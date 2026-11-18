@@ -181,7 +181,7 @@ class Config:
     )
     MAX_QUEUED_JOBS = max(0, int(os.getenv("MAX_QUEUED_JOBS", 8)))
     JOB_TIMEOUT_SECONDS = max(
-        30, int(os.getenv("JOB_TIMEOUT_SECONDS", 30 * 60))
+        30, int(os.getenv("JOB_TIMEOUT_SECONDS", 60 * 60))
     )
     LEASE_TIMEOUT_SECONDS = max(
         JOB_HEARTBEAT_SECONDS * 3,

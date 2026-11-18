@@ -3568,15 +3568,62 @@ async function checkTodayLivePageWorkflow() {
         zalo_category: 'DONE', lms_checked: true, lms_ready_for_tick: false,
         lms_attendance: { status: 'VERIFIED', attended_count: 4, absent_count: 0 },
         lms_comments: { status: 'COMPLETE', submitted_count: 4, exempt_count: 0 },
-        lms_spck: { status: 'COMPLETE', missing_comment_count: 2, summary_text: 'SPCK 4/4', detail_notes: ['[LMS] SPCK chưa có nhận xét (2/4 HS)'] },
+        lms_spck: { status: 'COMPLETE', missing_comment_count: 2, summary_text: 'SPCK 4/4', detail_notes: ['[SPCK] Chưa NX (2/4)'] },
       };
+      const mucASpckOnlyRow = {
+        lesson: '12',
+        status: '✅ Đã nộp – Có minh chứng',
+        evidence_state: 'SUBMITTED_VERIFIED',
+        lms_status: '✅ Đã nhận xét 4/4 HS',
+        lms_quality_issues: ['[SPCK] Chưa nộp (0/4)', '[SPCK] Bổ sung tên SP, ảnh', '[LMS] Điền tóm tắt bài, viết kỹ NX', '[Zalo] Thiếu ngày/buổi'],
+      };
+      const mucASpckCommentRow = {
+        lesson: '13',
+        status: '✅ Đã nộp – Có minh chứng',
+        evidence_state: 'SUBMITTED_VERIFIED',
+        lms_status: '✅ Đã nhận xét 4/4 HS',
+        lms_quality_issues: ['[SPCK] Chưa NX (1/4)', '[SPCK] Kiểm tra tay trên LMS'],
+      };
+      const mucAMixedFailRow = {
+        lesson: '13',
+        status: '✅ Đã nộp – Có minh chứng',
+        evidence_state: 'SUBMITTED_VERIFIED',
+        lms_status: '❌ Chưa nhận xét đủ HS',
+        lms_quality_issues: ['[LMS] Chưa NX (1/4)', '[SPCK] Chưa NX (1/4)'],
+      };
+      const splitMucA = splitCheckerIssueNoteInJs('QC ghi chú tay | [LMS] Điền tóm tắt bài; [SPCK] Bổ sung tên SP; [Zalo] Thiếu ngày/buổi');
       return collectTodayMissingReasons(ongoingB13).length === 0
         && !isTodayItemMissingLms(ongoingB13)
         && isTodaySpckComplete(allAbsentExempt)
         && collectTodayMissingReasons(allAbsentExempt).length === 0
         && !isTodaySpckComplete(missingSpckComments)
         && isTodayItemMissingLms(missingSpckComments)
-        && collectTodayMissingReasons(missingSpckComments).includes('[LMS] SPCK chưa có nhận xét (2/4 HS)');
+        && collectTodayMissingReasons(missingSpckComments).includes('[SPCK] Chưa NX (2/4)')
+        && hasRowSpckMissingFail(mucASpckOnlyRow)
+        && isRowSpckOnlyWarningFail(
+          mucASpckOnlyRow,
+          resolveRowCategory(mucASpckOnlyRow),
+          resolveDashboardRowLmsStatus(mucASpckOnlyRow),
+          resolveDashboardRowIssueDescription(mucASpckOnlyRow),
+        )
+        && hasRowSpckCommentMissingFail(mucASpckCommentRow)
+        && isRowSpckOnlyWarningFail(
+          mucASpckCommentRow,
+          resolveRowCategory(mucASpckCommentRow),
+          resolveDashboardRowLmsStatus(mucASpckCommentRow),
+          resolveDashboardRowIssueDescription(mucASpckCommentRow),
+        )
+        && resolveRowIssueSeverity({ is_failed: true, lms_quality_issues: ['[SPCK] Kiểm tra tay trên LMS'] }) === 'NOTE'
+        && resolveRowIssueSeverity({ is_failed: true, lms_quality_issues: ['[LMS] Kiểm tra tay trên LMS'] }) === 'NOTE'
+        && resolveDashboardRowIssueDescription(mucAMixedFailRow) === '[LMS] Chưa NX (1/4); [SPCK] Chưa NX (1/4)'
+        && !isRowSpckOnlyWarningFail(
+          mucAMixedFailRow,
+          resolveRowCategory(mucAMixedFailRow),
+          resolveDashboardRowLmsStatus(mucAMixedFailRow),
+          resolveDashboardRowIssueDescription(mucAMixedFailRow),
+        )
+        && splitMucA.manual === 'QC ghi chú tay'
+        && splitMucA.autoIssues.length === 3;
     })()`,
     harness.context,
   );

@@ -1297,7 +1297,7 @@ class TodayOpsServiceTests(unittest.IsolatedAsyncioTestCase):
             if int(week) != 45:
                 return []
             w45_reads += 1
-            return [initial_row] if w45_reads <= 2 else [reloaded_missing_sid]
+            return [initial_row] if w45_reads == 1 else [reloaded_missing_sid]
 
         read_rows = AsyncMock(side_effect=_read_side_effect)
         tick_mock = AsyncMock(return_value="VERIFIED")

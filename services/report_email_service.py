@@ -277,12 +277,19 @@ def _short_url_status(value: str) -> str:
 def _short_url_issue(value: str) -> str:
     if not value or value == "—":
         return ""
-    s = str(value).replace("[LMS] ", "").replace("[Zalo] ", "")
+    s = (
+        str(value)
+        .replace("[LMS] ", "")
+        .replace("[Zalo] ", "")
+        .replace("[SPCK] ", "SPCK ")
+    )
     s = s.replace("Chưa ghi nội dung bài học", "Thiếu ND")
+    s = s.replace("Điền tóm tắt bài", "Thiếu ND")
     s = s.replace("Nhận xét HS sơ sài, thiếu đủ 3 ý", "NX thiếu ý")
     s = s.replace("Nhận xét thiếu ý", "NX thiếu ý")
     s = s.replace("Nhận xét học viên quá ngắn/sơ sài", "NX sơ sài")
     s = s.replace("Chưa gửi báo cáo nhận xét trên nhóm Zalo", "Trễ Zalo")
+    s = s.replace("Kiểm tra tay trên LMS", "Cần KT LMS")
     s = s.replace(
         "Không tải được đầy đủ dữ liệu buổi học từ LMS, cần kiểm tra thủ công",
         "Cần KT LMS",

@@ -180,10 +180,7 @@ def resolve_report_target(
             decision=TARGET_DATE_TYPO_CORRECTED,
             matches=True,
             corrected_teacher_date=True,
-            note=(
-                "Đã báo cáo nhưng ghi sai buổi "
-                f"{claimed_lesson}; đã ghép theo {_target_label(target)}."
-            ),
+            note="[Zalo] Sai số buổi",
         )
 
     # An explicit "buổi N" equal to BCNB's row is sufficient to correct a
@@ -201,25 +198,19 @@ def resolve_report_target(
                     decision=TARGET_SAME_DAY_WRONG_DATE,
                     matches=True,
                     corrected_teacher_date=True,
-                    note=f"[Zalo] Báo cáo ghi sai ngày ({claimed_lesson_date.strftime('%d/%m')})",
+                    note=f"[Zalo] Sai ngày ({claimed_lesson_date.strftime('%d/%m')})",
                 )
             return TargetMatch(
                 decision=TARGET_SAME_DAY_NO_DATE,
                 matches=True,
                 corrected_teacher_date=False,
-                note="[Zalo] Báo cáo không ghi ngày/buổi",
+                note="[Zalo] Thiếu ngày/buổi",
             )
         if claimed_lesson_date is not None:
             claimed_text = claimed_lesson_date.strftime("%d/%m")
-            note_text = (
-                f"Đã báo cáo nhưng ghi sai ngày {claimed_text}; "
-                f"đã ghép theo {_target_label(target)}."
-            )
+            note_text = f"[Zalo] Sai ngày ({claimed_text})"
         else:
-            note_text = (
-                f"Đã báo cáo nhưng không ghi ngày; "
-                f"đã ghép theo {_target_label(target)}."
-            )
+            note_text = "[Zalo] Thiếu ngày"
         return TargetMatch(
             decision=TARGET_DATE_TYPO_CORRECTED,
             matches=True,
@@ -242,10 +233,7 @@ def resolve_report_target(
             decision=TARGET_DATE_TYPO_CORRECTED,
             matches=True,
             corrected_teacher_date=True,
-            note=(
-                "Đã báo cáo nhưng ghi sai ngày/buổi trong mẫu; "
-                f"'Bài số {content_lesson}' khớp với {_target_label(target)}."
-            ),
+            note="[Zalo] Sai ngày/buổi",
         )
 
     # D2 fallback: report sent on the exact BCNB class date with no same-day
@@ -264,14 +252,14 @@ def resolve_report_target(
                 decision=TARGET_SAME_DAY_NO_DATE,
                 matches=True,
                 corrected_teacher_date=False,
-                note="[Zalo] Báo cáo không ghi ngày/buổi",
+                note="[Zalo] Thiếu ngày/buổi",
             )
         if claimed_lesson_date is not None:
             return TargetMatch(
                 decision=TARGET_SAME_DAY_WRONG_DATE,
                 matches=True,
                 corrected_teacher_date=True,
-                note=f"[Zalo] Báo cáo ghi sai ngày ({claimed_lesson_date.strftime('%d/%m')})",
+                note=f"[Zalo] Sai ngày ({claimed_lesson_date.strftime('%d/%m')})",
             )
 
     if sent_day == target_day and is_same_day_ambiguous:

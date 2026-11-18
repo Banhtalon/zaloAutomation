@@ -91,7 +91,14 @@ function isTodayItemMissingLms(item) {
     if (item.phase === 'ENDED' && item.is_spck_session && !isTodaySpckComplete(item)) {
         return true;
     }
-    if (Array.isArray(item.issues) && item.issues.some(issue => String(issue?.code || '').startsWith('LMS_'))) {
+    if (
+        Array.isArray(item.issues)
+        && item.issues.some(
+            issue =>
+                String(issue?.code || '').startsWith('LMS_')
+                || /^(?:\[LMS\]|\[SPCK\])\s*/i.test(String(issue?.text || '')),
+        )
+    ) {
         return true;
     }
     return item.phase === 'ENDED' && (!item.lms_checked || Boolean(item.lms_fetch_unavailable) || !item.lms_ready_for_tick);

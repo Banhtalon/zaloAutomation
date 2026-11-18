@@ -151,39 +151,42 @@ _PREFIXED_ISSUE_RE = re.compile(
     flags=re.IGNORECASE,
 )
 _LEGACY_D4_MANUAL_CHECK_RE = re.compile(
-    r"^\[LMS\].*cần\s+kiểm\s+tra\s+thủ\s+công\.?$",
+    r"^\[(?:LMS|SPCK)\]\s*(?:Kiểm\s+tra\s+tay(?:\s+trên\s+LMS)?|.*cần\s+kiểm\s+tra\s+thủ\s+công)\.?$",
     flags=re.IGNORECASE,
 )
 _LMS_SPCK_MISSING_RE = re.compile(
-    r"^\[LMS\]\s*Chưa\s+nộp\s+SPCK\b",
+    r"^(?:\[LMS\]\s*Chưa\s+nộp\s+SPCK|\[SPCK\]\s*Chưa\s+nộp)\b",
     flags=re.IGNORECASE,
 )
 _LMS_SPCK_COMMENT_MISSING_RE = re.compile(
-    r"^\[LMS\]\s*SPCK\s+chưa\s+có\s+nhận\s+xét\b",
+    r"^(?:\[LMS\]\s*SPCK\s+chưa\s+có\s+nhận\s+xét|\[SPCK\]\s*Chưa\s+(?:có\s+)?(?:nhận\s+xét|NX))\b",
     flags=re.IGNORECASE,
 )
 _LMS_SPCK_NOTE_RE = re.compile(
-    r"^\[LMS\]\s*(?:Thiếu\s+nộp\s+SPCK\b|Tiêu\s+đề\s+SPCK\b|SPCK\b|(?:Nhận|Nhan)\s+x[eé]t\s+SPCK\b)",
+    r"^(?:\[LMS\]\s*(?:Thiếu\s+nộp\s+SPCK\b|Tiêu\s+đề\s+SPCK\b|SPCK\b|(?:Nhận|Nhan)\s+x[eé]t\s+SPCK\b)|\[SPCK\]\s*Bổ\s+sung\b)",
     flags=re.IGNORECASE,
 )
 _LMS_SUMMARY_NOTE_RE = re.compile(
-    r"^\[LMS\]\s*Chưa\s+ghi\s+nội\s+dung\s+bài\s+học\b",
+    r"^\[LMS\]\s*(?:Chưa\s+ghi\s+nội\s+dung\s+bài\s+học\b|Điền\s+tóm\s+tắt\s+bài(?:\s*\.?$))",
     flags=re.IGNORECASE,
 )
 _LMS_ATTENDANCE_CONFLICT_NOTE_RE = re.compile(
-    r"^\[LMS\]\s*Lỗi\s+điểm\s+danh\b",
+    r"^\[LMS\]\s*(?:Lỗi\s+điểm\s+danh\b|(?:Điền\s+tóm\s+tắt\s+bài\s*,\s*)?Kiểm\s+tra\s+điểm\s+danh-NX\b)",
     flags=re.IGNORECASE,
 )
 _LMS_COMMENT_NOTE_RE = re.compile(
-    r"^\[LMS\]\s*Nhận\s+xét\s+(?:sơ\s+sài|học\s+viên\s+trùng\s+lặp|Checkpoint\s+thiếu|Checkpoint\s+chưa\s+đủ|buổi\s+học\s+cần\s+xem\s+lại|cần\s+xem\s+lại)\b",
+    r"^\[LMS\]\s*(?:"
+    r"Nhận\s+xét\s+(?:sơ\s+sài|học\s+viên\s+trùng\s+lặp|Checkpoint\s+thiếu|Checkpoint\s+chưa\s+đủ|buổi\s+học\s+cần\s+xem\s+lại|cần\s+xem\s+lại)\b"
+    r"|(?:(?:Điền\s+tóm\s+tắt\s+bài|Kiểm\s+tra\s+điểm\s+danh-NX)\s*,\s*)*(?:Viết\s+kỹ\s+NX|Đủ\s+khung\s+Checkpoint)\b"
+    r")",
     flags=re.IGNORECASE,
 )
 _D2_NO_DATE_RE = re.compile(
-    r"^\[Zalo\]\s*Báo\s+cáo\s+không\s+ghi\s+ngày/buổi\.?$",
+    r"^\[Zalo\]\s*(?:Báo\s+cáo\s+không\s+ghi\s+ngày/buổi|Thiếu\s+ngày/buổi)\.?$",
     flags=re.IGNORECASE,
 )
 _D2_WRONG_DATE_SAME_DAY_RE = re.compile(
-    r"^\[Zalo\]\s*Báo\s+cáo\s+ghi\s+sai\s+ngày\s*\(\s*\d{1,2}/\d{1,2}(?:/\d{2,4})?\s*\)\.?$",
+    r"^\[Zalo\]\s*(?:Báo\s+cáo\s+ghi\s+sai\s+ngày|Sai\s+ngày)\s*\(\s*\d{1,2}/\d{1,2}(?:/\d{2,4})?\s*\)\.?$",
     flags=re.IGNORECASE,
 )
 _LEGACY_IGNORED_DUP_RE = re.compile(
@@ -434,9 +437,9 @@ def _adapt_legacy_issue(issue: Any) -> dict[str, str]:
             "severity": SEVERITY_NOTE,
             "text": text,
         }
-    if _LMS_SUMMARY_NOTE_RE.match(text):
+    if _LMS_COMMENT_NOTE_RE.match(text):
         return {
-            "code": ISSUE_CODE_LMS_SUMMARY_NOTE,
+            "code": ISSUE_CODE_LMS_COMMENT_NOTE,
             "severity": SEVERITY_NOTE,
             "text": text,
         }
@@ -446,9 +449,9 @@ def _adapt_legacy_issue(issue: Any) -> dict[str, str]:
             "severity": SEVERITY_NOTE,
             "text": text,
         }
-    if _LMS_COMMENT_NOTE_RE.match(text):
+    if _LMS_SUMMARY_NOTE_RE.match(text):
         return {
-            "code": ISSUE_CODE_LMS_COMMENT_NOTE,
+            "code": ISSUE_CODE_LMS_SUMMARY_NOTE,
             "severity": SEVERITY_NOTE,
             "text": text,
         }
@@ -607,9 +610,12 @@ def categorize_row(row: Any) -> str:
 
 
 def _norm_issue_key(text: str) -> str:
-    stripped = re.sub(r"^\[[^\]]+\]\s*", "", str(text or "").strip())
+    raw_s = str(text or "").strip()
+    is_spck = bool(re.match(r"^\[spck\]\s*", raw_s, flags=re.IGNORECASE))
+    stripped = re.sub(r"^\[[^\]]+\]\s*", "", raw_s)
     stripped = stripped.replace(" — ", "; ").strip(" .;").lower()
-    return " ".join(stripped.split())
+    norm = " ".join(stripped.split())
+    return f"[spck] {norm}" if (is_spck and norm) else norm
 
 
 def _is_ignored_legacy_duplicate_issue(text: str) -> bool:
@@ -640,7 +646,7 @@ def _row_issue_severities(row: Mapping[str, Any]) -> tuple[bool, bool]:
         txt = issue_text(entry)
         if not txt or _is_ignored_legacy_duplicate_issue(txt):
             return
-        if re.match(r"^\[(?:LMS|Zalo)\]\s*", txt, flags=re.IGNORECASE):
+        if re.match(r"^\[(?:LMS|Zalo|SPCK)\]\s*", txt, flags=re.IGNORECASE):
             txt = normalize_auto_issue_text(txt)
         key = _norm_issue_key(txt)
         if not key or key in fail_keys:
@@ -692,7 +698,7 @@ def _row_issue_severities(row: Mapping[str, Any]) -> tuple[bool, bool]:
                 if not p_clean:
                     continue
                 if split_semi or re.search(
-                    r"(?:^|;)\s*\[(?:LMS|Zalo|NOTE:|FAIL:)",
+                    r"(?:^|;)\s*\[(?:LMS|Zalo|SPCK|NOTE:|FAIL:)",
                     p_clean,
                     flags=re.IGNORECASE,
                 ):
@@ -708,7 +714,7 @@ def _row_issue_severities(row: Mapping[str, Any]) -> tuple[bool, bool]:
                 continue
             pref_code, _, stripped_seg = _strip_issue_prefix(cleaned)
             if is_auto or re.match(
-                r"^\[(?:LMS|Zalo)\]\s*", stripped_seg, flags=re.IGNORECASE
+                r"^\[(?:LMS|Zalo|SPCK)\]\s*", stripped_seg, flags=re.IGNORECASE
             ):
                 stripped_seg = normalize_auto_issue_text(stripped_seg)
             key = _norm_issue_key(stripped_seg)

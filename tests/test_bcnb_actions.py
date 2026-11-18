@@ -909,10 +909,17 @@ class BcnbActionTests(unittest.IsolatedAsyncioTestCase):
             "latest_week": {"week": 43, "year": 2026},
             "targets": [scan_results[0]["scan_target"]],
         }
-        expected_note = (
-            "GV báo bận | [LMS] Chưa ghi nội dung bài học; "
-            "[LMS] Nhận xét sơ sài (1/1 HS)"
+        from services.lms_quality_service import evaluate_lms_slot_quality
+
+        expected_note = merge_checker_issue_note(
+            "GV báo bận",
+            evaluate_lms_slot_quality(
+                lms_slots["VT-C4K-PTB16"][0],
+                class_code="VT-C4K-PTB16",
+                lesson="1",
+            )["issues"],
         )
+        self.assertTrue(expected_note.startswith("GV báo bận | [LMS] "))
         page, _, _, _ = self.make_dependencies()
         page.evaluate = AsyncMock(
             return_value={"ok": True, "stage": "after_write", "http_status": 200, "error": ""}
@@ -1137,7 +1144,13 @@ class BcnbActionTests(unittest.IsolatedAsyncioTestCase):
                 },
             }
         ]
-        expected_note = "Ghi chú tay | [Zalo] Ghi sai số bài học trong nội dung (ghi Bài 2, lịch là Buổi 1)"
+        from services.lms_quality_service import evaluate_zalo_content_issues
+
+        expected_note = merge_checker_issue_note(
+            "Ghi chú tay",
+            evaluate_zalo_content_issues(scan_results[0]),
+        )
+        self.assertTrue(expected_note.startswith("Ghi chú tay | [Zalo] "))
         page, _, _, _ = self.make_dependencies()
         page.evaluate = AsyncMock(
             return_value={"ok": True, "stage": "after_write", "http_status": 200, "error": ""}
@@ -1623,10 +1636,28 @@ class BcnbActionTests(unittest.IsolatedAsyncioTestCase):
                     and rec["target_id"].upper() == class_code.strip().upper()
                 ][:limit]
 
+        from services.lms_quality_service import evaluate_zalo_content_issues
+
         audit_repo = InMemoryCheckerAuditRepo()
         job_repo = AsyncMock()
         manual_note = "  QC dòng 1:  giữ nguyên 2 dấu cách\nQC dòng 2: giữ | pipe ; chấm phẩy\n"
-        direct_auto = "[Zalo] Ghi sai số bài học trong nội dung (ghi Bài 2, lịch là Buổi 1)"
+        direct_auto = str(
+            evaluate_zalo_content_issues(
+                {
+                    "evidence_state": "SUBMITTED_VERIFIED",
+                    "evidence": {
+                        "date_context": {
+                            "target_week": 43,
+                            "target_year": 2026,
+                            "target_lesson": "1",
+                            "target_class_date": "2026-10-24",
+                            "content_lesson": "2",
+                        }
+                    },
+                }
+            )[0]
+        )
+        self.assertTrue(direct_auto.startswith("[Zalo] "))
         expected_after_run_1 = f"{manual_note} | {direct_auto}"
 
         row_state = {
@@ -2367,6 +2398,422 @@ class BcnbActionTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("[LMS] Chưa nộp SPCK (1/1 HS)", issues_3)
         self.assertIn("[LMS] Chưa nhận xét học viên (1/1 HS)", issues_3)
+
+    async def test_production_dom_dirty_skips_reread_on_already_done_and_rereads_after_mutations(self):
+        from services.zalo_bcnb_service import update_bcnb_reports
+
+        def _build_row(code: str, sid: str, *, checked: bool) -> dict:
+            cb = AsyncMock()
+            cb.count.return_value = 1
+            cb.is_checked.return_value = checked
+            cell = MagicMock()
+            cell.locator.return_value.first = cb
+            return {
+                "row": MagicMock(),
+                "cells": [cell] * 12,
+                "week": 43,
+                "year": 2026,
+                "ma_lop": code,
+                "buoi_so": "2",
+                "ngay_hoc": "24/10/2026",
+                "ngay_hoc_iso": "2026-10-24",
+                "zalo_deadline": "20:00 26/10/2026",
+                "bcnb_session_id": sid,
+                "khoi": "Coding",
+                "nx_zalo_checked": checked,
+                "nx_lms_checked": True,
+                "qc_issue_note": "",
+                "checker_note_unreadable": False,
+            }
+
+        def _build_scan_result(code: str, *, has_zalo_issue: bool = False) -> dict:
+            st = {
+                "class_code": code,
+                "lesson": "2",
+                "class_date": "24/10/2026",
+                "class_date_iso": "2026-10-24",
+                "week": 43,
+                "year": 2026,
+            }
+            return {
+                "group": f"[MINDX] {code}",
+                "person": "GV Test",
+                "status": "🟢 Đã nộp đúng hạn – Có minh chứng",
+                "evidence_state": "SUBMITTED_VERIFIED",
+                "zalo_content_issues": ["[Zalo] Sai số buổi"] if has_zalo_issue else [],
+                "scan_target": st,
+                "evidence": {
+                    "screenshot_path": f"static/screenshots/{code}.png",
+                    "artifact_sha256": "a" * 64,
+                    "classifier_result": {"matched_ui_sent_at": "24/10/2026"},
+                    "date_context": {
+                        "target_week": 43,
+                        "target_year": 2026,
+                        "target_lesson": "2",
+                        "target_class_date": "2026-10-24",
+                        **({"content_lesson": "3"} if has_zalo_issue else {}),
+                    },
+                },
+            }
+
+        clean_slot = {
+            "index": 1,
+            "date": "2026-10-24T01:00:00.000Z",
+            "startTime": "2026-10-24T01:00:00.000Z",
+            "summary": "Ôn tập kiến thức vòng lặp và thực hành bài tập nhóm trên lớp.",
+            "studentAttendance": [{"status": "ABSENT", "comment": ""}],
+        }
+        codes = ["VT-C4K-GA01", "VT-C4K-GA02", "VT-C4K-GA03"]
+        lms_slots = {code: [dict(clean_slot)] for code in codes}
+
+        # Case 1: 3 consecutive ALREADY_DONE + NO_CHANGE rows -> only 1 initial table read!
+        rows_all_done = [
+            _build_row(code, f"700{idx}", checked=True)
+            for idx, code in enumerate(codes, start=1)
+        ]
+        results_all_done = [_build_scan_result(code) for code in codes]
+        finalized_1: list[str] = []
+
+        async def _on_finalized_1(item: dict) -> None:
+            finalized_1.append(f"{item['class_code']}:{item['status']}")
+
+        page, _, _, _ = self.make_dependencies()
+        audit_repo = AsyncMock()
+        job_repo = AsyncMock()
+        read_mock_1 = AsyncMock(return_value=rows_all_done)
+        resolve_cols_1 = AsyncMock(return_value=(1, 2, 8))
+        with (
+            patch("services.zalo_bcnb_service._read_bcnb_schedule_rows", read_mock_1),
+            patch("services.zalo_bcnb_service.resolve_report_columns", resolve_cols_1),
+        ):
+            summary_1 = await update_bcnb_reports(
+                page,
+                job_id=710,
+                execution_mode="production",
+                scan_results=results_all_done,
+                today=datetime(2026, 10, 29, tzinfo=BUSINESS_TIMEZONE),
+                scan_plan={
+                    "selected_weeks": [{"week": 43, "year": 2026}, {"week": 42, "year": 2026}],
+                    "latest_week": {"week": 43, "year": 2026},
+                    "targets": [r["scan_target"] for r in results_all_done],
+                },
+                job_repo=job_repo,
+                audit_repo=audit_repo,
+                period_filter={(43, 2026)},
+                lms_slots_by_class=lms_slots,
+                on_row_finalized=_on_finalized_1,
+            )
+
+        self.assertEqual(read_mock_1.await_count, 1)
+        self.assertEqual(resolve_cols_1.await_count, 1)
+        self.assertEqual(summary_1["updated_count"], 0)
+        self.assertEqual(
+            finalized_1,
+            [
+                "VT-C4K-GA01:ALREADY_DONE",
+                "VT-C4K-GA02:ALREADY_DONE",
+                "VT-C4K-GA03:ALREADY_DONE",
+            ],
+        )
+
+        # Case 2: Row 1 ticks checkbox (Stage C refreshes once and clears dom_dirty),
+        # Row 2 is ALREADY_DONE (0ms cache reuse) then POSTs checker note (sets dom_dirty=True),
+        # Row 3 re-reads table at top of loop because Row 2 mutated DOM!
+        snap_initial = [
+            _build_row("VT-C4K-GA01", "7001", checked=False),
+            _build_row("VT-C4K-GA02", "7002", checked=True),
+            _build_row("VT-C4K-GA03", "7003", checked=True),
+        ]
+        snap_after_row1_tick = [
+            _build_row("VT-C4K-GA01", "7001", checked=True),
+            _build_row("VT-C4K-GA02", "7002", checked=True),
+            _build_row("VT-C4K-GA03", "7003", checked=True),
+        ]
+        snap_after_row2_note = [
+            _build_row("VT-C4K-GA01", "7001", checked=True),
+            {**_build_row("VT-C4K-GA02", "7002", checked=True), "qc_issue_note": "[Zalo] Sai số buổi"},
+            _build_row("VT-C4K-GA03", "7003", checked=True),
+        ]
+        read_mock_2 = AsyncMock(
+            side_effect=[snap_initial, snap_after_row1_tick, snap_after_row2_note]
+        )
+        results_mixed = [
+            _build_scan_result("VT-C4K-GA01", has_zalo_issue=False),
+            _build_scan_result("VT-C4K-GA02", has_zalo_issue=True),
+            _build_scan_result("VT-C4K-GA03", has_zalo_issue=False),
+        ]
+        tick_mock_2 = AsyncMock(return_value="VERIFIED")
+        note_mock_2 = AsyncMock(return_value="VERIFIED")
+        with (
+            patch("services.zalo_bcnb_service._read_bcnb_schedule_rows", read_mock_2),
+            patch(
+                "services.zalo_bcnb_service.resolve_report_columns",
+                AsyncMock(return_value=(1, 2, 8)),
+            ),
+            patch(
+                "services.zalo_bcnb_service.execute_verified_checkbox_action",
+                tick_mock_2,
+            ),
+            patch(
+                "services.zalo_bcnb_service.execute_verified_checker_note_action",
+                note_mock_2,
+            ),
+        ):
+            summary_2 = await update_bcnb_reports(
+                page,
+                job_id=711,
+                execution_mode="production",
+                scan_results=results_mixed,
+                today=datetime(2026, 10, 29, tzinfo=BUSINESS_TIMEZONE),
+                scan_plan={
+                    "selected_weeks": [{"week": 43, "year": 2026}, {"week": 42, "year": 2026}],
+                    "latest_week": {"week": 43, "year": 2026},
+                    "targets": [r["scan_target"] for r in results_mixed],
+                },
+                job_repo=job_repo,
+                audit_repo=audit_repo,
+                period_filter={(43, 2026)},
+                lms_slots_by_class=lms_slots,
+            )
+
+        self.assertEqual(tick_mock_2.await_count, 1)
+        self.assertEqual(note_mock_2.await_count, 1)
+        # Exactly 3 reads: initial + post-Row1-tick before Stage C + pre-Row3 after Row2 note POST
+        self.assertEqual(read_mock_2.await_count, 3)
+        self.assertEqual(summary_2["updated_count"], 1)
+        self.assertEqual(summary_2["checker_note_updated_count"], 1)
+
+    async def test_read_bcnb_schedule_rows_playwright_fast_path_and_fallback(self):
+        from types import SimpleNamespace
+        from services.zalo_bcnb_service import _read_bcnb_schedule_rows
+
+        class _FakeCellLoc:
+            def __init__(self, idx: int):
+                self.idx = idx
+
+        class _FakeTdCollection:
+            def nth(self, idx: int):
+                return _FakeCellLoc(idx)
+
+            async def all(self):
+                raise AssertionError("Fast path must not call per-row locator('td').all()")
+
+        class _FakeTrRow:
+            def locator(self, selector: str):
+                assert selector == "td"
+                return _FakeTdCollection()
+
+        header_tr = _FakeTrRow()
+        data_tr = _FakeTrRow()
+
+        class _FakeTableTrLoc:
+            async def all(self):
+                return [header_tr, data_tr]
+
+        class _FakePlaywrightPage:
+            __module__ = "playwright.async_api._generated"
+
+            def __init__(self, eval_result):
+                self._eval_result = eval_result
+                self.evaluate_calls = 0
+
+            def locator(self, selector: str):
+                assert selector == "table tr"
+                return _FakeTableTrLoc()
+
+            async def evaluate(self, _script, _arg=None):
+                self.evaluate_calls += 1
+                if isinstance(self._eval_result, Exception):
+                    raise self._eval_result
+                return self._eval_result
+
+        eval_payload = [
+            {
+                "cellCount": 0,
+                "texts": [],
+                "sessionId": "",
+                "rowBlock": "",
+                "nxZaloChecked": None,
+                "nxLmsChecked": None,
+                "checkerNote": {"present": False, "attrRaw": None, "fieldVal": None, "textRaw": None},
+                "instructorNote": {"present": False, "attrRaw": None, "fieldVal": None, "textRaw": None},
+            },
+            {
+                "cellCount": 9,
+                "texts": [
+                    "1",
+                    "VT-C4K-PTA05",
+                    "12",
+                    "18:00\n24/10/2026",
+                    "20:00 26/10/2026",
+                    "Coding",
+                    "",
+                    "+ Ghi chú QC",
+                    "⚠️ Chưa nộp SPCK",
+                ],
+                "sessionId": "8899",
+                "rowBlock": "Coding",
+                "nxZaloChecked": True,
+                "nxLmsChecked": False,
+                "checkerNote": {
+                    "present": True,
+                    "attrRaw": "  Ghi chú QC giữ nguyên  ",
+                    "fieldVal": None,
+                    "textRaw": "+ Ghi chú QC",
+                },
+                "instructorNote": {
+                    "present": True,
+                    "attrRaw": "",
+                    "fieldVal": None,
+                    "textRaw": "+ GV nhập giải trình",
+                },
+            },
+        ]
+        pw_page = _FakePlaywrightPage(eval_payload)
+        job_repo = AsyncMock()
+        ext_cols = {
+            "block_index": 5,
+            "zalo_checkbox_index": 6,
+            "lms_deadline_index": None,
+            "lms_checkbox_index": 6,
+            "checker_note_index": 7,
+            "instructor_note_index": 7,
+            "evaluation_status_index": 8,
+        }
+        with (
+            patch("services.zalo_bcnb_service.select_week_checked", AsyncMock(return_value=(43, 2026))),
+            patch("services.zalo_bcnb_service.resolve_schedule_columns", AsyncMock(return_value=(1, 2, 3, 4))),
+            patch("services.zalo_bcnb_service.resolve_extended_bcnb_columns", AsyncMock(return_value=ext_cols)),
+        ):
+            snap = await _read_bcnb_schedule_rows(
+                pw_page,
+                week=43,
+                year=2026,
+                job_id=10,
+                today=datetime(2026, 10, 29, tzinfo=BUSINESS_TIMEZONE),
+                job_repo=job_repo,
+            )
+
+        self.assertEqual(pw_page.evaluate_calls, 1)
+        self.assertEqual(len(snap), 1)
+        self.assertEqual(snap[0]["ma_lop"], "VT-C4K-PTA05")
+        self.assertEqual(snap[0]["buoi_so"], "12")
+        self.assertEqual(snap[0]["ngay_hoc_iso"], "2026-10-24")
+        self.assertEqual(snap[0]["bcnb_session_id"], "8899")
+        self.assertIs(snap[0]["nx_zalo_checked"], True)
+        self.assertIs(snap[0]["nx_lms_checked"], False)
+        self.assertEqual(snap[0]["qc_issue_note"], "  Ghi chú QC giữ nguyên  ")
+        self.assertEqual(snap[0]["instructor_note"], "")
+        self.assertFalse(snap[0]["checker_note_unreadable"])
+        self.assertEqual(len(snap[0]["cells"]), 9)
+        self.assertEqual(snap[0]["cells"][6].idx, 6)
+
+        # Fallback path: when page.evaluate fails, per-row locator loop runs cleanly
+        class _FallbackCell:
+            def __init__(self, text: str):
+                self._text = text
+
+            async def inner_text(self):
+                return self._text
+
+        class _FallbackTr:
+            def __init__(self, cells: list[_FallbackCell], sid: str = ""):
+                self._cells = cells
+                self._sid = sid
+
+            async def get_attribute(self, name: str):
+                return self._sid if name == "data-session-id" else None
+
+            def locator(self, selector: str):
+                assert selector == "td"
+                return SimpleNamespace(all=AsyncMock(return_value=self._cells))
+
+        fb_rows = [
+            _FallbackTr([]),
+            _FallbackTr(
+                [
+                    _FallbackCell("1"),
+                    _FallbackCell("VT-C4K-PTA06"),
+                    _FallbackCell("5"),
+                    _FallbackCell("25/10/2026"),
+                    _FallbackCell("20:00 27/10/2026"),
+                ],
+                sid="9001",
+            ),
+        ]
+
+        class _FallbackPwPage(_FakePlaywrightPage):
+            __module__ = "playwright.async_api._generated"
+
+            def locator(self, selector: str):
+                assert selector == "table tr"
+                return SimpleNamespace(all=AsyncMock(return_value=fb_rows))
+
+        fb_page = _FallbackPwPage(RuntimeError("evaluate unavailable"))
+        with (
+            patch("services.zalo_bcnb_service.select_week_checked", AsyncMock(return_value=(43, 2026))),
+            patch("services.zalo_bcnb_service.resolve_schedule_columns", AsyncMock(return_value=(1, 2, 3, 4))),
+            patch("services.zalo_bcnb_service.resolve_extended_bcnb_columns", AsyncMock(return_value={})),
+        ):
+            fb_snap = await _read_bcnb_schedule_rows(
+                fb_page,
+                week=43,
+                year=2026,
+                job_id=11,
+                today=datetime(2026, 10, 29, tzinfo=BUSINESS_TIMEZONE),
+                job_repo=job_repo,
+            )
+
+        self.assertEqual(fb_page.evaluate_calls, 1)
+        self.assertEqual(len(fb_snap), 1)
+        self.assertEqual(fb_snap[0]["ma_lop"], "VT-C4K-PTA06")
+        self.assertEqual(fb_snap[0]["bcnb_session_id"], "9001")
+
+    def test_spck_prefix_and_manual_check_markers_in_collect_auto_issues(self):
+        from services.zalo_bcnb_service import (
+            _collect_row_verifiable_auto_issues,
+            _is_zalo_scan_indeterminate,
+        )
+
+        self.assertTrue(
+            _is_zalo_scan_indeterminate(
+                {"evidence_state": "SUBMITTED_VERIFIED"},
+                ["[Zalo] Kiểm tra tay tin nhắn"],
+            )
+        )
+
+        with patch(
+            "services.zalo_bcnb_service.split_checker_issue_note",
+            return_value=("Ghi chú tay QC", ["[SPCK] Chưa nộp (0/4)"]),
+        ):
+            issues_fixed, should_sync_fixed = _collect_row_verifiable_auto_issues(
+                {
+                    "evidence_state": "SUBMITTED_VERIFIED",
+                    "lesson": "12",
+                    "lms_comments": {"status": "COMPLETE"},
+                    "lms_spck": {"status": "COMPLETE"},
+                    "lms_quality_issues": [],
+                    "zalo_content_issues": [],
+                },
+                existing_note="Ghi chú tay QC | [SPCK] Chưa nộp (0/4)",
+                lms_slots_by_class={"VT-CSI01": [{}]},
+                proven_auto_issues=["[SPCK] Chưa nộp (0/4)"],
+            )
+            self.assertEqual(issues_fixed, [])
+            self.assertTrue(should_sync_fixed)
+
+            issues_outage, _ = _collect_row_verifiable_auto_issues(
+                {
+                    "evidence_state": "SUBMITTED_VERIFIED",
+                    "lesson": "12",
+                    "lms_quality_issues": [],
+                    "zalo_content_issues": [],
+                },
+                existing_note="Ghi chú tay QC | [SPCK] Chưa nộp (0/4)",
+                lms_slots_by_class=None,
+                proven_auto_issues=["[SPCK] Chưa nộp (0/4)"],
+            )
+            self.assertEqual(issues_outage, ["[SPCK] Chưa nộp (0/4)"])
 
 
 if __name__ == "__main__":

@@ -1036,7 +1036,7 @@ class ReportStatusSingleSourceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("VT-C4K-PTB16", resolved or {})
         self.assertEqual(
             [issue_text(x) for x in results[0]["lms_quality_issues"]],
-            ["[LMS] Chưa ghi nội dung bài học"],
+            ["[LMS] Điền tóm tắt bài"],
         )
         self.assertEqual(
             issue_severity(results[0]["lms_quality_issues"][0]),
@@ -1645,6 +1645,223 @@ class ReportStatusSingleSourceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             categorize_row({**armi_row, "lesson": "14"}),
             CATEGORY_EXEMPT,
+        )
+
+    def test_muc_a_legacy_adaptation_and_provenance_checker_note_replacement(self) -> None:
+        from services.bcnb_safety import (
+            extract_proven_auto_issues_from_audits,
+            merge_checker_issue_note,
+        )
+        from services.report_status import (
+            ISSUE_CODE_LMS_ATTENDANCE_CONFLICT_NOTE,
+            ISSUE_CODE_LMS_COMMENT_NOTE,
+            ISSUE_CODE_LMS_MANUAL_CHECK,
+            ISSUE_CODE_LMS_SPCK_COMMENT_MISSING,
+            ISSUE_CODE_LMS_SPCK_MISSING,
+            ISSUE_CODE_LMS_SPCK_NOTE,
+            ISSUE_CODE_LMS_SUMMARY_NOTE,
+            ISSUE_CODE_ZALO_REPORT_NO_DATE,
+            ISSUE_CODE_ZALO_REPORT_WRONG_DATE,
+            SEVERITY_FAIL,
+            SEVERITY_NOTE,
+            _adapt_legacy_issue,
+            has_spck_comment_missing_fail,
+            has_spck_missing_fail,
+            is_failed,
+        )
+
+        # 1. _adapt_legacy_issue maps all new Mức A strings to exact canonical codes & severities
+        cases = [
+            ("[SPCK] Chưa nộp (0/4)", ISSUE_CODE_LMS_SPCK_MISSING, SEVERITY_FAIL),
+            ("[SPCK] Chưa NX (1/4)", ISSUE_CODE_LMS_SPCK_COMMENT_MISSING, SEVERITY_FAIL),
+            (
+                "[SPCK] Bổ sung nộp đủ bài, tên SP, ảnh",
+                ISSUE_CODE_LMS_SPCK_NOTE,
+                SEVERITY_NOTE,
+            ),
+            ("[SPCK] Kiểm tra tay trên LMS", ISSUE_CODE_LMS_MANUAL_CHECK, SEVERITY_NOTE),
+            ("[LMS] Chưa NX (2/5)", ISSUE_CODE_LEGACY_UNCLASSIFIED_FAIL, SEVERITY_FAIL),
+            (
+                "[LMS] Điền tóm tắt bài, kiểm tra điểm danh-NX, viết kỹ NX",
+                ISSUE_CODE_LMS_COMMENT_NOTE,
+                SEVERITY_NOTE,
+            ),
+            (
+                "[LMS] Điền tóm tắt bài, đủ khung Checkpoint",
+                ISSUE_CODE_LMS_COMMENT_NOTE,
+                SEVERITY_NOTE,
+            ),
+            (
+                "[LMS] Điền tóm tắt bài, kiểm tra điểm danh-NX",
+                ISSUE_CODE_LMS_ATTENDANCE_CONFLICT_NOTE,
+                SEVERITY_NOTE,
+            ),
+            ("[LMS] Điền tóm tắt bài", ISSUE_CODE_LMS_SUMMARY_NOTE, SEVERITY_NOTE),
+            ("[LMS] Kiểm tra tay trên LMS", ISSUE_CODE_LMS_MANUAL_CHECK, SEVERITY_NOTE),
+            ("[Zalo] Thiếu ngày/buổi", ISSUE_CODE_ZALO_REPORT_NO_DATE, SEVERITY_NOTE),
+            ("[Zalo] Sai ngày (04/11)", ISSUE_CODE_ZALO_REPORT_WRONG_DATE, SEVERITY_NOTE),
+            (
+                "[Zalo] Sai số buổi, lệch tên bài với LMS",
+                ISSUE_CODE_LEGACY_UNCLASSIFIED_FAIL,
+                SEVERITY_FAIL,
+            ),
+        ]
+        for text_val, expected_code, expected_sev in cases:
+            adapted = _adapt_legacy_issue(text_val)
+            self.assertIsNotNone(adapted, msg=f"Failed to adapt: {text_val!r}")
+            assert adapted is not None
+            self.assertEqual(adapted["code"], expected_code, msg=text_val)
+            self.assertEqual(adapted["severity"], expected_sev, msg=text_val)
+
+        self.assertTrue(
+            has_spck_missing_fail({"lms_quality_issues": ["[SPCK] Chưa nộp (0/4)"]})
+        )
+        self.assertTrue(
+            has_spck_comment_missing_fail({"lms_quality_issues": ["[SPCK] Chưa NX (1/4)"]})
+        )
+        self.assertFalse(
+            is_failed(
+                {
+                    "status": "✅ Đã báo cáo",
+                    "evidence_state": SUBMITTED_VERIFIED,
+                    "lms_status": "✅ Đã nộp LMS",
+                    "lms_quality_issues": [
+                        "[LMS] Điền tóm tắt bài, viết kỹ NX",
+                        "[SPCK] Bổ sung tên SP, ảnh",
+                    ],
+                    "zalo_content_issues": ["[Zalo] Thiếu ngày/buổi"],
+                }
+            )
+        )
+
+        # 2. Provenance migration: historical long [LMS]/[Zalo] auto issues in external_action_audit
+        #    are cleanly stripped and replaced with new concise Mức A [SPCK]/[LMS] notes (or ""),
+        #    while manual QC notes stay preserved byte-for-byte!
+        manual_note = "QC Minh đã nhắn GV bổ sung sớm (09:15) — kiểm tra lại ca tối!"
+        existing_on_teaching = (
+            f"{manual_note} | "
+            "[LMS] Chưa ghi nội dung bài học; "
+            "[LMS] Tiêu đề SPCK chưa ghi kèm tên học viên (2/4 HS); "
+            "[LMS] SPCK thiếu ảnh đại diện (1/4 HS); "
+            "[Zalo] Báo cáo không ghi ngày/buổi"
+        )
+        legacy_audit_rows = [
+            {
+                "action_type": "BCNB_UPDATE_CHECKER_NOTE",
+                "mode": "production",
+                "outcome": "VERIFIED",
+                "target_id": "VT-C4K-CSI02",
+                "reason": {
+                    "class_code": "VT-C4K-CSI02",
+                    "lesson": "12",
+                    "week": 46,
+                    "year": 2026,
+                    "bcnb_session_id": "sess_csi02_12",
+                    "auto_issues": [
+                        "[LMS] Chưa ghi nội dung bài học",
+                        "[LMS] Tiêu đề SPCK chưa ghi kèm tên học viên (2/4 HS)",
+                        "[LMS] SPCK thiếu ảnh đại diện (1/4 HS)",
+                        "[Zalo] Báo cáo không ghi ngày/buổi",
+                    ],
+                },
+                "before_state": {"qc_issue_note": manual_note},
+                "after_state": {
+                    "qc_issue_note": existing_on_teaching,
+                    "bcnb_session_id": "sess_csi02_12",
+                    "post_verified": True,
+                },
+            }
+        ]
+        proven_legacy = extract_proven_auto_issues_from_audits(
+            legacy_audit_rows,
+            class_code="VT-C4K-CSI02",
+            lesson="12",
+            week=46,
+            year=2026,
+            session_id="sess_csi02_12",
+        )
+        self.assertEqual(len(proven_legacy), 4)
+        replaced_with_muc_a = merge_checker_issue_note(
+            existing_on_teaching,
+            ["[LMS] Điền tóm tắt bài", "[SPCK] Bổ sung ảnh", "[Zalo] Thiếu ngày/buổi"],
+            proven_auto_issues=proven_legacy,
+        )
+        self.assertEqual(
+            replaced_with_muc_a,
+            f"{manual_note} | [LMS] Điền tóm tắt bài; [SPCK] Bổ sung ảnh; [Zalo] Thiếu ngày/buổi",
+        )
+
+        # When all auto issues are fixed and row had manual note -> preserves manual note byte-for-byte
+        cleared_keep_manual = merge_checker_issue_note(
+            existing_on_teaching,
+            [],
+            proven_auto_issues=proven_legacy,
+        )
+        self.assertEqual(cleared_keep_manual, manual_note)
+
+        # When row had ONLY historical auto notes and all are fixed -> returns ""
+        only_legacy_on_teaching = (
+            "[LMS] Tiêu đề SPCK chưa ghi kèm tên học viên (2/4 HS); "
+            "[LMS] SPCK thiếu ảnh đại diện (1/4 HS)"
+        )
+        self.assertEqual(
+            merge_checker_issue_note(
+                only_legacy_on_teaching, [], proven_auto_issues=proven_legacy
+            ),
+            "",
+        )
+
+        # 3. Round-trip provenance on new [SPCK] & [LMS] Mức A notes + non-collision between
+        #    [LMS] Chưa NX (1/4) and [SPCK] Chưa NX (1/4) on the same B12/B13 row
+        both_chua_nx = merge_checker_issue_note(
+            "",
+            ["[LMS] Chưa NX (1/4)", "[SPCK] Chưa NX (1/4)", "[SPCK] Bổ sung tên SP"],
+        )
+        self.assertEqual(
+            both_chua_nx,
+            "[LMS] Chưa NX (1/4); [SPCK] Chưa NX (1/4); [SPCK] Bổ sung tên SP",
+        )
+        muc_a_audit = [
+            {
+                "action_type": "BCNB_UPDATE_CHECKER_NOTE",
+                "mode": "production",
+                "outcome": "VERIFIED",
+                "target_id": "VT-C4K-CSI02",
+                "reason": {
+                    "class_code": "VT-C4K-CSI02",
+                    "lesson": "12",
+                    "week": 46,
+                    "year": 2026,
+                    "bcnb_session_id": "sess_csi02_12",
+                    "auto_issues": [
+                        "[LMS] Chưa NX (1/4)",
+                        "[SPCK] Chưa NX (1/4)",
+                        "[SPCK] Bổ sung tên SP",
+                    ],
+                },
+                "before_state": {"qc_issue_note": ""},
+                "after_state": {
+                    "qc_issue_note": both_chua_nx,
+                    "bcnb_session_id": "sess_csi02_12",
+                    "post_verified": True,
+                },
+            }
+        ]
+        proven_muc_a = extract_proven_auto_issues_from_audits(
+            muc_a_audit,
+            class_code="VT-C4K-CSI02",
+            lesson="12",
+            week=46,
+            year=2026,
+            session_id="sess_csi02_12",
+        )
+        self.assertEqual(
+            proven_muc_a,
+            ["[LMS] Chưa NX (1/4)", "[SPCK] Chưa NX (1/4)", "[SPCK] Bổ sung tên SP"],
+        )
+        self.assertEqual(
+            merge_checker_issue_note(both_chua_nx, [], proven_auto_issues=proven_muc_a),
+            "",
         )
 
 
