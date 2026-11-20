@@ -1553,6 +1553,39 @@ async function checkLmsPreviewDetailAndClassSelection() {
     JSON.stringify(postBodies[0].selected_classes_to_tick) === JSON.stringify(['VT-PTB09']),
     'Confirm LMS must pass only the user-selected subset of classes_to_tick',
   );
+
+  // When all eligible classes are already ticked, showLmsReview displays a friendly emerald info banner
+  const alreadyDonePlan = {
+    kind: 'lms_preview',
+    week: 46,
+    year: 2026,
+    dry_run: false,
+    can_confirm: false,
+    confirmation_token: null,
+    missing_classes: ['VT-KIND-ROB4B04'],
+    overdue_details: { 'VT-KIND-ROB4B04': 'Buổi 12' },
+    unmatched_classes: [],
+    missing_but_checked_classes: [],
+    classes_to_tick: [],
+    blocking_issues: [],
+    all_eligible_already_checked: true,
+    info_message: '✅ Đã tích xong 47 lớp hợp lệ của tuần 46/2026 (còn 1 lớp quá hạn LMS chưa đủ điều kiện tích).',
+  };
+  vm.runInContext(
+    `showLmsReview({id: 970}, ${JSON.stringify(alreadyDonePlan)})`,
+    harness.context,
+  );
+  const infoBanner = harness.elements.get('lmsReviewWarning');
+  assertFrontend(
+    !infoBanner.classList.contains('hidden') &&
+      infoBanner.className.includes('border-emerald-400') &&
+      infoBanner.textContent.includes('Đã tích xong 47 lớp hợp lệ'),
+    'All-already-checked LMS preview must render emerald info banner',
+  );
+  assertFrontend(
+    harness.elements.get('btnConfirmLms').disabled === true,
+    'Confirm button must stay disabled when classes_to_tick is empty',
+  );
 }
 
 async function checkGoogleFormFetchLmsStudentsAndIdempotency() {

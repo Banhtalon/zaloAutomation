@@ -1229,6 +1229,330 @@ class LmsServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(self.job_repo.updates[-1]["status"], "SUCCESS")
 
+    async def test_read_lms_table_extracts_optional_lesson_date_and_khoi(self):
+        class RichBcnbCell(FakeCell):
+            def __init__(self, text="", *, checked=False, has_checkbox=False):
+                super().__init__(text)
+                self._checked = checked
+                self._has_checkbox = has_checkbox
+
+            def locator(self, _selector):
+                cell_ref = self
+
+                class _Cb:
+                    async def count(self_inner):
+                        return 1 if cell_ref._has_checkbox else 0
+
+                    async def is_checked(self_inner):
+                        return cell_ref._checked
+
+                return type("First", (), {"first": _Cb()})()
+
+        class RichBcnbRow:
+            def __init__(self, cells, *, data_block=""):
+                self.cells = cells
+                self._data_block = data_block
+
+            async def get_attribute(self, name):
+                if name == "data-block":
+                    return self._data_block
+                return None
+
+            def locator(self, selector):
+                if selector == "th, td" or selector == "td":
+                    return type("Cells", (), {"all": AsyncMock(return_value=self.cells)})()
+                raise AssertionError(selector)
+
+        class RichBcnbPage:
+            def __init__(self, rows):
+                self.rows = rows
+
+            def locator(self, selector):
+                if selector != "table tr":
+                    raise AssertionError(selector)
+                rows_ref = self.rows
+                return type(
+                    "Rows",
+                    (),
+                    {
+                        "first": rows_ref[0],
+                        "all": AsyncMock(return_value=rows_ref),
+                    },
+                )()
+
+        header_row = RichBcnbRow(
+            [
+                RichBcnbCell("Mã lớp"),
+                RichBcnbCell("Khối"),
+                RichBcnbCell("Buổi"),
+                RichBcnbCell("Ngày học"),
+                RichBcnbCell("NX LMS"),
+            ]
+        )
+        data_row_1 = RichBcnbRow(
+            [
+                RichBcnbCell("VT-ROB-ARMA18"),
+                RichBcnbCell(""),
+                RichBcnbCell("1"),
+                RichBcnbCell("18:00\n11/11/2026"),
+                RichBcnbCell("", checked=True, has_checkbox=True),
+            ],
+            data_block="Robotics",
+        )
+        data_row_2 = RichBcnbRow(
+            [
+                RichBcnbCell("VT-KIND-ROB4B04"),
+                RichBcnbCell("Robotics"),
+                RichBcnbCell("12"),
+                RichBcnbCell("10:00\n14/11/2026"),
+                RichBcnbCell("", checked=False, has_checkbox=True),
+            ]
+        )
+
+        # Header row has no input checkbox, wait: `_read_lms_table` iterates all rows' `td`,
+        # so keep header cells as `th` by mocking header separately on `.first`.
+        class HeaderAndDataPage:
+            def __init__(self):
+                self.header = header_row
+                self.data_rows = [data_row_1, data_row_2]
+
+            def locator(self, selector):
+                if selector != "table tr":
+                    raise AssertionError(selector)
+                hdr = self.header
+                drows = self.data_rows
+
+                class _DataRowAdapter(RichBcnbRow):
+                    pass
+
+                # Ensure header row returns 0 `td` cells on normal row scan (like <th> in real HTML)
+                class _HeaderRowShim:
+                    def locator(self_inner, inner_sel):
+                        if inner_sel == "th, td":
+                            return type("Cells", (), {"all": AsyncMock(return_value=hdr.cells)})()
+                        if inner_sel == "td":
+                            return type("Cells", (), {"all": AsyncMock(return_value=[])})()
+                        raise AssertionError(inner_sel)
+
+                shim_hdr = _HeaderRowShim()
+                return type(
+                    "Rows",
+                    (),
+                    {
+                        "first": shim_hdr,
+                        "all": AsyncMock(return_value=[shim_hdr, *drows]),
+                    },
+                )()
+
+        snapshot, class_idx, lms_idx = await service._read_lms_table(
+            HeaderAndDataPage(), year=2026
+        )
+        self.assertEqual((class_idx, lms_idx), (0, 4))
+        self.assertEqual(
+            snapshot,
+            [
+                {
+                    "class_code": "VT-ROB-ARMA18",
+                    "checked": True,
+                    "lesson": "1",
+                    "class_date": "18:00\n11/11/2026",
+                    "class_date_iso": "2026-11-11",
+                    "khoi": "Robotics",
+                },
+                {
+                    "class_code": "VT-KIND-ROB4B04",
+                    "checked": False,
+                    "lesson": "12",
+                    "class_date": "10:00\n14/11/2026",
+                    "class_date_iso": "2026-11-14",
+                    "khoi": "Robotics",
+                },
+            ],
+        )
+
+    async def test_web_analysis_reconciles_mismatched_future_week_session_and_keeps_real_incomplete(self):
+        page = FakeAutomationPage()
+        snapshot = [
+            {
+                "class_code": "VT-ROB-ARMA18",
+                "checked": True,
+                "lesson": "1",
+                "class_date": "18:00\n11/11/2026",
+                "class_date_iso": "2026-11-11",
+                "khoi": "Robotics",
+            },
+            {
+                "class_code": "VT-KIND-ROB4B04",
+                "checked": False,
+                "lesson": "12",
+                "class_date": "10:00\n14/11/2026",
+                "class_date_iso": "2026-11-14",
+                "khoi": "Robotics",
+            },
+            {
+                "class_code": "VT-C4K-SB24",
+                "checked": True,
+                "lesson": "5",
+                "class_date": "18:00\n12/11/2026",
+                "class_date_iso": "2026-11-12",
+                "khoi": "Coding",
+            },
+        ]
+
+        async def _fake_missing_with_details(_page, details_out=None):
+            if isinstance(details_out, dict):
+                details_out.update(
+                    {
+                        "VT-ROB-ARMA18": "Buổi 2",
+                        "VT-KIND-ROB4B04": "Buổi 12",
+                    }
+                )
+            return ["VT-ROB-ARMA18", "VT-KIND-ROB4B04"]
+
+        fetch_calls = []
+
+        class FakeLmsQuality:
+            def __init__(self, response):
+                self.response = response
+
+            async def fetch_class_slots(self, _page, class_codes, target_lessons_by_class=None):
+                fetch_calls.append((list(class_codes), dict(target_lessons_by_class or {})))
+                if isinstance(self.response, Exception):
+                    raise self.response
+                return self.response
+
+        complete_wordy_comment = (
+            "Con tham gia học rất tập trung, hoàn thành tốt phần lắp ráp mô hình robot và "
+            "giải thích rõ nguyên lý hoạt động của cảm biến trong buổi học hôm nay."
+        )
+        complete_slots = {
+            "VT-ROB-ARMA18": [
+                {
+                    "_id": "slot-arma-1",
+                    "index": 0,
+                    "date": "2026-11-11T00:00:00.000+07:00",
+                    "startTime": "2026-11-11T18:00:00.000+07:00",
+                    "endTime": "2026-11-11T20:00:00.000+07:00",
+                    "summary": "Buổi 1 làm quen thiết bị Robotics cơ bản.",
+                    "studentAttendance": [
+                        {
+                            "studentKey": "stu_1",
+                            "status": "ATTENDED",
+                            "comment": complete_wordy_comment,
+                        }
+                    ],
+                },
+                {
+                    "_id": "slot-arma-2",
+                    "index": 1,
+                    "date": "2026-11-18T00:00:00.000+07:00",
+                    "studentAttendance": [{"studentKey": "stu_1", "status": "PENDING", "comment": ""}],
+                },
+            ]
+        }
+
+        rt_complete = WorkerRuntime(
+            external=ExternalGateways(
+                browser=FakeBrowserGateway(page),
+                lms_ocr=FakeLmsOcr(),
+                student_ocr_factory=lambda: object(),
+                lms_quality=FakeLmsQuality(complete_slots),
+            )
+        )
+        with (
+            patch.object(service, "_read_lms_missing_classes", side_effect=_fake_missing_with_details),
+            patch.object(
+                service,
+                "_read_bcnb_snapshot",
+                AsyncMock(return_value=(page, 46, 2026, snapshot, 0, 1)),
+            ),
+        ):
+            await service.run_lms_analysis(101, None, runtime=rt_complete)
+
+        # Only VT-ROB-ARMA18 (Lesson 1 vs LMS Buổi 2) is queried; ROB4B04 (Buổi 12) is untouched
+        self.assertEqual(fetch_calls, [(["VT-ROB-ARMA18"], {"VT-ROB-ARMA18": [1]})])
+        final_ok = self.job_repo.updates[-1]
+        self.assertEqual(final_ok["status"], "SUCCESS")
+        res_ok = json.loads(final_ok["results"])
+        self.assertEqual(res_ok["missing_classes"], ["VT-KIND-ROB4B04"])
+        self.assertEqual(res_ok["overdue_details"], {"VT-KIND-ROB4B04": "Buổi 12"})
+        self.assertEqual(res_ok["missing_but_checked_classes"], [])
+        self.assertTrue(res_ok.get("all_eligible_already_checked"))
+        self.assertIn("Đã tích xong 2 lớp hợp lệ của tuần 46/2026", res_ok.get("info_message", ""))
+
+        # Case 2: Week 46 Lesson 1 itself IS incomplete (MISSING_ATTENDANCE) -> stays in missing_classes with updated detail "Buổi 1"
+        self.job_repo = FakeJobRepository()
+        service.job_repo = self.job_repo
+        incomplete_slots = {
+            "VT-ROB-ARMA18": [
+                {
+                    "_id": "slot-arma-1",
+                    "index": 0,
+                    "date": "2026-11-11T00:00:00.000+07:00",
+                    "summary": "",
+                    "studentAttendance": [
+                        {"studentKey": "stu_1", "status": "PENDING", "comment": ""}
+                    ],
+                }
+            ]
+        }
+        rt_incomplete = WorkerRuntime(
+            external=ExternalGateways(
+                browser=FakeBrowserGateway(page),
+                lms_ocr=FakeLmsOcr(),
+                student_ocr_factory=lambda: object(),
+                lms_quality=FakeLmsQuality(incomplete_slots),
+            )
+        )
+        with (
+            patch.object(service, "_read_lms_missing_classes", side_effect=_fake_missing_with_details),
+            patch.object(
+                service,
+                "_read_bcnb_snapshot",
+                AsyncMock(return_value=(page, 46, 2026, snapshot, 0, 1)),
+            ),
+        ):
+            await service.run_lms_analysis(102, None, runtime=rt_incomplete)
+
+        final_inc = self.job_repo.updates[-1]
+        self.assertEqual(final_inc["status"], "SUCCESS")
+        res_inc = json.loads(final_inc["results"])
+        self.assertEqual(res_inc["missing_classes"], ["VT-ROB-ARMA18", "VT-KIND-ROB4B04"])
+        self.assertEqual(
+            res_inc["overdue_details"],
+            {"VT-ROB-ARMA18": "Buổi 1", "VT-KIND-ROB4B04": "Buổi 12"},
+        )
+        self.assertEqual(res_inc["missing_but_checked_classes"], ["VT-ROB-ARMA18"])
+
+        # Case 3: Fail closed when detail fetch throws error -> preserves original missing_classes & overdue_details
+        self.job_repo = FakeJobRepository()
+        service.job_repo = self.job_repo
+        rt_err = WorkerRuntime(
+            external=ExternalGateways(
+                browser=FakeBrowserGateway(page),
+                lms_ocr=FakeLmsOcr(),
+                student_ocr_factory=lambda: object(),
+                lms_quality=FakeLmsQuality(RuntimeError("network timeout")),
+            )
+        )
+        with (
+            patch.object(service, "_read_lms_missing_classes", side_effect=_fake_missing_with_details),
+            patch.object(
+                service,
+                "_read_bcnb_snapshot",
+                AsyncMock(return_value=(page, 46, 2026, snapshot, 0, 1)),
+            ),
+        ):
+            await service.run_lms_analysis(103, None, runtime=rt_err)
+
+        final_err = self.job_repo.updates[-1]
+        res_err = json.loads(final_err["results"])
+        self.assertEqual(res_err["missing_classes"], ["VT-ROB-ARMA18", "VT-KIND-ROB4B04"])
+        self.assertEqual(
+            res_err["overdue_details"],
+            {"VT-ROB-ARMA18": "Buổi 2", "VT-KIND-ROB4B04": "Buổi 12"},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -767,6 +767,7 @@ class TodayOpsServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(bcnb_calls), 1)
         self.assertTrue(bcnb_calls[0]["tick_lms"])
         self.assertFalse(bcnb_calls[0]["check_only"])
+        self.assertTrue(bcnb_calls[0]["defer_unexpired_checker_notes"])
 
         job = await self.job_repo.get_job(job_id)
         self.assertEqual(job["status"], "SUCCESS")
@@ -2828,3 +2829,251 @@ class TodayOpsServiceTests(unittest.IsolatedAsyncioTestCase):
         kpis = _compute_today_kpis([ended_missing_att])
         self.assertEqual(kpis["lms"]["missing_attendance_count"], 1)
         self.assertEqual(kpis["lms"]["ready_for_tick"], 0)
+
+    async def test_defer_unexpired_checker_notes_prevents_early_bcnb_faults_while_allowing_ticks_and_clears(
+        self,
+    ) -> None:
+        now_dt = datetime(2026, 11, 18, 20, 45, tzinfo=BUSINESS_TIMEZONE)
+        today = now_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+        page = MagicMock()
+
+        # Row 1: Unexpired deadline (20:00 20/11/2026) — Teacher NOT sent Zalo AND MISSING_ATTENDANCE LMS.
+        # Checker note must be DEFERRED (no early fault written to BCNB).
+        unexpired_fault_res = {
+            "group": "MindX - VT-ARMA18 (18:00-20:00)",
+            "status": "❌ Chưa báo cáo",
+            "evidence_state": "NOT_FOUND_VERIFIED",
+            "submitted_for_bcnb": False,
+            "zalo_content_issues": [
+                {"code": "ZALO_MISSING_FAIL", "severity": "FAIL", "text": "[Zalo] Chưa gửi báo cáo"}
+            ],
+            "lms_attendance": {"status": "MISSING_ATTENDANCE", "unverified_count": 0, "attended_count": 0},
+            "lms_comments": {"status": "MISSING_ATTENDANCE", "submitted_count": 0},
+            "lms_spck": {"status": "MISSING_ATTENDANCE", "submitted_count": 0},
+            "lms_quality_issues": [
+                {"code": "LMS_QUALITY_FAIL", "severity": "FAIL", "text": "[LMS] Chưa điểm danh"}
+            ],
+            "scan_target": {
+                "week": 47,
+                "year": 2026,
+                "class_code": "VT-ARMA18",
+                "lesson": "2",
+                "class_date": "18/11/2026",
+                "class_date_iso": "2026-11-18",
+                "group_name": "MindX - VT-ARMA18 (18:00-20:00)",
+                "lms_start_time": "18:00",
+                "lms_end_time": "20:00",
+                "bcnb_session_id": "sess-arma-2",
+            },
+            "evidence": {
+                "date_context": {
+                    "target_week": 47,
+                    "target_year": 2026,
+                    "target_class_code": "VT-ARMA18",
+                    "target_lesson": "2",
+                    "target_class_date": "2026-11-18",
+                },
+                "classifier_result": {},
+                "images": {},
+            },
+        }
+        # Row 2: Unexpired deadline, teacher completed Zalo + LMS AND previously had a BCNB note "[LMS] Chưa điểm danh".
+        # Bot must BOTH tick NX Zalo + NX LMS AND clear the obsolete "[LMS] Chưa điểm danh" note on Teaching.
+        cleared_res = {
+            "group": "MindX - VT-JSB15 (18:00-20:00)",
+            "status": "✅ Đã báo cáo",
+            "evidence_state": "SUBMITTED_VERIFIED",
+            "submitted_for_bcnb": True,
+            "delay_days": 0,
+            "lms_attendance": {"status": "VERIFIED", "unverified_count": 0, "attended_count": 5},
+            "lms_comments": {"status": "COMPLETE", "submitted_count": 5},
+            "lms_spck": {"status": "NOT_REQUIRED"},
+            "scan_target": {
+                "week": 47,
+                "year": 2026,
+                "class_code": "VT-JSB15",
+                "lesson": "5",
+                "class_date": "18/11/2026",
+                "class_date_iso": "2026-11-18",
+                "group_name": "MindX - VT-JSB15 (18:00-20:00)",
+                "lms_start_time": "18:00",
+                "lms_end_time": "20:00",
+                "bcnb_session_id": "sess-jsb-5",
+            },
+            "evidence": {
+                "date_context": {
+                    "target_week": 47,
+                    "target_year": 2026,
+                    "target_class_code": "VT-JSB15",
+                    "target_lesson": "5",
+                    "target_class_date": "2026-11-18",
+                },
+                "classifier_result": {"matched_ui_sent_at": "18/11/2026"},
+                "images": {"proof": {"path": "/api/evidence/1/jsb.png", "sha256": "JSBSHA"}},
+            },
+        }
+        # Row 3: Expired deadline ("20:00 13/11/2026\nhết hạn") in previous week -> MUST still write "[LMS] Chưa điểm danh" to BCNB!
+        expired_fault_res = {
+            "group": "MindX - VT-ROB4B (18:00-20:00)",
+            "status": "❌ Chưa báo cáo",
+            "evidence_state": "NOT_FOUND_VERIFIED",
+            "submitted_for_bcnb": False,
+            "zalo_content_issues": [
+                {"code": "ZALO_MISSING_FAIL", "severity": "FAIL", "text": "[Zalo] Chưa gửi báo cáo"}
+            ],
+            "lms_attendance": {"status": "MISSING_ATTENDANCE", "unverified_count": 0, "attended_count": 0},
+            "lms_comments": {"status": "MISSING_ATTENDANCE", "submitted_count": 0},
+            "lms_spck": {"status": "MISSING_ATTENDANCE", "submitted_count": 0},
+            "lms_quality_issues": [
+                {"code": "LMS_QUALITY_FAIL", "severity": "FAIL", "text": "[LMS] Chưa điểm danh"}
+            ],
+            "scan_target": {
+                "week": 46,
+                "year": 2026,
+                "class_code": "VT-ROB4B",
+                "lesson": "12",
+                "class_date": "11/11/2026",
+                "class_date_iso": "2026-11-11",
+                "bcnb_session_id": "sess-rob-12",
+            },
+            "evidence": {
+                "date_context": {
+                    "target_week": 46,
+                    "target_year": 2026,
+                    "target_class_code": "VT-ROB4B",
+                    "target_lesson": "12",
+                    "target_class_date": "2026-11-11",
+                },
+                "classifier_result": {},
+                "images": {},
+            },
+        }
+
+        row_unexpired = _make_fake_bcnb_row(
+            class_code="VT-ARMA18",
+            lesson="2",
+            date_str="18/11/2026",
+            date_iso="2026-11-18",
+            session_id="sess-arma-2",
+            zalo_deadline="20:00 20/11/2026\ncòn 1d 23h 15' 00s",
+            lms_deadline="20:00 20/11/2026\ncòn 1d 23h 15' 00s",
+        )
+        row_cleared = _make_fake_bcnb_row(
+            class_code="VT-JSB15",
+            lesson="5",
+            date_str="18/11/2026",
+            date_iso="2026-11-18",
+            session_id="sess-jsb-5",
+            zalo_deadline="20:00 20/11/2026\ncòn 1d 23h 15' 00s",
+            lms_deadline="20:00 20/11/2026\ncòn 1d 23h 15' 00s",
+        )
+        row_cleared["qc_issue_note"] = "[LMS] Chưa điểm danh"
+        row_expired = _make_fake_bcnb_row(
+            class_code="VT-ROB4B",
+            lesson="12",
+            date_str="11/11/2026",
+            date_iso="2026-11-11",
+            session_id="sess-rob-12",
+            zalo_deadline="20:00 13/11/2026\nhết hạn\n13/11 09:23",
+            lms_deadline="20:00 13/11/2026\nhết hạn\n16/11 00:31",
+        )
+
+        # Record real provenance audit for row_cleared so split_checker_issue_note recognizes "[LMS] Chưa điểm danh" as proven auto
+        seed_job_id = await self.job_repo.create_job("ZALO_SCAN", {"execution_mode": "production"})
+        audit_row, _ = await self.audit_repo.record_intent(
+            action_key="seed-jsb-prev-note",
+            job_id=seed_job_id,
+            action_type="BCNB_UPDATE_CHECKER_NOTE",
+            target_type="CLASS",
+            target_id="VT-JSB15",
+            mode="production",
+            before_state={"qc_issue_note": ""},
+            intended_state={"qc_issue_note": "[LMS] Chưa điểm danh"},
+            reason={
+                "week": 47,
+                "year": 2026,
+                "lesson": "5",
+                "class_date": "2026-11-18",
+                "bcnb_session_id": "sess-jsb-5",
+                "auto_issues": ["[LMS] Chưa điểm danh"],
+                "merged_note": "[LMS] Chưa điểm danh",
+            },
+        )
+        await self.audit_repo.complete_action(
+            audit_row["id"],
+            outcome="VERIFIED",
+            after_state={"qc_issue_note": "[LMS] Chưa điểm danh", "post_verified": True},
+        )
+
+        async def _read_by_week(_page, *, week, **_kwargs):
+            if int(week) == 47:
+                return [row_unexpired, row_cleared]
+            return [row_expired]
+
+        tick_mock = AsyncMock(return_value="VERIFIED")
+        note_mock = AsyncMock(return_value="VERIFIED")
+
+        scan_plan = {
+            "latest_week": {"week": 47, "year": 2026},
+            "required_week": {"week": 46, "year": 2026},
+            "selected_weeks": [{"week": 46, "year": 2026}, {"week": 47, "year": 2026}],
+            "targets": [
+                unexpired_fault_res["scan_target"],
+                cleared_res["scan_target"],
+                expired_fault_res["scan_target"],
+            ],
+        }
+
+        with (
+            patch("services.zalo_bcnb_service._read_bcnb_schedule_rows", AsyncMock(side_effect=_read_by_week)),
+            patch("services.zalo_bcnb_service.resolve_report_columns", AsyncMock(return_value=(3, 4, 5))),
+            patch("services.zalo_bcnb_service.resolve_lms_columns", AsyncMock(return_value=(0, 6))),
+            patch("services.zalo_bcnb_service.execute_verified_checkbox_action", tick_mock),
+            patch("services.zalo_bcnb_service.execute_verified_checker_note_action", note_mock),
+            patch("services.zalo_bcnb_service.fetch_and_evaluate_lms_quality", AsyncMock(return_value={"VT-ARMA18": [{}], "VT-JSB15": [{}], "VT-ROB4B": [{}]})),
+            patch("services.zalo_bcnb_service.inspect_and_attach_quality_issues_async", AsyncMock()),
+        ):
+            summary = await update_bcnb_reports(
+                page,
+                job_id=901,
+                execution_mode="production",
+                scan_results=[unexpired_fault_res, cleared_res, expired_fault_res],
+                today=today,
+                now=now_dt,
+                scan_plan=scan_plan,
+                job_repo=self.job_repo,
+                audit_repo=self.audit_repo,
+                tick_lms=True,
+                check_only=False,
+                defer_unexpired_checker_notes=True,
+            )
+
+        self.assertEqual(summary["updated_count"], 1)
+        self.assertEqual(summary["lms_updated_count"], 1)
+        self.assertEqual(unexpired_fault_res.get("checker_note_outcome"), "DEFERRED_BEFORE_DEADLINE")
+        # UI issues on the scan result object remain untouched for Lớp Hôm Nay live display & Copy nhắc GV
+        self.assertEqual(len(unexpired_fault_res.get("zalo_content_issues") or []), 1)
+        self.assertEqual(len(unexpired_fault_res.get("lms_quality_issues") or []), 1)
+
+        note_calls = {
+            (c.kwargs["class_code"], c.kwargs["week"]): list(c.kwargs["auto_issues"])
+            for c in note_mock.await_args_list
+        }
+        self.assertNotIn(("VT-ARMA18", 47), note_calls)
+        self.assertEqual(note_calls[("VT-JSB15", 47)], [])
+        self.assertEqual(len(note_calls[("VT-ROB4B", 46)]), 2)
+
+    def test_is_bcnb_deadline_expired_handles_bcnb_formats(self) -> None:
+        from services.zalo_bcnb_service import _is_bcnb_deadline_expired
+
+        ref = datetime(2026, 11, 18, 20, 30, tzinfo=BUSINESS_TIMEZONE)
+        self.assertFalse(_is_bcnb_deadline_expired("20:00 20/11/2026\ncòn 1d 23h", now_dt=ref))
+        self.assertTrue(_is_bcnb_deadline_expired("20:00 18/11/2026\nhết hạn\n18/11 21:00", now_dt=ref))
+        self.assertFalse(_is_bcnb_deadline_expired("21:00 18/11/2026\nhết hạn", now_dt=ref))
+        self.assertTrue(_is_bcnb_deadline_expired("13/11/2026 20:00", now_dt=ref))
+        self.assertTrue(_is_bcnb_deadline_expired("2026-11-18 19:00", now_dt=ref))
+        self.assertFalse(_is_bcnb_deadline_expired("18/11/2026", now_dt=ref))
+        self.assertTrue(_is_bcnb_deadline_expired("17/11/2026", now_dt=ref))
+        self.assertFalse(_is_bcnb_deadline_expired("", now_dt=ref))
+        self.assertFalse(_is_bcnb_deadline_expired("—", now_dt=ref))
+        self.assertTrue(_is_bcnb_deadline_expired("hết hạn", now_dt=ref))

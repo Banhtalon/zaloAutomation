@@ -8,7 +8,13 @@ import json
 import re
 from typing import Any
 
-from core.time_utils import business_day_start, now_business, now_utc, utc_iso
+from core.time_utils import (
+    BUSINESS_TIMEZONE,
+    business_day_start,
+    now_business,
+    now_utc,
+    utc_iso,
+)
 from db.backup import backup_job
 from db.database import get_db_connection
 from googleform_autosubmit.config import Config
@@ -27,6 +33,7 @@ from services.bcnb_safety import (
     extract_bcnb_extended_row_fields,
     fold_text,
     merge_checker_issue_note,
+    normalize_auto_issue_text,
     preserve_bcnb_note_text,
     resolve_extended_bcnb_columns,
     resolve_lms_columns,
@@ -110,6 +117,58 @@ def _parse_bcnb_date(value: str, *, today: datetime) -> datetime | None:
         )
     except (TypeError, ValueError):
         return None
+
+
+def _is_bcnb_deadline_expired(raw_deadline: object, *, now_dt: datetime) -> bool:
+    """Return True only when an explicit BCNB deadline timestamp/date has passed."""
+    now_biz = (
+        now_dt.astimezone(BUSINESS_TIMEZONE)
+        if now_dt.tzinfo
+        else now_dt.replace(tzinfo=BUSINESS_TIMEZONE)
+    )
+    if not isinstance(raw_deadline, str) or not raw_deadline.strip():
+        return False
+    text = raw_deadline.strip()
+    m_hm_date = re.search(
+        r"(?<!\d)(\d{1,2}):(\d{2})\s+(\d{1,2})[/.-](\d{1,2})[/.-](\d{4})(?!\d)",
+        text,
+    )
+    if m_hm_date:
+        try:
+            hh, mm, dd, mo, yyyy = (int(g) for g in m_hm_date.groups())
+            deadline_dt = datetime(yyyy, mo, dd, hh, mm, tzinfo=BUSINESS_TIMEZONE)
+            return bool(now_biz >= deadline_dt)
+        except ValueError:
+            return False
+    m_date_hm = re.search(
+        r"(?<!\d)(\d{1,2})[/.-](\d{1,2})[/.-](\d{4})\s+(\d{1,2}):(\d{2})(?!\d)",
+        text,
+    )
+    if m_date_hm:
+        try:
+            dd, mo, yyyy, hh, mm = (int(g) for g in m_date_hm.groups())
+            deadline_dt = datetime(yyyy, mo, dd, hh, mm, tzinfo=BUSINESS_TIMEZONE)
+            return bool(now_biz >= deadline_dt)
+        except ValueError:
+            return False
+    m_iso_hm = re.search(
+        r"(?<!\d)(\d{4})-(\d{1,2})-(\d{1,2})\s+(\d{1,2}):(\d{2})(?!\d)",
+        text,
+    )
+    if m_iso_hm:
+        try:
+            yyyy, mo, dd, hh, mm = (int(g) for g in m_iso_hm.groups())
+            deadline_dt = datetime(yyyy, mo, dd, hh, mm, tzinfo=BUSINESS_TIMEZONE)
+            return bool(now_biz >= deadline_dt)
+        except ValueError:
+            return False
+    folded = fold_text(text)
+    parsed = _parse_bcnb_date(text, today=now_biz)
+    if parsed is not None:
+        if "het han" in folded and "con " not in folded:
+            return True
+        return bool(now_biz.date() > parsed.date())
+    return bool("het han" in folded and "con " not in folded)
 
 
 def _result_target_week(result: dict[str, Any]) -> tuple[int, int] | None:
@@ -1115,6 +1174,7 @@ async def update_bcnb_reports(
     reset_ai_batch_counter: bool = True,
     tick_lms: bool = False,
     check_only: bool = False,
+    defer_unexpired_checker_notes: bool = False,
 ) -> dict[str, Any]:
     """Update both bounded weeks with exact-row matching and server read-back."""
     await job_repo.ensure_not_cancelled(job_id)
@@ -1393,6 +1453,48 @@ async def update_bcnb_reports(
         )
         if not should_sync:
             return lms_used_page
+        if defer_unexpired_checker_notes:
+            zalo_expired = _is_bcnb_deadline_expired(
+                bcnb_row.get("zalo_deadline"), now_dt=current_time
+            )
+            lms_expired = _is_bcnb_deadline_expired(
+                bcnb_row.get("lms_deadline") or bcnb_row.get("zalo_deadline"),
+                now_dt=current_time,
+            )
+            if not zalo_expired or not lms_expired:
+                _, existing_auto = split_checker_issue_note(
+                    existing_note,
+                    proven_auto_issues=proven_auto_issues,
+                )
+                existing_norm_keys = {
+                    normalize_auto_issue_text(issue_text(item)).casefold()
+                    for item in existing_auto
+                    if issue_text(item)
+                }
+                filtered_auto: list[Any] = []
+                for item in effective_auto:
+                    raw_item_txt = issue_text(item)
+                    norm_txt = normalize_auto_issue_text(raw_item_txt) or raw_item_txt
+                    norm_upper = norm_txt.upper()
+                    norm_key = norm_txt.casefold()
+                    if norm_upper.startswith("[ZALO]") and not zalo_expired:
+                        if norm_key in existing_norm_keys:
+                            filtered_auto.append(item)
+                    elif norm_upper.startswith(("[LMS]", "[SPCK]")) and not lms_expired:
+                        if norm_key in existing_norm_keys:
+                            filtered_auto.append(item)
+                    else:
+                        filtered_auto.append(item)
+                candidate_merged = merge_checker_issue_note(
+                    existing_note,
+                    filtered_auto,
+                    proven_auto_issues=proven_auto_issues,
+                )
+                if candidate_merged == preserve_bcnb_note_text(existing_note):
+                    if len(filtered_auto) < len(effective_auto):
+                        target_result["checker_note_outcome"] = "DEFERRED_BEFORE_DEADLINE"
+                    return lms_used_page
+                effective_auto = filtered_auto
         if not has_readable_note:
             err_msg = (
                 "Không đọc được ô Mô tả vấn đề hiện tại trên BCNB; "

@@ -20,6 +20,41 @@ class LmsSafetyError(ValueError):
         self.code = code
 
 
+def parse_bcnb_lesson_number(raw_lesson: object) -> int | None:
+    """Parse a positive BCNB/LMS lesson number such as ``'1'``, ``'02'``, or ``'Buổi 2'``."""
+    if isinstance(raw_lesson, bool):
+        return None
+    if isinstance(raw_lesson, int):
+        return raw_lesson if raw_lesson > 0 else None
+    if not isinstance(raw_lesson, str):
+        return None
+    cleaned = " ".join(raw_lesson.strip().split())
+    if not cleaned:
+        return None
+    match = re.fullmatch(r"(?:buổi\s*)?(\d+)", cleaned, flags=re.IGNORECASE)
+    if not match:
+        return None
+    num = int(match.group(1))
+    return num if num > 0 else None
+
+
+def parse_overdue_lesson_numbers(detail_text: object) -> list[int]:
+    """Parse canonical overdue session numbers; fail closed (``[]``) if any token is non-numeric."""
+    if not isinstance(detail_text, str) or not detail_text.strip():
+        return []
+    parts = [part.strip() for part in re.split(r"[,;/]+", detail_text.strip()) if part.strip()]
+    if not parts:
+        return []
+    nums: list[int] = []
+    for part in parts:
+        num = parse_bcnb_lesson_number(part)
+        if num is None:
+            return []
+        if num not in nums:
+            nums.append(num)
+    return nums
+
+
 def format_overdue_session_detail(raw_text: str) -> str:
     if not isinstance(raw_text, str):
         return ""
@@ -303,8 +338,40 @@ def build_lms_plan(
             "Lớp được OCR là chưa làm nhưng BCNB đã tick: "
             + ", ".join(missing_but_checked)
         )
+
+    all_eligible_already_checked = False
+    info_message = ""
     if not classes_to_tick:
-        blocking_issues.append("Không có lớp nào đủ điều kiện để tick.")
+        if already_checked and not blocking_issues:
+            pending_overdue_in_bcnb = [
+                row["class_code"]
+                for row in observed
+                if row["class_code"] in missing_set and not row["checked"]
+            ]
+            all_eligible_already_checked = True
+            if pending_overdue_in_bcnb and missing_but_checked:
+                info_message = (
+                    f"✅ Đã tích xong {len(already_checked)} lớp hợp lệ của tuần {int(week)}/{int(year)} "
+                    f"(còn {len(pending_overdue_in_bcnb)} lớp quá hạn LMS chưa đủ điều kiện tích; "
+                    f"{len(missing_but_checked)} lớp cần rà soát đã tích từ trước)."
+                )
+            elif pending_overdue_in_bcnb:
+                info_message = (
+                    f"✅ Đã tích xong {len(already_checked)} lớp hợp lệ của tuần {int(week)}/{int(year)} "
+                    f"(còn {len(pending_overdue_in_bcnb)} lớp quá hạn LMS chưa đủ điều kiện tích)."
+                )
+            elif missing_but_checked:
+                info_message = (
+                    f"✅ Đã tích xong {len(already_checked)} lớp hợp lệ của tuần {int(week)}/{int(year)} "
+                    f"({len(missing_but_checked)} lớp cần rà soát đã tích BCNB từ trước)."
+                )
+            else:
+                info_message = (
+                    f"✅ Tất cả {len(already_checked)} lớp hợp lệ của tuần {int(week)}/{int(year)} "
+                    "đều đã được tích BCNB trước đó."
+                )
+        else:
+            blocking_issues.append("Không có lớp nào đủ điều kiện để tick.")
 
     plan = {
         "kind": LMS_PLAN_KIND,
@@ -321,9 +388,12 @@ def build_lms_plan(
         "unmatched_classes": unmatched,
         "missing_but_checked_classes": missing_but_checked,
         "blocking_issues": blocking_issues,
-        "can_confirm": not blocking_issues,
+        "can_confirm": bool(classes_to_tick) and not blocking_issues,
         "dry_run": bool(dry_run),
     }
+    if all_eligible_already_checked:
+        plan["all_eligible_already_checked"] = True
+        plan["info_message"] = info_message
     if allow_unmatched_missing or allow_empty_missing or allow_checked_missing:
         plan["source"] = "lms_web"
     plan["plan_digest"] = compute_plan_digest(plan)

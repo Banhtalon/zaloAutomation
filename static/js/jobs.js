@@ -557,8 +557,21 @@
 
             const warning = document.getElementById('lmsReviewWarning');
             const issues = Array.isArray(plan.blocking_issues) ? plan.blocking_issues : [];
-            warning.textContent = issues.join(' • ');
-            warning.classList.toggle('hidden', issues.length === 0);
+            const infoMsg = String((plan && plan.info_message) || '').trim();
+            if (warning) {
+                if (issues.length > 0) {
+                    warning.className = 'rounded-xl border-2 border-rose-400 border-l-8 border-l-rose-600 bg-rose-50 px-4 py-2.5 text-xs font-bold text-rose-950';
+                    warning.textContent = issues.join(' • ');
+                    warning.classList.toggle('hidden', false);
+                } else if (infoMsg) {
+                    warning.className = 'rounded-xl border-2 border-emerald-400 border-l-8 border-l-emerald-600 bg-emerald-50 px-4 py-2.5 text-xs font-bold text-emerald-950';
+                    warning.textContent = infoMsg;
+                    warning.classList.toggle('hidden', false);
+                } else {
+                    warning.textContent = '';
+                    warning.classList.toggle('hidden', true);
+                }
+            }
             syncLmsConfirmButtonState();
         }
 

@@ -2055,6 +2055,7 @@ async def _run_bcnb_sync_on_session(
             reset_ai_batch_counter=False,
             tick_lms=effective_tick_lms,
             check_only=effective_check_only,
+            defer_unexpired_checker_notes=True,
         )
     finally:
         await _close_scan_page(session, bcnb_page)

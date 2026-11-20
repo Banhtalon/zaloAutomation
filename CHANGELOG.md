@@ -4,6 +4,21 @@ Tài liệu này ghi lại toàn bộ quá trình hình thành, phát triển ki
 
 ---
 
+## [2026-11-20] — Đối chiếu đúng buổi theo tuần kiểm tra trong Tự động Tick LMS (`Hướng 1`) & Hoãn ghi lỗi sớm trước deadline trên `Lớp Hôm Nay` (`DEC-052`)
+
+- **Đối chiếu đúng buổi tuần kiểm tra trong `Tự động Tick LMS` (`services/lms_plan.py`, `services/lms_service.py`, `static/js/jobs.js`)**:
+  - Đọc thêm thông tin tùy chọn `lesson`, `class_date`/`class_date_iso` và `khoi` trong `_read_lms_table` (giữ nguyên hợp đồng `observed_classes` và `compute_plan_digest` của `run_lms_automation`).
+  - Bổ sung `parse_bcnb_lesson_number`, `parse_overdue_lesson_numbers` và `_reconcile_mismatched_overdue_classes`: khi trang tổng hợp MindX LMS báo quá hạn ở một buổi mới hơn/khác với buổi của tuần BCNB đang kiểm tra (như `VT-ROB-ARMA18` vừa học xong `Buổi 2` Tuần 47 tối thứ Tư trong khi BCNB đang kiểm tra `Buổi 1` Tuần 46), worker tự động truy vấn đích danh slot của đúng buổi tuần BCNB qua `fetch_lms_slots_for_targets` + `evaluate_lms_slot_quality` (`DisabledLmsCommentReviewerGateway`) + `is_lms_ready_for_bcnb_tick`. Chỉ loại khỏi danh sách quá hạn khi buổi tuần kiểm tra đã hoàn tất; nếu buổi tuần cũ thực sự chưa xong thì giữ lại và chỉnh về đúng `Buổi {bcnb_lesson}`; luôn fail-closed khi lỗi mạng hoặc slot mơ hồ.
+  - Bổ sung `all_eligible_already_checked` + `info_message` trong `build_lms_plan` (kèm trạng thái `SUCCESS` trên `run_lms_analysis` và dải thông báo xanh ngọc trên `showLmsReview`) khi các lớp hợp lệ của tuần đều đã tích BCNB từ trước để thay cho thông báo lỗi đỏ `"Không có lớp nào đủ điều kiện để tick."` while giữ nút xác nhận khóa an toàn.
+- **Hoãn ghi lỗi mới trước deadline lên Teaching khi chạy `Quét & Tick BCNB đúng tuần` trên `Lớp Hôm Nay (LIVE)` (`services/zalo_bcnb_service.py`, `services/today_ops_service.py`)**:
+  - Bổ sung `_is_bcnb_deadline_expired` phân tích chính xác mốc deadline 4 chữ số năm (`HH:MM DD/MM/YYYY`, `DD/MM/YYYY HH:MM`, `YYYY-MM-DD HH:MM`, tránh nhầm dòng timestamp tick thứ 3 trên BCNB) và bật `defer_unexpired_checker_notes=True` riêng cho `services/today_ops_service.py:_run_bcnb_sync_on_session` (giữ nguyên hành vi mặc định `False` của `ZALO_SCAN`).
+  - Trước deadline, bot vẫn tự tick xanh `NX Zalo` & `NX LMS` cho GV đã hoàn thành, vẫn giữ đầy đủ danh sách lỗi trên giao diện Live + `Copy nhắc GV`, vẫn dọn ngay ghi chú lỗi tự động cũ vừa được GV sửa xong và bảo toàn ghi chú tay QC, nhưng hoãn ghi lỗi mới phát sinh lên ô `Mô tả vấn đề` của Teaching (`checker_note_outcome = "DEFERRED_BEFORE_DEADLINE"`); sau deadline vẫn ghi bình thường.
+- **Tệp thay đổi (12 files)**: `services/{lms_plan,lms_service,today_ops_service,zalo_bcnb_service}.py`, `static/js/jobs.js`, `tests/{check_template_js.js,test_lms_plan.py,test_lms_service.py,test_today_ops_service.py}`, `CHANGELOG.md`, `PROJECT_DECISIONS.md`, `PROJECT_STATE.md`.
+- **Bằng chứng kiểm chứng (`[FULL GATE]`)**:
+  - Targeted unit suite (`test_lms_plan`, `test_lms_service`, `test_lms_confirmation`, `test_today_ops_service`, `test_today_eligibility_and_bcnb`): `66/66 OK` (`9.319s`); `ruff` & `mypy` trên các file sửa `0` lỗi; `node tests/check_template_js.js` -> `template-js-contract-ok scripts=8 handlers=46 behavior=14` (`exit 0`); offline `graphify update .` -> `5200` nodes, `15708` edges, `196` communities (`exit 0`, `.graphifyignore` nguyên vẹn).
+  - `powershell -ExecutionPolicy Bypass -File .\CHECK_QUALITY.ps1 -Isolated`: `exit 0` (`QUALITY GATE PASSED`), `776/776` regression tests `OK` (`344.104s`), branch coverage `80.2%`, Ruff `0`, Mypy `0` lỗi trên `80` source files, Phase 3/4/5/6/7/8/9/9A/9B PASS, `secrets=0`, `migrations=[1, 2, 3, 4]`.
+  - Review độc lập read-only (`verifier-3` trên Carbon High, `swarm #30`): `VERDICT: PASS` (`[P0]=0, [P1]=0, [P2]=0`, re-run 85 targeted tests `OK` + static analysis PASS).
+
 ## [2026-11-18] — Sửa cắt khung ảnh minh chứng Zalo, phát hiện `[LMS] Chưa điểm danh` (`MISSING_ATTENDANCE`), sửa Tier-2 `fetchOneCode` & Khử trùng Legacy + Mức A (`DEC-051`)
 
 - **Sửa cắt khung ảnh minh chứng Zalo không mất chữ bên trái & loại bỏ khoảng trống xám bên phải (`services/zalo_scan_evidence.py`, `tests/test_zalo_scan_evidence.py`)**:

@@ -5,6 +5,7 @@ import secrets
 import traceback
 from urllib.parse import urlsplit
 
+from core.time_utils import now_business
 from googleform_autosubmit.config import Config
 from logger_utils import log_message
 from repositories.audit_repository import AuditRepository
@@ -13,11 +14,18 @@ from repositories.job_repository import JobRepository
 from repositories.lms_repository import LmsRepository
 from services.browser_job_guard import exclusive_browser_job
 from services.bcnb_safety import (
+    _parse_bcnb_cell_date_iso,
+    fold_text,
+    match_bcnb_column_indexes,
     resolve_lms_columns,
     select_last_week_checked,
 )
 from services.bcnb_actions import execute_verified_checkbox_action
-from services.external_gateways import ExternalGateways, LmsOcrGateway
+from services.external_gateways import (
+    DisabledLmsCommentReviewerGateway,
+    ExternalGateways,
+    LmsOcrGateway,
+)
 from services.lms_plan import (
     LmsSafetyError,
     MAX_LMS_STUDENTS_PER_BATCH,
@@ -28,8 +36,18 @@ from services.lms_plan import (
     merge_overdue_session_details,
     normalize_class_code,
     normalize_lms_student_class_codes,
+    normalize_overdue_details,
+    parse_bcnb_lesson_number,
+    parse_overdue_lesson_numbers,
     validate_selected_classes_to_tick,
 )
+from services.lms_quality_service import (
+    evaluate_lms_slot_quality,
+    fetch_lms_slots_for_targets,
+    is_lms_fetch_unavailable,
+    select_matching_lms_slot,
+)
+from services.report_status import is_lms_ready_for_bcnb_tick
 
 
 job_repo = JobRepository()
@@ -431,13 +449,36 @@ async def _login_and_select_last_week(page):
     return week, year
 
 
-async def _read_lms_table(page):
+async def _read_lms_table(page, *, year: int | None = None):
     try:
         class_index, lms_index = await resolve_lms_columns(page)
     except RuntimeError as exc:
         raise LmsSafetyError(str(exc)) from exc
 
-    snapshot = []
+    lesson_index: int | None = None
+    date_index: int | None = None
+    block_index: int | None = None
+    try:
+        table_rows_loc = page.locator("table tr")
+        if hasattr(table_rows_loc, "first"):
+            header_cells = await table_rows_loc.first.locator("th, td").all()
+            headers = [
+                fold_text((await cell.inner_text()).strip()) for cell in header_cells
+            ]
+            matched = match_bcnb_column_indexes(headers)
+            if len(matched["lesson_indexes"]) == 1:
+                lesson_index = matched["lesson_indexes"][0]
+            if len(matched["class_date_indexes"]) == 1:
+                date_index = matched["class_date_indexes"][0]
+            if len(matched["block_indexes"]) == 1:
+                block_index = matched["block_indexes"][0]
+    except Exception:
+        lesson_index = None
+        date_index = None
+        block_index = None
+
+    fallback_year = int(year) if year else now_business().year
+    snapshot: list[dict[str, object]] = []
     rows = await page.locator("table tr").all()
     for row in rows:
         cells = await row.locator("td").all()
@@ -447,12 +488,185 @@ async def _read_lms_table(page):
         checkbox = cells[lms_index].locator('input[type="checkbox"]').first
         if await checkbox.count() == 0:
             raise LmsSafetyError(f"Không tìm thấy checkbox LMS của lớp {class_code}.")
-        snapshot.append(
-            {"class_code": class_code, "checked": await checkbox.is_checked()}
-        )
+        entry: dict[str, object] = {
+            "class_code": class_code,
+            "checked": await checkbox.is_checked(),
+        }
+        if lesson_index is not None and lesson_index < len(cells):
+            lesson_raw = (await cells[lesson_index].inner_text()).strip()
+            if lesson_raw:
+                entry["lesson"] = lesson_raw
+        if date_index is not None and date_index < len(cells):
+            date_raw = (await cells[date_index].inner_text()).strip()
+            if date_raw:
+                entry["class_date"] = date_raw
+                date_iso = _parse_bcnb_cell_date_iso(
+                    date_raw, fallback_year=fallback_year
+                )
+                if date_iso:
+                    entry["class_date_iso"] = date_iso
+        khoi = ""
+        if block_index is not None and block_index < len(cells):
+            khoi = (await cells[block_index].inner_text()).strip()
+        if not khoi and hasattr(row, "get_attribute"):
+            with contextlib.suppress(Exception):
+                khoi = str((await row.get_attribute("data-block")) or "").strip()
+        if khoi:
+            entry["khoi"] = khoi
+        snapshot.append(entry)
     if not snapshot:
         raise LmsSafetyError("Không đọc được dòng lớp nào từ bảng BCNB.")
     return snapshot, class_index, lms_index
+
+
+async def _reconcile_mismatched_overdue_classes(
+    page,
+    missing_classes: list[str],
+    overdue_details: dict[str, str],
+    snapshot: list[dict],
+    *,
+    week: int,
+    year: int,
+    job_id: int,
+    external,
+) -> tuple[list[str], dict[str, str]]:
+    """Reconcile classes whose LMS table overdue lesson differs from the BCNB week's lesson."""
+    if not missing_classes or not snapshot:
+        return list(missing_classes), dict(overdue_details or {})
+
+    bcnb_by_code: dict[str, dict] = {}
+    for snap_row in snapshot:
+        if not isinstance(snap_row, dict) or not snap_row.get("class_code"):
+            continue
+        with contextlib.suppress(LmsSafetyError):
+            bcnb_by_code[normalize_class_code(str(snap_row["class_code"]))] = snap_row
+
+    normalized_details = normalize_overdue_details(overdue_details)
+    candidates: dict[str, tuple[dict, int, str]] = {}
+    for raw_code in missing_classes:
+        try:
+            code = normalize_class_code(raw_code)
+        except LmsSafetyError:
+            continue
+        matched_row = bcnb_by_code.get(code)
+        if matched_row is None:
+            continue
+        bcnb_lesson = parse_bcnb_lesson_number(matched_row.get("lesson"))
+        target_date_iso = str(matched_row.get("class_date_iso") or "").strip()
+        overdue_nums = parse_overdue_lesson_numbers(normalized_details.get(code, ""))
+        if (
+            bcnb_lesson is None
+            or not target_date_iso
+            or not overdue_nums
+            or bcnb_lesson in overdue_nums
+        ):
+            continue
+        candidates[code] = (matched_row, bcnb_lesson, target_date_iso)
+
+    if not candidates:
+        return list(missing_classes), dict(normalized_details)
+
+    lms_gateway = getattr(external, "lms_quality", None)
+    if lms_gateway is None:
+        return list(missing_classes), dict(normalized_details)
+
+    await job_repo.ensure_not_cancelled(job_id)
+    await job_repo.update_job(
+        job_id,
+        status="RUNNING",
+        message=(
+            f"Đang đối chiếu chi tiết buổi LMS tuần {week}/{year} "
+            f"cho {len(candidates)} lớp lệch buổi..."
+        ),
+        progress=70,
+    )
+
+    try:
+        slots_by_class = await fetch_lms_slots_for_targets(
+            lms_gateway,
+            page,
+            list(candidates.keys()),
+            {code: [lesson_num] for code, (_, lesson_num, _) in candidates.items()},
+        )
+    except JobCancelledError:
+        raise
+    except Exception as exc:
+        log_message(
+            f"Không tải được chi tiết LMS để đối chiếu lệch buổi tuần {week}/{year}; "
+            f"giữ nguyên danh sách quá hạn an toàn ({type(exc).__name__}).",
+            level="WARNING",
+            event="lms.overdue_reconcile_failed",
+            week=week,
+            year=year,
+            error_type=type(exc).__name__,
+        )
+        return list(missing_classes), dict(normalized_details)
+
+    if not isinstance(slots_by_class, dict) or is_lms_fetch_unavailable(slots_by_class):
+        return list(missing_classes), dict(normalized_details)
+
+    verified_complete_codes: set[str] = set()
+    corrected_details = dict(normalized_details)
+    offline_reviewer = DisabledLmsCommentReviewerGateway()
+
+    for code, (row, bcnb_lesson, target_date_iso) in candidates.items():
+        class_slots = slots_by_class.get(code)
+        if not isinstance(class_slots, list) or not class_slots:
+            continue
+        first_slot = class_slots[0] if isinstance(class_slots[0], dict) else {}
+        if any(
+            first_slot.get(flag)
+            for flag in (
+                "overflow_class_limit",
+                "duplicate_class",
+                "missing_class",
+                "fetch_error",
+            )
+        ):
+            continue
+        matched_slot, slot_issue = select_matching_lms_slot(
+            class_slots,
+            target_date_iso=target_date_iso,
+            lesson_num=bcnb_lesson,
+        )
+        if matched_slot is None or slot_issue is not None:
+            continue
+
+        khoi = str(row.get("khoi") or "").strip()
+        slot_eval = evaluate_lms_slot_quality(
+            matched_slot,
+            class_code=code,
+            khoi=khoi,
+            lesson=str(bcnb_lesson),
+            ai_reviewer=offline_reviewer,
+        )
+        ready, _reason = is_lms_ready_for_bcnb_tick(
+            {
+                "class_code": code,
+                "khoi": khoi,
+                "lesson": str(bcnb_lesson),
+                "lms_attendance": slot_eval.get("lms_attendance"),
+                "lms_comments": slot_eval.get("lms_comments"),
+                "lms_spck": slot_eval.get("lms_spck"),
+                "lms_quality_issues": slot_eval.get("issues") or [],
+            }
+        )
+        if ready:
+            verified_complete_codes.add(code)
+            corrected_details.pop(code, None)
+            log_message(
+                f"LMS tuần {week}/{year}: bỏ cảnh báo lệch buổi cho {code} "
+                f"(BCNB Buổi {bcnb_lesson} đã hoàn tất, LMS báo {normalized_details.get(code)})."
+            )
+        else:
+            corrected_details[code] = f"Buổi {bcnb_lesson}"
+
+    reconciled_missing = [
+        raw_code
+        for raw_code in missing_classes
+        if normalize_class_code(raw_code) not in verified_complete_codes
+    ]
+    return reconciled_missing, corrected_details
 
 
 async def _handle_bcnb_dialog(dialog) -> None:
@@ -468,7 +682,7 @@ async def _read_bcnb_snapshot(page):
         lambda dialog: asyncio.create_task(_handle_bcnb_dialog(dialog)),
     )
     week, year = await _login_and_select_last_week(page)
-    snapshot, class_index, lms_index = await _read_lms_table(page)
+    snapshot, class_index, lms_index = await _read_lms_table(page, year=year)
     return page, week, year, snapshot, class_index, lms_index
 
 
@@ -545,6 +759,19 @@ async def run_lms_analysis(
                     _class_index,
                     _lms_index,
                 ) = await _read_bcnb_snapshot(page)
+                if use_web_lms and missing_classes:
+                    missing_classes, overdue_details = (
+                        await _reconcile_mismatched_overdue_classes(
+                            _page,
+                            missing_classes,
+                            overdue_details,
+                            snapshot,
+                            week=week,
+                            year=year,
+                            job_id=job_id,
+                            external=external,
+                        )
+                    )
                 plan = build_lms_plan(
                     missing_classes,
                     snapshot,
@@ -560,6 +787,22 @@ async def run_lms_analysis(
         if not plan["can_confirm"]:
             plan["analysis_job_id"] = job_id
             plan["confirmation_token"] = None
+            if plan.get("all_eligible_already_checked") and not plan.get("blocking_issues"):
+                info_message = str(
+                    plan.get("info_message")
+                    or f"✅ Đã tích xong các lớp hợp lệ của tuần {week}/{year}."
+                )
+                await job_repo.update_job(
+                    job_id,
+                    status="SUCCESS",
+                    message=info_message,
+                    progress=100,
+                    results=json.dumps(plan, ensure_ascii=False),
+                )
+                log_message(
+                    f"LMS preview tuần {week}/{year}: 0 lớp cần tick mới ({info_message})."
+                )
+                return
             await job_repo.update_job(
                 job_id,
                 status="FAILED",

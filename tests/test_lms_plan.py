@@ -10,6 +10,8 @@ from services.lms_plan import (
     normalize_class_codes,
     normalize_lms_student_class_codes,
     normalize_overdue_details,
+    parse_bcnb_lesson_number,
+    parse_overdue_lesson_numbers,
     validate_selected_classes_to_tick,
 )
 
@@ -288,6 +290,61 @@ class LmsPlanSafetyTests(unittest.TestCase):
                 with self.assertRaises(LmsSafetyError) as caught:
                     normalize_lms_student_class_codes(raw_codes, raw_single)
                 self.assertEqual(caught.exception.code, expected_code)
+
+    def test_parse_bcnb_and_overdue_lesson_numbers(self):
+        self.assertEqual(parse_bcnb_lesson_number("1"), 1)
+        self.assertEqual(parse_bcnb_lesson_number("02"), 2)
+        self.assertEqual(parse_bcnb_lesson_number("  Buổi  12 "), 12)
+        self.assertEqual(parse_bcnb_lesson_number(5), 5)
+        for bad in (None, True, False, 0, -1, "", "Session 2", "abc"):
+            self.assertIsNone(parse_bcnb_lesson_number(bad))
+
+        self.assertEqual(parse_overdue_lesson_numbers("Buổi 2"), [2])
+        self.assertEqual(parse_overdue_lesson_numbers("10, 1; Buổi 10"), [10, 1])
+        self.assertEqual(parse_overdue_lesson_numbers(""), [])
+        self.assertEqual(parse_overdue_lesson_numbers(None), [])
+        self.assertEqual(parse_overdue_lesson_numbers("Buổi 2, Session X"), [])
+
+    def test_all_eligible_already_checked_emits_friendly_info_without_blocking_issue(self):
+        plan = build_lms_plan(
+            ["VT-KIND-ROB4B04"],
+            [
+                {"class_code": "VT-ROB-ARMA18", "checked": True},
+                {"class_code": "VT-C4K-SB24", "checked": True},
+                {"class_code": "VT-KIND-ROB4B04", "checked": False},
+            ],
+            week=46,
+            year=2026,
+            dry_run=False,
+            allow_unmatched_missing=True,
+            allow_empty_missing=True,
+            allow_checked_missing=True,
+            overdue_details={"VT-KIND-ROB4B04": "Buổi 12"},
+        )
+        self.assertFalse(plan["can_confirm"])
+        self.assertEqual(plan["blocking_issues"], [])
+        self.assertTrue(plan["all_eligible_already_checked"])
+        self.assertEqual(
+            plan["info_message"],
+            "✅ Đã tích xong 2 lớp hợp lệ của tuần 46/2026 (còn 1 lớp quá hạn LMS chưa đủ điều kiện tích).",
+        )
+
+        # When zero classes were already checked (all unchecked & overdue), blocking_issues still fires
+        plan_none_checked = build_lms_plan(
+            ["VT-KIND-ROB4B04"],
+            [{"class_code": "VT-KIND-ROB4B04", "checked": False}],
+            week=46,
+            year=2026,
+            allow_unmatched_missing=True,
+            allow_empty_missing=True,
+            allow_checked_missing=True,
+        )
+        self.assertFalse(plan_none_checked["can_confirm"])
+        self.assertEqual(
+            plan_none_checked["blocking_issues"],
+            ["Không có lớp nào đủ điều kiện để tick."],
+        )
+        self.assertNotIn("all_eligible_already_checked", plan_none_checked)
 
 
 if __name__ == "__main__":
