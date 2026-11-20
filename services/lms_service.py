@@ -43,6 +43,7 @@ from services.lms_plan import (
 )
 from services.lms_quality_service import (
     evaluate_lms_slot_quality,
+    fetch_lms_active_students_via_page,
     fetch_lms_slots_for_targets,
     is_lms_fetch_unavailable,
     select_matching_lms_slot,
@@ -1557,6 +1558,95 @@ async def _find_and_open_lms_class_in_table(
     return await _open_lms_class_row(page, match_row, match_cell)
 
 
+def _parse_graphql_active_students(
+    graphql_roster: dict,
+    normalized_codes: list[str],
+) -> list[dict[str, str]]:
+    """Validate GraphQL class roster payloads fail-closed and return ordered active students."""
+    if (
+        not isinstance(graphql_roster, dict)
+        or graphql_roster.get("__error__")
+        or graphql_roster.get("__auth_error__")
+    ):
+        raise LmsSafetyError(
+            "Không thể kết nối hoặc xác thực với hệ thống LMS để lấy danh sách học viên; "
+            "hãy kiểm tra tài khoản LMS và thử lại."
+        )
+
+    students_by_class: dict[str, list[dict[str, str]]] = {
+        code: [] for code in normalized_codes
+    }
+    total_count = 0
+
+    for code in normalized_codes:
+        entry = graphql_roster.get(code)
+        if not isinstance(entry, dict) or entry.get("fetch_error"):
+            raise LmsSafetyError(
+                f"Không tải được dữ liệu lớp {code} từ hệ thống LMS; dừng an toàn."
+            )
+        if entry.get("duplicate_class"):
+            raise LmsSafetyError(
+                f"Phát hiện nhiều dòng trùng mã lớp {code} trên trang LMS; dừng an toàn."
+            )
+        if entry.get("missing_class"):
+            raise LmsSafetyError(
+                f"Không tìm thấy lớp {code} trên hệ thống LMS."
+            )
+        if entry.get("overflow_students"):
+            raise LmsSafetyError(
+                f"Số lượng học viên vượt quá giới hạn an toàn "
+                f"(tối đa {MAX_LMS_STUDENTS_PER_BATCH} học viên mỗi đợt)."
+            )
+
+        raw_students = entry.get("students")
+        if not isinstance(raw_students, list):
+            raise LmsSafetyError(
+                f"Không tải được danh sách học viên lớp {code} từ hệ thống LMS; dừng an toàn."
+            )
+        seen_ids: set[str] = set()
+        seen_names: set[str] = set()
+        for raw_stu in raw_students:
+            if not isinstance(raw_stu, dict):
+                continue
+            stu_id = str(raw_stu.get("id") or "").strip()
+            name = _clean_lms_student_name(str(raw_stu.get("fullName") or ""))
+            if not name:
+                continue
+            if stu_id and stu_id in seen_ids:
+                continue
+            name_key = name.casefold()
+            if name_key in seen_names:
+                raise LmsSafetyError(
+                    f"Phát hiện học viên trùng tên trong lớp {code} trên LMS; "
+                    "dừng an toàn để kiểm tra thủ công."
+                )
+            if total_count >= MAX_LMS_STUDENTS_PER_BATCH:
+                raise LmsSafetyError(
+                    f"Số lượng học viên vượt quá giới hạn an toàn "
+                    f"(tối đa {MAX_LMS_STUDENTS_PER_BATCH} học viên mỗi đợt)."
+                )
+            if stu_id:
+                seen_ids.add(stu_id)
+            seen_names.add(name_key)
+            total_count += 1
+            students_by_class[code].append({"name": name, "class_code": code})
+
+    missing_student_classes = [
+        code for code in normalized_codes if not students_by_class.get(code)
+    ]
+    if missing_student_classes:
+        raise LmsSafetyError(
+            "Không tìm thấy danh sách học viên hợp lệ trên LMS cho lớp: "
+            + ", ".join(missing_student_classes)
+        )
+
+    return [
+        student
+        for code in normalized_codes
+        for student in students_by_class[code]
+    ]
+
+
 async def _read_lms_students_by_classes(
     page,
     class_codes: list[str] | str,
@@ -1566,6 +1656,17 @@ async def _read_lms_students_by_classes(
     if not Config.LMS_URL:
         raise LmsSafetyError("Chưa cấu hình LMS_URL trong .env.")
     normalized_codes = normalize_lms_student_class_codes(class_codes)
+    if job_id is not None:
+        await job_repo.ensure_not_cancelled(job_id)
+
+    graphql_roster = await fetch_lms_active_students_via_page(
+        page, class_codes=normalized_codes
+    )
+    if graphql_roster is not None:
+        if job_id is not None:
+            await job_repo.ensure_not_cancelled(job_id)
+        return _parse_graphql_active_students(graphql_roster, normalized_codes)
+
     await page.goto(Config.LMS_URL)
     await page.wait_for_load_state("networkidle")
     await _login_lms_if_needed(page)

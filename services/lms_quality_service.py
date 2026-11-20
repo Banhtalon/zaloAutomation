@@ -34,6 +34,7 @@ from urllib.parse import parse_qs, urlsplit
 from core.time_utils import BUSINESS_TIMEZONE, now_business
 from logger_utils import log_message
 from services.bcnb_safety import fold_text, normalize_auto_issue_text
+from services.lms_plan import MAX_LMS_STUDENTS_PER_BATCH
 from services.report_status import (
     ISSUE_CODE_LMS_ATTENDANCE_CONFLICT_NOTE,
     ISSUE_CODE_LMS_COMMENT_NOTE,
@@ -3046,139 +3047,66 @@ def _is_usable_lms_token(
     return True
 
 
-async def fetch_lms_class_slots_via_page(
-    page: Any,
-    *,
-    class_names: list[str],
-    timeout_ms: int = 12000,
-    target_lessons_by_class: dict[str, list[int]] | None = None,
-) -> dict[str, list[dict[str, Any]]]:
-    """Query MindX LMS GraphQL for slot summaries and studentAttendance of the given classes.
-
-    Strictly fail-safe and isolated: returns `{}` when `ZALO_QUALITY_ISOLATED == "1"`,
-    when `page` has no authenticated LMS token, or when any network/GraphQL error occurs.
+_CLEAR_STALE_LMS_AUTH_JS = """
+    async ({ allowedTokenKeys }) => {
+        try {
+            const keySet = new Set(allowedTokenKeys || []);
+            if (typeof localStorage !== 'undefined' && localStorage) {
+                const toRemove = [];
+                for (let i = 0; i < localStorage.length; i++) {
+                    const rawKey = String(localStorage.key(i) || '');
+                    const k = rawKey.trim().toLowerCase();
+                    const rawVal = String(localStorage.getItem(rawKey) || '').trim();
+                    if (
+                        keySet.has(k) ||
+                        k.includes('firebase') ||
+                        k.includes('token') ||
+                        rawVal.startsWith('eyJ') ||
+                        rawVal.includes('stsTokenManager')
+                    ) {
+                        toRemove.push(rawKey);
+                    }
+                }
+                for (const rk of toRemove) {
+                    localStorage.removeItem(rk);
+                }
+            }
+            if (typeof indexedDB !== 'undefined' && indexedDB && typeof indexedDB.open === 'function') {
+                await new Promise((resolve) => {
+                    const timer = setTimeout(resolve, 1000);
+                    try {
+                        const req = indexedDB.open('firebaseLocalStorageDb');
+                        req.onerror = () => { clearTimeout(timer); resolve(); };
+                        req.onsuccess = () => {
+                            try {
+                                const db = req.result;
+                                if (!db || !db.objectStoreNames || !db.objectStoreNames.contains('firebaseLocalStorage')) {
+                                    if (db && typeof db.close === 'function') db.close();
+                                    clearTimeout(timer);
+                                    resolve();
+                                    return;
+                                }
+                                const tx = db.transaction('firebaseLocalStorage', 'readwrite');
+                                tx.objectStore('firebaseLocalStorage').clear();
+                                tx.oncomplete = () => { db.close(); clearTimeout(timer); resolve(); };
+                                tx.onerror = () => { db.close(); clearTimeout(timer); resolve(); };
+                            } catch (_) {
+                                clearTimeout(timer);
+                                resolve();
+                            }
+                        };
+                    } catch (_) {
+                        clearTimeout(timer);
+                        resolve();
+                    }
+                });
+            }
+        } catch (_) {}
+    }
     """
-    if os.getenv("ZALO_QUALITY_ISOLATED") == "1":
-        return {}
-    all_codes: list[str] = []
-    for raw in class_names:
-        code = str(raw or "").strip().upper()
-        if code and code not in all_codes:
-            all_codes.append(code)
-    if not all_codes:
-        return {}
-    normalized_codes = all_codes[:MAX_LMS_QUALITY_CLASSES_PER_BATCH]
-    overflow_codes = all_codes[MAX_LMS_QUALITY_CLASSES_PER_BATCH:]
-    if page is None or not hasattr(page, "evaluate"):
-        return {
-            code: [{"fetch_error": True} for _ in range(MAX_LMS_SLOTS_PER_CLASS)]
-            for code in all_codes
-        }
 
-    pre_resolved_token = ""
-    ctx_obj = getattr(page, "context", None)
-    if ctx_obj is not None and callable(getattr(ctx_obj, "storage_state", None)):
-        try:
-            state = await ctx_obj.storage_state()
-            if isinstance(state, dict):
-                for origin_entry in state.get("origins") or []:
-                    if not isinstance(origin_entry, dict):
-                        continue
-                    origin_url = str(origin_entry.get("origin") or "").strip().lower()
-                    parsed_origin = urlsplit(origin_url)
-                    if parsed_origin.hostname != LMS_ALLOWED_HOSTNAME:
-                        continue
-                    for ls_item in origin_entry.get("localStorage") or []:
-                        if not isinstance(ls_item, dict):
-                            continue
-                        k = str(ls_item.get("name") or "").strip().lower()
-                        raw_v = str(ls_item.get("value") or "").strip()
-                        v = raw_v.strip('"')
-                        if k in ALLOWED_LMS_TOKEN_KEYS and _is_usable_lms_token(v):
-                            pre_resolved_token = v
-                            if k == "id_token":
-                                break
-                        elif v.startswith("eyJ") and len(v) > 40 and _is_usable_lms_token(v):
-                            pre_resolved_token = v
-                        elif raw_v.startswith("{"):
-                            with contextlib.suppress(Exception):
-                                parsed_ls = json.loads(raw_v)
-                                if isinstance(parsed_ls, dict):
-                                    sts = parsed_ls.get("stsTokenManager")
-                                    exp_time = (
-                                        sts.get("expirationTime")
-                                        if isinstance(sts, dict)
-                                        else parsed_ls.get("expirationTime")
-                                    )
-                                    acc = sts.get("accessToken") if isinstance(sts, dict) else None
-                                    if isinstance(acc, str) and _is_usable_lms_token(
-                                        acc, expiration_time=exp_time
-                                    ):
-                                        pre_resolved_token = acc
-                                    elif isinstance(
-                                        parsed_ls.get("idToken"), str
-                                    ) and _is_usable_lms_token(
-                                        parsed_ls["idToken"], expiration_time=exp_time
-                                    ):
-                                        pre_resolved_token = parsed_ls["idToken"]
-                    if pre_resolved_token:
-                        break
-        except Exception:
-            pre_resolved_token = ""
 
-    eval_page = page
-    temp_page = None
-    captured_auth: dict[str, str] = {}
-    resolved_centres: list[str] = []
-
-    with contextlib.suppress(Exception):
-        from googleform_autosubmit.config import Config as _Cfg
-
-        cfg_lms_url = str(getattr(_Cfg, "LMS_URL", "") or "").strip()
-        if cfg_lms_url:
-            raw_centres_qs = parse_qs(urlsplit(cfg_lms_url).query).get("centres") or []
-            for raw_c in raw_centres_qs:
-                parsed_c = json.loads(raw_c)
-                if isinstance(parsed_c, list):
-                    for cid in parsed_c:
-                        s_cid = str(cid or "").strip()
-                        if s_cid and s_cid not in resolved_centres:
-                            resolved_centres.append(s_cid)
-
-    def _on_lms_request(req: Any) -> None:
-        with contextlib.suppress(Exception):
-            req_url = str(getattr(req, "url", "") or "").strip()
-            parsed_req = urlsplit(req_url)
-            req_scheme = str(parsed_req.scheme or "").lower()
-            req_host = str(parsed_req.hostname or "").lower()
-            req_method = str(getattr(req, "method", "") or "").upper()
-            if (
-                req_scheme == "https"
-                and req_host == "lms-api.mindx.edu.vn"
-                and req_method == "POST"
-            ):
-                hdrs = getattr(req, "headers", None) or {}
-                if isinstance(hdrs, dict):
-                    for hk, hv in hdrs.items():
-                        val = str(hv or "").strip()
-                        if not _is_usable_lms_token(val):
-                            continue
-                        if str(hk).lower() == "authorization":
-                            captured_auth["token"] = val
-                        elif str(hk).lower() == "token" and "token" not in captured_auth:
-                            captured_auth["token"] = val
-                post_data = str(getattr(req, "post_data", "") or "")
-                if post_data.startswith("{"):
-                    body_json = json.loads(post_data)
-                    req_vars = body_json.get("variables") if isinstance(body_json, dict) else None
-                    if isinstance(req_vars, dict) and isinstance(req_vars.get("centres"), list):
-                        for cid in req_vars["centres"]:
-                            s_cid = str(cid or "").strip()
-                            if s_cid and s_cid not in resolved_centres:
-                                resolved_centres.append(s_cid)
-
-    js_script = """
-    async ({ endpoint, classCodes, centres, maxSlots, maxStudents, timeoutMs, preResolvedToken, allowedHostname, allowedTokenKeys, targetLessons, spckExemptClasses }) => {
+_LMS_JS_COMMON_HELPERS = """
         const isTokenUsable = (rawToken, expTime) => {
             if (typeof rawToken !== 'string') return false;
             let clean = rawToken.trim().replace(/^"|"$/g, '');
@@ -3331,6 +3259,760 @@ async def fetch_lms_class_slots_via_page(
             } catch (_) {}
             return '';
         };
+        const buildSearchCandidates = (rawCode) => {
+            const cands = [rawCode];
+            const parts = String(rawCode || '').split('-').map((p) => p.trim()).filter(Boolean);
+            if (parts.length >= 2) {
+                const last = parts[parts.length - 1];
+                if (parts.length >= 3) {
+                    const prev = parts[parts.length - 2];
+                    const tailTwo = `${prev}-${last}`;
+                    if (!cands.includes(tailTwo)) cands.push(tailTwo);
+                    if (last.length >= 2 && last !== 'HB' && !cands.includes(last)) {
+                        cands.push(last);
+                    }
+                    if (prev.length >= 2 && (last === 'HB' || /\\d/.test(prev)) && !cands.includes(prev)) {
+                        cands.push(prev);
+                    }
+                } else if (last.length >= 2 && !cands.includes(last)) {
+                    cands.push(last);
+                }
+            }
+            return cands;
+        };
+        const readBoundedJson = async (resp, maxBytes) => {
+            if (resp && resp.headers && typeof resp.headers.get === 'function') {
+                const rawCl = resp.headers.get('content-length');
+                if (rawCl != null && String(rawCl).trim() !== '') {
+                    const parsedCl = Number(rawCl);
+                    if (Number.isFinite(parsedCl) && parsedCl > maxBytes) {
+                        if (resp.body && typeof resp.body.cancel === 'function') {
+                            try { await resp.body.cancel(); } catch (_) {}
+                        }
+                        return { overflow: true, data: null };
+                    }
+                }
+            }
+            if (resp && resp.body && typeof resp.body.getReader === 'function') {
+                const reader = resp.body.getReader();
+                const decoder = new TextDecoder('utf-8');
+                let totalBytes = 0;
+                const chunks = [];
+                while (true) {
+                    const step = await reader.read();
+                    if (!step || step.done) break;
+                    const val = step.value;
+                    const byteLen = (val && typeof val.byteLength === 'number')
+                        ? val.byteLength
+                        : (typeof val === 'string'
+                            ? (typeof TextEncoder !== 'undefined' ? new TextEncoder().encode(val).byteLength : val.length)
+                            : 0);
+                    totalBytes += byteLen;
+                    if (totalBytes > maxBytes) {
+                        try { await reader.cancel(); } catch (_) {}
+                        return { overflow: true, data: null };
+                    }
+                    if (typeof val === 'string') {
+                        chunks.push(val);
+                    } else if (val) {
+                        chunks.push(decoder.decode(val, { stream: true }));
+                    }
+                }
+                chunks.push(decoder.decode());
+                return { overflow: false, data: JSON.parse(chunks.join('')) };
+            }
+            if (resp && typeof resp.text === 'function') {
+                const txt = await resp.text();
+                if (txt.length > maxBytes) {
+                    return { overflow: true, data: null };
+                }
+                const utf8Bytes = (typeof TextEncoder !== 'undefined')
+                    ? new TextEncoder().encode(txt).byteLength
+                    : txt.length;
+                if (utf8Bytes > maxBytes) {
+                    return { overflow: true, data: null };
+                }
+                return { overflow: false, data: JSON.parse(txt) };
+            }
+            return { overflow: false, data: await resp.json() };
+        };
+        const dedupeExactById = (items, targetCode) => {
+            const exact = [];
+            const seenItemIds = new Set();
+            let dupNoId = false;
+            for (const item of items) {
+                if (!item || typeof item !== 'object') continue;
+                const itemName = String(item.name || '').trim().toUpperCase();
+                if (itemName !== targetCode) continue;
+                const itemId = item.id != null ? String(item.id).trim() : '';
+                if (itemId) {
+                    if (seenItemIds.has(itemId)) continue;
+                    seenItemIds.add(itemId);
+                } else if (exact.length > 0) {
+                    dupNoId = true;
+                }
+                exact.push(item);
+            }
+            return { exact, isDuplicate: dupNoId || exact.length > 1 };
+        };
+"""
+
+
+def _extract_lms_centres_from_config() -> list[str]:
+    resolved_centres: list[str] = []
+    with contextlib.suppress(Exception):
+        from googleform_autosubmit.config import Config as _Cfg
+
+        cfg_lms_url = str(getattr(_Cfg, "LMS_URL", "") or "").strip()
+        if cfg_lms_url:
+            raw_centres_qs = parse_qs(urlsplit(cfg_lms_url).query).get("centres") or []
+            for raw_c in raw_centres_qs:
+                parsed_c = json.loads(raw_c)
+                if isinstance(parsed_c, list):
+                    for cid in parsed_c:
+                        s_cid = str(cid or "").strip()
+                        if s_cid and s_cid not in resolved_centres:
+                            resolved_centres.append(s_cid)
+    return resolved_centres
+
+
+async def _extract_pre_resolved_lms_token(page: Any) -> str:
+    pre_resolved_token = ""
+    ctx_obj = getattr(page, "context", None)
+    if ctx_obj is None or not callable(getattr(ctx_obj, "storage_state", None)):
+        return pre_resolved_token
+    try:
+        state = await ctx_obj.storage_state()
+        if isinstance(state, dict):
+            for origin_entry in state.get("origins") or []:
+                if not isinstance(origin_entry, dict):
+                    continue
+                origin_url = str(origin_entry.get("origin") or "").strip().lower()
+                parsed_origin = urlsplit(origin_url)
+                if parsed_origin.hostname != LMS_ALLOWED_HOSTNAME:
+                    continue
+                for ls_item in origin_entry.get("localStorage") or []:
+                    if not isinstance(ls_item, dict):
+                        continue
+                    k = str(ls_item.get("name") or "").strip().lower()
+                    raw_v = str(ls_item.get("value") or "").strip()
+                    v = raw_v.strip('"')
+                    if k in ALLOWED_LMS_TOKEN_KEYS and _is_usable_lms_token(v):
+                        pre_resolved_token = v
+                        if k == "id_token":
+                            break
+                    elif v.startswith("eyJ") and len(v) > 40 and _is_usable_lms_token(v):
+                        pre_resolved_token = v
+                    elif raw_v.startswith("{"):
+                        with contextlib.suppress(Exception):
+                            parsed_ls = json.loads(raw_v)
+                            if isinstance(parsed_ls, dict):
+                                sts = parsed_ls.get("stsTokenManager")
+                                exp_time = (
+                                    sts.get("expirationTime")
+                                    if isinstance(sts, dict)
+                                    else parsed_ls.get("expirationTime")
+                                )
+                                acc = sts.get("accessToken") if isinstance(sts, dict) else None
+                                if isinstance(acc, str) and _is_usable_lms_token(
+                                    acc, expiration_time=exp_time
+                                ):
+                                    pre_resolved_token = acc
+                                elif isinstance(
+                                    parsed_ls.get("idToken"), str
+                                ) and _is_usable_lms_token(
+                                    parsed_ls["idToken"], expiration_time=exp_time
+                                ):
+                                    pre_resolved_token = parsed_ls["idToken"]
+                if pre_resolved_token:
+                    break
+    except Exception:
+        return ""
+    return pre_resolved_token
+
+
+def _create_lms_graphql_request_sniffer(
+    captured_auth: dict[str, str],
+    resolved_centres: list[str],
+):
+    def _on_lms_request(req: Any) -> None:
+        with contextlib.suppress(Exception):
+            req_url = str(getattr(req, "url", "") or "").strip()
+            parsed_req = urlsplit(req_url)
+            req_scheme = str(parsed_req.scheme or "").lower()
+            req_host = str(parsed_req.hostname or "").lower()
+            req_method = str(getattr(req, "method", "") or "").upper()
+            if (
+                req_scheme == "https"
+                and req_host == "lms-api.mindx.edu.vn"
+                and req_method == "POST"
+            ):
+                hdrs = getattr(req, "headers", None) or {}
+                if isinstance(hdrs, dict):
+                    for hk, hv in hdrs.items():
+                        val = str(hv or "").strip()
+                        if not _is_usable_lms_token(val):
+                            continue
+                        if str(hk).lower() == "authorization":
+                            captured_auth["token"] = val
+                        elif str(hk).lower() == "token" and "token" not in captured_auth:
+                            captured_auth["token"] = val
+                post_data = str(getattr(req, "post_data", "") or "")
+                if post_data.startswith("{"):
+                    body_json = json.loads(post_data)
+                    req_vars = body_json.get("variables") if isinstance(body_json, dict) else None
+                    if isinstance(req_vars, dict) and isinstance(req_vars.get("centres"), list):
+                        for cid in req_vars["centres"]:
+                            s_cid = str(cid or "").strip()
+                            if s_cid and s_cid not in resolved_centres:
+                                resolved_centres.append(s_cid)
+
+    return _on_lms_request
+
+
+async def _open_and_authenticate_lms_page(
+    page: Any,
+    *,
+    state: dict[str, Any],
+    captured_auth: dict[str, str],
+    request_listener: Any,
+    clear_stale_storage: bool = False,
+) -> str:
+    try:
+        from googleform_autosubmit.config import Config
+        from services.lms_service import _login_lms_if_needed
+
+        lms_url = str(getattr(Config, "LMS_URL", "") or "").strip()
+        parsed_lms_url = urlsplit(lms_url)
+        lms_scheme = str(parsed_lms_url.scheme or "").lower()
+        lms_host = str(parsed_lms_url.hostname or "").lower()
+        if lms_scheme != "https" or lms_host != LMS_ALLOWED_HOSTNAME:
+            return "skipped_invalid_lms_url"
+        current_page_url = str(getattr(page, "url", "") or "").strip()
+        parsed_page_url = urlsplit(current_page_url)
+        current_host = str(parsed_page_url.hostname or "").lower()
+        ctx_obj = getattr(page, "context", None)
+        if state["eval_page"] is page and current_host != LMS_ALLOWED_HOSTNAME:
+            if parsed_page_url.scheme in {"", "about"} and callable(
+                getattr(page, "goto", None)
+            ):
+                state["eval_page"] = page
+            elif ctx_obj is not None and callable(getattr(ctx_obj, "new_page", None)):
+                state["temp_page"] = await ctx_obj.new_page()
+                state["eval_page"] = state["temp_page"]
+        eval_page = state["eval_page"]
+        if eval_page is None or not callable(getattr(eval_page, "goto", None)):
+            return "skipped_no_goto"
+        if state["listener_page"] is None and callable(getattr(eval_page, "on", None)):
+            with contextlib.suppress(Exception):
+                eval_page.on("request", request_listener)
+                state["listener_page"] = eval_page
+        eval_parsed = urlsplit(str(getattr(eval_page, "url", "") or "").strip())
+        eval_scheme = str(eval_parsed.scheme or "").lower()
+        eval_host = str(eval_parsed.hostname or "").lower()
+        if clear_stale_storage:
+            captured_auth.clear()
+            state["pre_resolved_token"] = ""
+            if eval_scheme != "https" or eval_host != LMS_ALLOWED_HOSTNAME:
+                await eval_page.goto(lms_url)
+                if callable(getattr(eval_page, "wait_for_load_state", None)):
+                    with contextlib.suppress(Exception):
+                        await eval_page.wait_for_load_state("networkidle")
+                eval_parsed = urlsplit(str(getattr(eval_page, "url", "") or "").strip())
+                eval_scheme = str(eval_parsed.scheme or "").lower()
+                eval_host = str(eval_parsed.hostname or "").lower()
+            if (
+                eval_scheme == "https"
+                and eval_host == LMS_ALLOWED_HOSTNAME
+                and callable(getattr(eval_page, "evaluate", None))
+            ):
+                with contextlib.suppress(Exception):
+                    await eval_page.evaluate(
+                        _CLEAR_STALE_LMS_AUTH_JS,
+                        {"allowedTokenKeys": sorted(ALLOWED_LMS_TOKEN_KEYS)},
+                    )
+                captured_auth.clear()
+                await eval_page.goto(lms_url)
+                if callable(getattr(eval_page, "wait_for_load_state", None)):
+                    with contextlib.suppress(Exception):
+                        await eval_page.wait_for_load_state("networkidle")
+        elif eval_scheme != "https" or eval_host != LMS_ALLOWED_HOSTNAME:
+            await eval_page.goto(lms_url)
+            if callable(getattr(eval_page, "wait_for_load_state", None)):
+                with contextlib.suppress(Exception):
+                    await eval_page.wait_for_load_state("networkidle")
+        post_nav = urlsplit(str(getattr(eval_page, "url", "") or "").strip())
+        post_scheme = str(post_nav.scheme or "").lower()
+        post_host = str(post_nav.hostname or "").lower()
+        if post_scheme != "https" or post_host not in LMS_ALLOWED_LOGIN_HOSTNAMES:
+            return "untrusted_redirect"
+        try:
+            await _login_lms_if_needed(eval_page)
+        except asyncio.CancelledError:
+            raise
+        except Exception as login_exc:
+            with contextlib.suppress(Exception):
+                log_message(
+                    "Cảnh báo khi tự động đăng nhập LMS trong bước kiểm tra chất lượng.",
+                    level="WARNING",
+                    event="lms.quality_fetch.login_warning",
+                    error_type=type(login_exc).__name__,
+                )
+        after_login = urlsplit(str(getattr(eval_page, "url", "") or "").strip())
+        after_scheme = str(after_login.scheme or "").lower()
+        after_host = str(after_login.hostname or "").lower()
+        if after_scheme != "https" or after_host not in LMS_ALLOWED_LOGIN_HOSTNAMES:
+            return "untrusted_redirect"
+        if after_host != LMS_ALLOWED_HOSTNAME:
+            await eval_page.goto(lms_url)
+            if callable(getattr(eval_page, "wait_for_load_state", None)):
+                with contextlib.suppress(Exception):
+                    await eval_page.wait_for_load_state("networkidle")
+            after_login = urlsplit(str(getattr(eval_page, "url", "") or "").strip())
+            if (
+                str(after_login.scheme or "").lower() != "https"
+                or str(after_login.hostname or "").lower() != LMS_ALLOWED_HOSTNAME
+            ):
+                return "untrusted_redirect"
+        if state["listener_page"] is not None:
+            for _ in range(20):
+                tok_candidate = captured_auth.get("token")
+                if _is_usable_lms_token(tok_candidate):
+                    state["pre_resolved_token"] = str(tok_candidate)
+                    break
+                await asyncio.sleep(0.25)
+        return "ok"
+    except asyncio.CancelledError:
+        raise
+    except Exception as nav_exc:
+        with contextlib.suppress(Exception):
+            log_message(
+                "Cảnh báo khi điều hướng trang LMS để lấy dữ liệu buổi học.",
+                level="WARNING",
+                event="lms.quality_fetch.nav_warning",
+                error_type=type(nav_exc).__name__,
+            )
+        return "nav_exception"
+
+
+async def _cleanup_lms_eval_resources(
+    listener_page: Any,
+    request_listener: Any,
+    temp_page: Any,
+) -> None:
+    if listener_page is not None:
+        for detach_name in ("remove_listener", "off"):
+            detach_fn = getattr(listener_page, detach_name, None)
+            if callable(detach_fn):
+                with contextlib.suppress(Exception):
+                    detach_fn("request", request_listener)
+                break
+    if temp_page is not None and callable(getattr(temp_page, "close", None)):
+        with contextlib.suppress(Exception):
+            await temp_page.close()
+
+
+async def fetch_lms_active_students_via_page(
+    page: Any,
+    *,
+    class_codes: list[str],
+    timeout_ms: int = 15000,
+) -> dict[str, Any] | None:
+    """Fetch active student rosters (`activeInClass !== false`) via MindX LMS GraphQL with ``type=[]``."""
+    if os.getenv("ZALO_QUALITY_ISOLATED") == "1":
+        return None
+    if page is None or not callable(getattr(page, "evaluate", None)):
+        return None
+    all_codes: list[str] = []
+    for raw in class_codes:
+        code = str(raw or "").strip().upper()
+        if code and code not in all_codes:
+            all_codes.append(code)
+    if not all_codes:
+        return {}
+
+    pre_resolved_token = await _extract_pre_resolved_lms_token(page)
+    captured_auth: dict[str, str] = {}
+    resolved_centres = _extract_lms_centres_from_config()
+    _on_lms_request = _create_lms_graphql_request_sniffer(captured_auth, resolved_centres)
+    nav_state: dict[str, Any] = {
+        "eval_page": page,
+        "temp_page": None,
+        "listener_page": None,
+        "pre_resolved_token": pre_resolved_token,
+    }
+
+    roster_js_script = """
+    async ({ endpoint, classCodes, centres, maxStudents, timeoutMs, preResolvedToken, allowedHostname, allowedTokenKeys }) => {
+        __LMS_COMMON_HELPERS__
+        const out = {};
+        const token = await findToken();
+        if (!token) {
+            out.__auth_error__ = true;
+            out.__failure_reason__ = 'missing_or_expired_token';
+            for (const code of classCodes) {
+                out[code] = { fetch_error: true };
+            }
+            return out;
+        }
+        let authFailed = false;
+        const bearerHeader = token.startsWith('Bearer ') ? token : `Bearer ${token}`;
+        const rawTokenHeader = token.replace(/^Bearer\\s+/i, '');
+        const query = `
+            query classesMissAttendOrComment($type: [String], $search: String, $centres: [String], $pageIndex: Int, $itemsPerPage: Int, $orderBy: String, $status: [String]) {
+                classesMissAttendOrComment(
+                    payload: {
+                        type: $type,
+                        filter_textSearch: $search,
+                        centre_in: $centres,
+                        pageIndex: $pageIndex,
+                        itemsPerPage: $itemsPerPage,
+                        orderBy: $orderBy,
+                        status_in: $status
+                    }
+                ) {
+                    data {
+                        id
+                        name
+                        students {
+                            activeInClass
+                            student {
+                                id
+                                fullName
+                            }
+                        }
+                    }
+                }
+            }
+        `;
+        const MAX_ROSTER_RESPONSE_BYTES = 5 * 1024 * 1024;
+        const formatClassRoster = (matchedItem) => {
+            if (!matchedItem || !Array.isArray(matchedItem.students)) {
+                return { fetch_error: true };
+            }
+            const rawStudents = matchedItem.students;
+            if (rawStudents.length > maxStudents * 5) {
+                return { overflow_students: true };
+            }
+            const activeEntries = rawStudents.filter(
+                (s) => s && typeof s === 'object' && s.activeInClass !== false
+            );
+            if (activeEntries.length > maxStudents) {
+                return { overflow_students: true };
+            }
+            const students = activeEntries.map((s) => {
+                const stuObj = (s.student && typeof s.student === 'object') ? s.student : {};
+                const stuId = stuObj.id != null
+                    ? String(stuObj.id).trim()
+                    : (stuObj._id != null ? String(stuObj._id).trim() : '');
+                const fullName = typeof stuObj.fullName === 'string' ? stuObj.fullName.trim() : '';
+                return { id: stuId, fullName };
+            });
+            return { ok: true, students };
+        };
+        const runQuery = async (vars, timeoutOverride) => {
+            for (let attempt = 0; attempt < 2; attempt++) {
+                if (authFailed) return { authError: true };
+                const ctrl = new AbortController();
+                const timer = setTimeout(() => ctrl.abort(), timeoutOverride || timeoutMs || 15000);
+                try {
+                    const resp = await fetch(endpoint, {
+                        method: 'POST',
+                        headers: {
+                            'content-type': 'application/json',
+                            'authorization': bearerHeader,
+                            'token': rawTokenHeader
+                        },
+                        body: JSON.stringify({
+                            operationName: 'classesMissAttendOrComment',
+                            variables: vars,
+                            query
+                        }),
+                        signal: ctrl.signal
+                    });
+                    if (!resp.ok) {
+                        if (isAuthErrorPayload(resp.status, null)) {
+                            authFailed = true;
+                            return { authError: true };
+                        }
+                        if (attempt === 0) {
+                            await new Promise((r) => setTimeout(r, 300));
+                            continue;
+                        }
+                        return { error: true };
+                    }
+                    const bounded = await readBoundedJson(resp, MAX_ROSTER_RESPONSE_BYTES);
+                    if (bounded.overflow) {
+                        return { error: true };
+                    }
+                    const payload = bounded.data;
+                    if (payload && Array.isArray(payload.errors) && payload.errors.length > 0) {
+                        if (isAuthErrorPayload(resp.status, payload)) {
+                            authFailed = true;
+                            return { authError: true };
+                        }
+                        if (attempt === 0) {
+                            await new Promise((r) => setTimeout(r, 300));
+                            continue;
+                        }
+                        return { error: true };
+                    }
+                    const rawData = (((payload || {}).data || {}).classesMissAttendOrComment || {}).data;
+                    if (!Array.isArray(rawData)) {
+                        return { error: true };
+                    }
+                    return { ok: true, items: rawData };
+                } catch (_) {
+                    if (attempt === 0) {
+                        await new Promise((r) => setTimeout(r, 300));
+                        continue;
+                    }
+                    return { error: true };
+                } finally {
+                    clearTimeout(timer);
+                }
+            }
+            return { error: true };
+        };
+        const activeCentres = (Array.isArray(centres) && centres.length > 0) ? centres : undefined;
+        if (classCodes.length > 3) {
+            const bulkItems = [];
+            let bulkComplete = false;
+            const bulkTimeout = Math.max(timeoutMs || 15000, 25000);
+            for (let pageIdx = 0; pageIdx < 15; pageIdx++) {
+                const vars = {
+                    type: [],
+                    status: ['FINISHED', 'RUNNING'],
+                    pageIndex: pageIdx,
+                    itemsPerPage: 100,
+                    orderBy: 'createdAt_desc'
+                };
+                if (activeCentres) {
+                    vars.centres = activeCentres;
+                }
+                const pageRes = await runQuery(vars, bulkTimeout);
+                if (!pageRes.ok) {
+                    bulkComplete = false;
+                    break;
+                }
+                bulkItems.push(...pageRes.items);
+                if (pageRes.items.length < 100) {
+                    bulkComplete = true;
+                    break;
+                }
+            }
+            if (bulkComplete && bulkItems.length > 0) {
+                for (const code of classCodes) {
+                    const { exact, isDuplicate } = dedupeExactById(bulkItems, code);
+                    if (isDuplicate) {
+                        out[code] = { duplicate_class: true };
+                    } else if (exact.length === 1) {
+                        out[code] = formatClassRoster(exact[0]);
+                    }
+                }
+            }
+        }
+        const fetchOneRosterCode = async (code) => {
+            if (authFailed) {
+                out[code] = { fetch_error: true };
+                return;
+            }
+            const searchCandidates = buildSearchCandidates(code);
+            const passConfigs = [
+                { statusList: ['FINISHED', 'RUNNING'], useCentres: Boolean(activeCentres) },
+                { statusList: undefined, useCentres: Boolean(activeCentres) }
+            ];
+            if (activeCentres) {
+                passConfigs.push({ statusList: undefined, useCentres: false });
+            }
+            for (const cfg of passConfigs) {
+                let anyErrorInPass = false;
+                for (const searchTerm of searchCandidates) {
+                    const vars = {
+                        type: [],
+                        search: searchTerm,
+                        pageIndex: 0,
+                        itemsPerPage: 50,
+                        orderBy: 'createdAt_desc'
+                    };
+                    if (cfg.statusList) {
+                        vars.status = cfg.statusList;
+                    }
+                    if (cfg.useCentres && activeCentres) {
+                        vars.centres = activeCentres;
+                    }
+                    const qRes = await runQuery(vars, timeoutMs);
+                    if (qRes.authError || authFailed) {
+                        out[code] = { fetch_error: true };
+                        return;
+                    }
+                    if (!qRes.ok) {
+                        anyErrorInPass = true;
+                        break;
+                    }
+                    const { exact, isDuplicate } = dedupeExactById(qRes.items, code);
+                    if (isDuplicate) {
+                        out[code] = { duplicate_class: true };
+                        return;
+                    }
+                    if (exact.length === 1) {
+                        out[code] = formatClassRoster(exact[0]);
+                        return;
+                    }
+                }
+                if (anyErrorInPass) {
+                    out[code] = { fetch_error: true };
+                    return;
+                }
+            }
+            out[code] = { missing_class: true };
+        };
+        const remainingCodes = classCodes.filter((code) => !out[code]);
+        if (remainingCodes.length > 0) {
+            if (authFailed) {
+                for (const code of remainingCodes) {
+                    out[code] = { fetch_error: true };
+                }
+            } else {
+                const concurrency = Math.min(3, remainingCodes.length || 1);
+                let cursor = 0;
+                const workers = Array.from({ length: concurrency }, async () => {
+                    while (cursor < remainingCodes.length) {
+                        const idx = cursor++;
+                        await fetchOneRosterCode(remainingCodes[idx]);
+                    }
+                });
+                await Promise.all(workers);
+            }
+        }
+        if (authFailed) {
+            out.__auth_error__ = true;
+            out.__failure_reason__ = 'graphql_auth_rejected';
+        }
+        return out;
+    }
+    """.replace("__LMS_COMMON_HELPERS__", _LMS_JS_COMMON_HELPERS)
+    roster_js_script = "\n".join(
+        line.strip()
+        for line in roster_js_script.splitlines()
+        if line.strip() and not line.strip().startswith("//")
+    )
+
+    try:
+        page_mod = str(getattr(type(page), "__module__", "") or "")
+        current_host = str(urlsplit(str(getattr(page, "url", "") or "").strip()).hostname or "").lower()
+        if (
+            (not nav_state["pre_resolved_token"] or current_host != LMS_ALLOWED_HOSTNAME)
+            and not page_mod.startswith("unittest.mock")
+            and callable(getattr(page, "goto", None))
+        ):
+            nav_status = await _open_and_authenticate_lms_page(
+                page,
+                state=nav_state,
+                captured_auth=captured_auth,
+                request_listener=_on_lms_request,
+                clear_stale_storage=False,
+            )
+            if nav_status == "untrusted_redirect":
+                return {"__error__": "untrusted_redirect"}
+
+        eval_args = {
+            "endpoint": LMS_GRAPHQL_ENDPOINT,
+            "classCodes": all_codes,
+            "centres": resolved_centres,
+            "maxStudents": MAX_LMS_STUDENTS_PER_BATCH,
+            "timeoutMs": int(timeout_ms),
+            "preResolvedToken": nav_state["pre_resolved_token"],
+            "allowedHostname": LMS_ALLOWED_HOSTNAME,
+            "allowedTokenKeys": sorted(ALLOWED_LMS_TOKEN_KEYS),
+        }
+        raw_res = await nav_state["eval_page"].evaluate(roster_js_script, eval_args)
+        if (
+            isinstance(raw_res, dict)
+            and bool(raw_res.get("__auth_error__"))
+            and not page_mod.startswith("unittest.mock")
+            and callable(getattr(nav_state["eval_page"], "goto", None))
+        ):
+            retry_nav = await _open_and_authenticate_lms_page(
+                page,
+                state=nav_state,
+                captured_auth=captured_auth,
+                request_listener=_on_lms_request,
+                clear_stale_storage=True,
+            )
+            if retry_nav == "ok":
+                eval_args["preResolvedToken"] = nav_state["pre_resolved_token"]
+                eval_args["centres"] = resolved_centres
+                raw_res = await nav_state["eval_page"].evaluate(roster_js_script, eval_args)
+            elif retry_nav == "untrusted_redirect":
+                return {"__error__": "untrusted_redirect"}
+
+        if not isinstance(raw_res, dict):
+            return {"__error__": "invalid_response"}
+        return dict(raw_res)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        with contextlib.suppress(Exception):
+            log_message(
+                "Lỗi ngoại lệ khi tải danh sách học viên từ LMS GraphQL.",
+                level="WARNING",
+                event="lms.roster_fetch.error",
+                error_type=type(exc).__name__,
+                class_count=len(all_codes),
+            )
+        return {"__error__": "evaluate_exception"}
+    finally:
+        await _cleanup_lms_eval_resources(
+            nav_state["listener_page"],
+            _on_lms_request,
+            nav_state["temp_page"],
+        )
+
+
+async def fetch_lms_class_slots_via_page(
+    page: Any,
+    *,
+    class_names: list[str],
+    timeout_ms: int = 12000,
+    target_lessons_by_class: dict[str, list[int]] | None = None,
+) -> dict[str, list[dict[str, Any]]]:
+    """Query MindX LMS GraphQL for slot summaries and studentAttendance of the given classes.
+
+    Strictly fail-safe and isolated: returns `{}` when `ZALO_QUALITY_ISOLATED == "1"`,
+    when `page` has no authenticated LMS token, or when any network/GraphQL error occurs.
+    """
+    if os.getenv("ZALO_QUALITY_ISOLATED") == "1":
+        return {}
+    all_codes: list[str] = []
+    for raw in class_names:
+        code = str(raw or "").strip().upper()
+        if code and code not in all_codes:
+            all_codes.append(code)
+    if not all_codes:
+        return {}
+    normalized_codes = all_codes[:MAX_LMS_QUALITY_CLASSES_PER_BATCH]
+    overflow_codes = all_codes[MAX_LMS_QUALITY_CLASSES_PER_BATCH:]
+    if page is None or not hasattr(page, "evaluate"):
+        return {
+            code: [{"fetch_error": True} for _ in range(MAX_LMS_SLOTS_PER_CLASS)]
+            for code in all_codes
+        }
+
+    pre_resolved_token = await _extract_pre_resolved_lms_token(page)
+    captured_auth: dict[str, str] = {}
+    resolved_centres = _extract_lms_centres_from_config()
+    _on_lms_request = _create_lms_graphql_request_sniffer(captured_auth, resolved_centres)
+    nav_state: dict[str, Any] = {
+        "eval_page": page,
+        "temp_page": None,
+        "listener_page": None,
+        "pre_resolved_token": pre_resolved_token,
+    }
+
+    js_script = """
+    async ({ endpoint, classCodes, centres, maxSlots, maxStudents, timeoutMs, preResolvedToken, allowedHostname, allowedTokenKeys, targetLessons, spckExemptClasses }) => {
+        __LMS_COMMON_HELPERS__
         const out = {};
         const token = await findToken();
         if (!token) {
@@ -4066,23 +4748,6 @@ async def fetch_lms_class_slots_via_page(
         }
 
         // Tier 2: Per-code fetch for small batches (<= 3) or any code not returned in Tier 1
-        const buildSearchCandidates = (rawCode) => {
-            const cands = [rawCode];
-            const parts = String(rawCode || '').split('-').map((p) => p.trim()).filter(Boolean);
-            if (parts.length >= 2) {
-                const last = parts[parts.length - 1];
-                if (last === 'HB' && parts.length >= 3) {
-                    const tailTwo = `${parts[parts.length - 2]}-HB`;
-                    if (!cands.includes(tailTwo)) cands.push(tailTwo);
-                    if (parts[parts.length - 2].length >= 2 && !cands.includes(parts[parts.length - 2])) {
-                        cands.push(parts[parts.length - 2]);
-                    }
-                } else if (last.length >= 2 && !cands.includes(last)) {
-                    cands.push(last);
-                }
-            }
-            return cands;
-        };
         const fetchOneCode = async (code) => {
             if (authFailed) {
                 out[code] = Array.from({ length: maxSlots }, () => ({ fetch_error: true }));
@@ -4215,62 +4880,6 @@ async def fetch_lms_class_slots_via_page(
         const WORK_RESPONSE_CAP = 20;
         let workRequests = 0;
         const workDeadline = Date.now() + Math.max(15000, (timeoutMs || 12000) * 3);
-            const readBoundedJson = async (resp, maxBytes) => {
-                if (resp && resp.headers && typeof resp.headers.get === 'function') {
-                    const rawCl = resp.headers.get('content-length');
-                    if (rawCl != null && String(rawCl).trim() !== '') {
-                        const parsedCl = Number(rawCl);
-                        if (Number.isFinite(parsedCl) && parsedCl > maxBytes) {
-                            if (resp.body && typeof resp.body.cancel === 'function') {
-                                try { await resp.body.cancel(); } catch (_) {}
-                            }
-                            return { overflow: true, data: null };
-                        }
-                    }
-                }
-                if (resp && resp.body && typeof resp.body.getReader === 'function') {
-                    const reader = resp.body.getReader();
-                    const decoder = new TextDecoder('utf-8');
-                    let totalBytes = 0;
-                    const chunks = [];
-                    while (true) {
-                        const step = await reader.read();
-                        if (!step || step.done) break;
-                        const val = step.value;
-                        const byteLen = (val && typeof val.byteLength === 'number')
-                            ? val.byteLength
-                            : (typeof val === 'string'
-                                ? (typeof TextEncoder !== 'undefined' ? new TextEncoder().encode(val).byteLength : val.length)
-                                : 0);
-                        totalBytes += byteLen;
-                        if (totalBytes > maxBytes) {
-                            try { await reader.cancel(); } catch (_) {}
-                            return { overflow: true, data: null };
-                        }
-                        if (typeof val === 'string') {
-                            chunks.push(val);
-                        } else if (val) {
-                            chunks.push(decoder.decode(val, { stream: true }));
-                        }
-                    }
-                    chunks.push(decoder.decode());
-                    return { overflow: false, data: JSON.parse(chunks.join('')) };
-                }
-                if (resp && typeof resp.text === 'function') {
-                    const txt = await resp.text();
-                    if (txt.length > maxBytes) {
-                        return { overflow: true, data: null };
-                    }
-                    const utf8Bytes = (typeof TextEncoder !== 'undefined')
-                        ? new TextEncoder().encode(txt).byteLength
-                        : txt.length;
-                    if (utf8Bytes > maxBytes) {
-                        return { overflow: true, data: null };
-                    }
-                    return { overflow: false, data: JSON.parse(txt) };
-                }
-                return { overflow: false, data: await resp.json() };
-            };
         const fetchSessionWorks = async (sessionId, studentId) => {
             if (authFailed || workRequests >= MAX_WORK_REQUESTS || Date.now() >= workDeadline) return null;
             workRequests += 1;
@@ -4453,191 +5062,22 @@ async def fetch_lms_class_slots_via_page(
         }
         return out;
     }
-    """
+    """.replace("__LMS_COMMON_HELPERS__", _LMS_JS_COMMON_HELPERS)
     js_script = "\n".join(
         line.strip()
         for line in js_script.splitlines()
         if line.strip() and not line.strip().startswith("//")
     )
-    clear_stale_auth_js = """
-    async ({ allowedTokenKeys }) => {
-        try {
-            const keySet = new Set(allowedTokenKeys || []);
-            if (typeof localStorage !== 'undefined' && localStorage) {
-                const toRemove = [];
-                for (let i = 0; i < localStorage.length; i++) {
-                    const rawKey = String(localStorage.key(i) || '');
-                    const k = rawKey.trim().toLowerCase();
-                    const rawVal = String(localStorage.getItem(rawKey) || '').trim();
-                    if (
-                        keySet.has(k) ||
-                        k.includes('firebase') ||
-                        k.includes('token') ||
-                        rawVal.startsWith('eyJ') ||
-                        rawVal.includes('stsTokenManager')
-                    ) {
-                        toRemove.push(rawKey);
-                    }
-                }
-                for (const rk of toRemove) {
-                    localStorage.removeItem(rk);
-                }
-            }
-            if (typeof indexedDB !== 'undefined' && indexedDB && typeof indexedDB.open === 'function') {
-                await new Promise((resolve) => {
-                    const timer = setTimeout(resolve, 1000);
-                    try {
-                        const req = indexedDB.open('firebaseLocalStorageDb');
-                        req.onerror = () => { clearTimeout(timer); resolve(); };
-                        req.onsuccess = () => {
-                            try {
-                                const db = req.result;
-                                if (!db || !db.objectStoreNames || !db.objectStoreNames.contains('firebaseLocalStorage')) {
-                                    if (db && typeof db.close === 'function') db.close();
-                                    clearTimeout(timer);
-                                    resolve();
-                                    return;
-                                }
-                                const tx = db.transaction('firebaseLocalStorage', 'readwrite');
-                                tx.objectStore('firebaseLocalStorage').clear();
-                                tx.oncomplete = () => { db.close(); clearTimeout(timer); resolve(); };
-                                tx.onerror = () => { db.close(); clearTimeout(timer); resolve(); };
-                            } catch (_) {
-                                clearTimeout(timer);
-                                resolve();
-                            }
-                        };
-                    } catch (_) {
-                        clearTimeout(timer);
-                        resolve();
-                    }
-                });
-            }
-        } catch (_) {}
-    }
-    """
-    listener_page = None
     try:
         page_mod = str(getattr(type(page), "__module__", "") or "")
-        current_page_url = str(getattr(page, "url", "") or "").strip()
-        parsed_page_url = urlsplit(current_page_url)
-        current_host = str(parsed_page_url.hostname or "").lower()
-
-        async def _navigate_and_authenticate_lms(*, clear_stale_storage: bool = False) -> str:
-            nonlocal eval_page, temp_page, listener_page, pre_resolved_token
-            try:
-                from googleform_autosubmit.config import Config
-                from services.lms_service import _login_lms_if_needed
-
-                lms_url = str(getattr(Config, "LMS_URL", "") or "").strip()
-                parsed_lms_url = urlsplit(lms_url)
-                lms_scheme = str(parsed_lms_url.scheme or "").lower()
-                lms_host = str(parsed_lms_url.hostname or "").lower()
-                if lms_scheme != "https" or lms_host != LMS_ALLOWED_HOSTNAME:
-                    return "skipped_invalid_lms_url"
-                if eval_page is page and current_host != LMS_ALLOWED_HOSTNAME:
-                    if parsed_page_url.scheme in {"", "about"} and callable(
-                        getattr(page, "goto", None)
-                    ):
-                        eval_page = page
-                    elif ctx_obj is not None and callable(getattr(ctx_obj, "new_page", None)):
-                        temp_page = await ctx_obj.new_page()
-                        eval_page = temp_page
-                if eval_page is None or not callable(getattr(eval_page, "goto", None)):
-                    return "skipped_no_goto"
-                if listener_page is None and callable(getattr(eval_page, "on", None)):
-                    with contextlib.suppress(Exception):
-                        eval_page.on("request", _on_lms_request)
-                        listener_page = eval_page
-                eval_parsed = urlsplit(str(getattr(eval_page, "url", "") or "").strip())
-                eval_scheme = str(eval_parsed.scheme or "").lower()
-                eval_host = str(eval_parsed.hostname or "").lower()
-                if clear_stale_storage:
-                    captured_auth.clear()
-                    pre_resolved_token = ""
-                    if eval_scheme != "https" or eval_host != LMS_ALLOWED_HOSTNAME:
-                        await eval_page.goto(lms_url)
-                        if callable(getattr(eval_page, "wait_for_load_state", None)):
-                            with contextlib.suppress(Exception):
-                                await eval_page.wait_for_load_state("networkidle")
-                        eval_parsed = urlsplit(str(getattr(eval_page, "url", "") or "").strip())
-                        eval_scheme = str(eval_parsed.scheme or "").lower()
-                        eval_host = str(eval_parsed.hostname or "").lower()
-                    if (
-                        eval_scheme == "https"
-                        and eval_host == LMS_ALLOWED_HOSTNAME
-                        and callable(getattr(eval_page, "evaluate", None))
-                    ):
-                        with contextlib.suppress(Exception):
-                            await eval_page.evaluate(
-                                clear_stale_auth_js,
-                                {"allowedTokenKeys": sorted(ALLOWED_LMS_TOKEN_KEYS)},
-                            )
-                        captured_auth.clear()
-                        await eval_page.goto(lms_url)
-                        if callable(getattr(eval_page, "wait_for_load_state", None)):
-                            with contextlib.suppress(Exception):
-                                await eval_page.wait_for_load_state("networkidle")
-                elif eval_scheme != "https" or eval_host != LMS_ALLOWED_HOSTNAME:
-                    await eval_page.goto(lms_url)
-                    if callable(getattr(eval_page, "wait_for_load_state", None)):
-                        with contextlib.suppress(Exception):
-                            await eval_page.wait_for_load_state("networkidle")
-                post_nav = urlsplit(str(getattr(eval_page, "url", "") or "").strip())
-                post_scheme = str(post_nav.scheme or "").lower()
-                post_host = str(post_nav.hostname or "").lower()
-                if post_scheme != "https" or post_host not in LMS_ALLOWED_LOGIN_HOSTNAMES:
-                    return "untrusted_redirect"
-                try:
-                    await _login_lms_if_needed(eval_page)
-                except asyncio.CancelledError:
-                    raise
-                except Exception as login_exc:
-                    with contextlib.suppress(Exception):
-                        log_message(
-                            "Cảnh báo khi tự động đăng nhập LMS trong bước kiểm tra chất lượng.",
-                            level="WARNING",
-                            event="lms.quality_fetch.login_warning",
-                            error_type=type(login_exc).__name__,
-                        )
-                after_login = urlsplit(str(getattr(eval_page, "url", "") or "").strip())
-                after_scheme = str(after_login.scheme or "").lower()
-                after_host = str(after_login.hostname or "").lower()
-                if after_scheme != "https" or after_host not in LMS_ALLOWED_LOGIN_HOSTNAMES:
-                    return "untrusted_redirect"
-                if after_host != LMS_ALLOWED_HOSTNAME:
-                    await eval_page.goto(lms_url)
-                    if callable(getattr(eval_page, "wait_for_load_state", None)):
-                        with contextlib.suppress(Exception):
-                            await eval_page.wait_for_load_state("networkidle")
-                    after_login = urlsplit(str(getattr(eval_page, "url", "") or "").strip())
-                    if (
-                        str(after_login.scheme or "").lower() != "https"
-                        or str(after_login.hostname or "").lower() != LMS_ALLOWED_HOSTNAME
-                    ):
-                        return "untrusted_redirect"
-                if listener_page is not None:
-                    for _ in range(20):
-                        tok_candidate = captured_auth.get("token")
-                        if _is_usable_lms_token(tok_candidate):
-                            pre_resolved_token = str(tok_candidate)
-                            break
-                        await asyncio.sleep(0.25)
-                return "ok"
-            except asyncio.CancelledError:
-                raise
-            except Exception as nav_exc:
-                with contextlib.suppress(Exception):
-                    log_message(
-                        "Cảnh báo khi điều hướng trang LMS để lấy dữ liệu buổi học.",
-                        level="WARNING",
-                        event="lms.quality_fetch.nav_warning",
-                        error_type=type(nav_exc).__name__,
-                    )
-                return "nav_exception"
-
-        if not pre_resolved_token and not page_mod.startswith("unittest.mock"):
-            nav_status = await _navigate_and_authenticate_lms(clear_stale_storage=False)
+        if not nav_state["pre_resolved_token"] and not page_mod.startswith("unittest.mock"):
+            nav_status = await _open_and_authenticate_lms_page(
+                page,
+                state=nav_state,
+                captured_auth=captured_auth,
+                request_listener=_on_lms_request,
+                clear_stale_storage=False,
+            )
             if nav_status == "untrusted_redirect":
                 with contextlib.suppress(Exception):
                     log_message(
@@ -4663,21 +5103,27 @@ async def fetch_lms_class_slots_via_page(
             "spckExemptClasses": [
                 code for code in normalized_codes if _is_spck_exempt_course(code)
             ],
-            "preResolvedToken": pre_resolved_token,
+            "preResolvedToken": nav_state["pre_resolved_token"],
             "allowedHostname": LMS_ALLOWED_HOSTNAME,
             "allowedTokenKeys": sorted(ALLOWED_LMS_TOKEN_KEYS),
         }
-        raw_res = await eval_page.evaluate(js_script, eval_args)
+        raw_res = await nav_state["eval_page"].evaluate(js_script, eval_args)
         if (
             isinstance(raw_res, dict)
             and bool(raw_res.get("__auth_error__"))
             and not page_mod.startswith("unittest.mock")
         ):
-            retry_nav = await _navigate_and_authenticate_lms(clear_stale_storage=True)
+            retry_nav = await _open_and_authenticate_lms_page(
+                page,
+                state=nav_state,
+                captured_auth=captured_auth,
+                request_listener=_on_lms_request,
+                clear_stale_storage=True,
+            )
             if retry_nav == "ok":
-                eval_args["preResolvedToken"] = pre_resolved_token
+                eval_args["preResolvedToken"] = nav_state["pre_resolved_token"]
                 eval_args["centres"] = resolved_centres
-                raw_res = await eval_page.evaluate(js_script, eval_args)
+                raw_res = await nav_state["eval_page"].evaluate(js_script, eval_args)
             elif retry_nav == "untrusted_redirect":
                 return {
                     code: [{"fetch_error": True} for _ in range(MAX_LMS_SLOTS_PER_CLASS)]
@@ -4736,16 +5182,11 @@ async def fetch_lms_class_slots_via_page(
             for code in all_codes
         }
     finally:
-        if listener_page is not None:
-            for detach_name in ("remove_listener", "off"):
-                detach_fn = getattr(listener_page, detach_name, None)
-                if callable(detach_fn):
-                    with contextlib.suppress(Exception):
-                        detach_fn("request", _on_lms_request)
-                    break
-        if temp_page is not None and callable(getattr(temp_page, "close", None)):
-            with contextlib.suppress(Exception):
-                await temp_page.close()
+        await _cleanup_lms_eval_resources(
+            nav_state["listener_page"],
+            _on_lms_request,
+            nav_state["temp_page"],
+        )
 
 
 def _slot_timestamp_to_hcm_date_iso(raw_val: Any) -> str | None:

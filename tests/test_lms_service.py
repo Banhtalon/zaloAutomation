@@ -1,5 +1,9 @@
+import base64
 from contextlib import asynccontextmanager
 import json
+import os
+import subprocess
+import time
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -1552,6 +1556,292 @@ class LmsServiceTests(unittest.IsolatedAsyncioTestCase):
             res_err["overdue_details"],
             {"VT-ROB-ARMA18": "Buổi 2", "VT-KIND-ROB4B04": "Buổi 12"},
         )
+
+    async def test_googleform_graphql_active_roster_handles_hb_non_overdue_fallbacks_and_fail_closed(self):
+        node_runner = r"""
+        const fs = require('fs');
+        const { script, args, mode } = JSON.parse(fs.readFileSync(0, 'utf8'));
+        global.window = { location: { hostname: 'lms.mindx.edu.vn' } };
+        const queries = [];
+        const okJson = (items) => ({
+            ok: true,
+            status: 200,
+            json: async () => ({ data: { classesMissAttendOrComment: { data: items } } }),
+        });
+        global.fetch = async (_url, req) => {
+            const body = JSON.parse(req.body);
+            const vars = body.variables || {};
+            queries.push(vars);
+            if (mode === 'auth_error') {
+                return {
+                    ok: false,
+                    status: 401,
+                    json: async () => ({ errors: [{ message: 'UNAUTHENTICATED' }] }),
+                };
+            }
+            const qSearch = String(vars.search || '');
+            const qCentres = Array.isArray(vars.centres) ? vars.centres : null;
+            const qStatus = Array.isArray(vars.status) ? vars.status : null;
+
+            if (mode === 'hb_and_multi') {
+                if (qSearch === 'CSA04') {
+                    return okJson([
+                        {
+                            id: 'cls-decoy',
+                            name: 'VT-CSA04',
+                            students: [{ activeInClass: true, student: { id: 'decoy1', fullName: 'Học Viên Nhầm' } }],
+                        },
+                        {
+                            id: 'cls-csa04-hb',
+                            name: 'VT-CSA04-HB',
+                            students: [
+                                { activeInClass: true, student: { id: 's1', fullName: 'Học Viên Một' } },
+                                { activeInClass: false, student: { id: 's_drop', fullName: 'Học Viên Đã Nghỉ' } },
+                                { activeInClass: true, student: { id: 's1', fullName: 'Học Viên Một' } },
+                                { activeInClass: true, student: { id: 's_noise', fullName: 'Default' } },
+                                { activeInClass: null, student: { id: 's2', fullName: 'Học Viên Hai' } },
+                            ],
+                        },
+                    ]);
+                }
+                if (qSearch === 'ARMA18') {
+                    return okJson([
+                        {
+                            id: 'cls-arma18',
+                            name: 'VT-ROB-ARMA18',
+                            students: [
+                                { activeInClass: true, student: { id: 's3', fullName: 'Học Viên Ba' } },
+                            ],
+                        },
+                    ]);
+                }
+                return okJson([]);
+            }
+
+            if (mode === 'pending_and_cross_centre') {
+                if (qSearch.includes('PENDING') && qStatus === null && qCentres !== null) {
+                    return okJson([
+                        {
+                            id: 'cls-pending',
+                            name: 'VT-PENDING-01',
+                            students: [{ activeInClass: true, student: { id: 'p1', fullName: 'Học Viên Chờ Khai Giảng' } }],
+                        },
+                    ]);
+                }
+                if (qSearch.includes('CSA09') && qCentres === null && qStatus === null) {
+                    return okJson([
+                        {
+                            id: 'cls-hq-hb',
+                            name: 'VT-HQ-CSA09-HB',
+                            students: [{ activeInClass: true, student: { id: 'h1', fullName: 'Học Viên Liên Cơ Sở' } }],
+                        },
+                    ]);
+                }
+                return okJson([]);
+            }
+
+            if (mode === 'bulk_four') {
+                if (!qSearch && vars.pageIndex === 0) {
+                    return okJson([
+                        { id: 'c1', name: 'VT-C4K-B01', students: [{ activeInClass: true, student: { id: 'b1', fullName: 'HV B Một' } }] },
+                        { id: 'c2', name: 'VT-C4K-B02', students: [{ activeInClass: true, student: { id: 'b2', fullName: 'HV B Hai' } }] },
+                        { id: 'c3', name: 'VT-C4K-B03', students: [{ activeInClass: true, student: { id: 'b3', fullName: 'HV B Ba' } }] },
+                        { id: 'c4', name: 'VT-C4K-B04-HB', students: [{ activeInClass: true, student: { id: 'b4', fullName: 'HV B Bốn' } }] },
+                    ]);
+                }
+                return okJson([]);
+            }
+
+            if (mode === 'duplicate_class') {
+                return okJson([
+                    { id: 'dup-1', name: 'VT-CSA04-HB', students: [{ activeInClass: true, student: { id: 'd1', fullName: 'HV A' } }] },
+                    { id: 'dup-2', name: 'VT-CSA04-HB', students: [{ activeInClass: true, student: { id: 'd2', fullName: 'HV B' } }] },
+                ]);
+            }
+
+            if (mode === 'duplicate_student_name') {
+                return okJson([
+                    {
+                        id: 'cls-dup-stu',
+                        name: 'VT-CSA04-HB',
+                        students: [
+                            { activeInClass: true, student: { id: 'stu-1', fullName: 'Nguyễn Trùng Tên' } },
+                            { activeInClass: true, student: { id: 'stu-2', fullName: 'Nguyễn Trùng Tên' } },
+                        ],
+                    },
+                ]);
+            }
+
+            if (mode === 'overflow_205') {
+                return okJson([
+                    {
+                        id: 'cls-big',
+                        name: 'VT-CSA04-HB',
+                        students: Array.from({ length: 205 }, (_, i) => ({
+                            activeInClass: true,
+                            student: { id: 'ov_' + i, fullName: 'Học Viên Số ' + i },
+                        })),
+                    },
+                ]);
+            }
+
+            if (mode === 'all_inactive') {
+                return okJson([
+                    {
+                        id: 'cls-inactive',
+                        name: 'VT-CSA04-HB',
+                        students: [{ activeInClass: false, student: { id: 'x1', fullName: 'HV Đã Rời Lớp' } }],
+                    },
+                ]);
+            }
+
+            return okJson([]);
+        };
+        (async () => {
+            const fn = eval('(' + script + ')');
+            const data = await fn(args);
+            process.stdout.write(JSON.stringify({ data, queries }));
+        })().catch((err) => {
+            process.stderr.write(String(err));
+            process.exitCode = 1;
+        });
+        """
+
+        class _NodeGraphqlRosterPage:
+            def __init__(self, mode, *, url="https://lms.mindx.edu.vn/admin/class-sessions"):
+                self.mode = mode
+                self.url = url
+                self.queries = []
+                self.goto_urls = []
+
+            async def evaluate(self, script, args):
+                payload = (
+                    base64.urlsafe_b64encode(json.dumps({"exp": time.time() + 7200}).encode())
+                    .decode()
+                    .rstrip("=")
+                )
+                args_for_node = dict(args)
+                if isinstance(args_for_node, dict) and "endpoint" in args_for_node:
+                    args_for_node["preResolvedToken"] = (
+                        f"eyJhbGciOiJIUzI1NiJ9.{payload}.synthetic_sig"
+                    )
+                proc = subprocess.run(
+                    ["node", "-e", node_runner],
+                    input=json.dumps({"script": script, "args": args_for_node, "mode": self.mode}),
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    check=True,
+                    timeout=10,
+                )
+                parsed = json.loads(proc.stdout)
+                self.queries.extend(parsed.get("queries") or [])
+                return parsed["data"]
+
+        class _ColdStartRosterPage(_NodeGraphqlRosterPage):
+            async def goto(self, target_url):
+                self.goto_urls.append(target_url)
+                self.url = target_url
+
+            async def wait_for_load_state(self, _state):
+                pass
+
+        # 1) Cold-start about:blank page navigates to LMS_URL, fetches VT-CSA04-HB (via CSA04 short token,
+        #    type=[] without overdue filter) + VT-ROB-ARMA18, filters activeInClass=false/noise, keeps order & 0 PII logs
+        self.job_repo = FakeJobRepository()
+        service.job_repo = self.job_repo
+        cold_page = _ColdStartRosterPage("hb_and_multi", url="about:blank")
+        rt_ok, _ = self.runtime(page=cold_page)
+        logged_msgs = []
+        lms_url_with_centres = (
+            "https://lms.mindx.edu.vn/admin/class-sessions"
+            '?centres=["644346f794300678908f79bc"]&type=["MISS_ATTEND","DUE_COMMENT"]'
+        )
+        with (
+            patch.dict(os.environ, {"ZALO_QUALITY_ISOLATED": "0"}),
+            patch.object(service.Config, "LMS_URL", lms_url_with_centres),
+            patch.object(service, "_login_lms_if_needed", AsyncMock()) as mock_login,
+            patch.object(
+                service,
+                "log_message",
+                side_effect=lambda msg, *a, **k: logged_msgs.append(str(msg)),
+            ),
+        ):
+            res_ok = await service.run_googleform_fetch_lms_students(
+                110, ["VT-CSA04-HB", "VT-ROB-ARMA18"], runtime=rt_ok
+            )
+
+        self.assertEqual(cold_page.goto_urls, [lms_url_with_centres])
+        self.assertEqual(mock_login.await_count, 1)
+        self.assertTrue(len(cold_page.queries) >= 4)
+        self.assertTrue(all(q.get("type") == [] for q in cold_page.queries))
+        self.assertEqual(
+            res_ok["students"],
+            [
+                {"name": "Học Viên Một", "class_code": "VT-CSA04-HB"},
+                {"name": "Học Viên Hai", "class_code": "VT-CSA04-HB"},
+                {"name": "Học Viên Ba", "class_code": "VT-ROB-ARMA18"},
+            ],
+        )
+        self.assertEqual(self.job_repo.updates[-1]["status"], "SUCCESS")
+        for forbidden_name in ("Học Viên Một", "Học Viên Hai", "Học Viên Ba", "Học Viên Nhầm", "Học Viên Đã Nghỉ"):
+            self.assertFalse(any(forbidden_name in m for m in logged_msgs))
+
+        # 2) Pass-2a (PENDING class omitting status) and Pass-2b (cross-centre omitting centres) + bulk > 3 classes
+        for mode_name, req_codes, expected_names in (
+            (
+                "pending_and_cross_centre",
+                ["VT-PENDING-01", "VT-HQ-CSA09-HB"],
+                ["Học Viên Chờ Khai Giảng", "Học Viên Liên Cơ Sở"],
+            ),
+            (
+                "bulk_four",
+                ["VT-C4K-B01", "VT-C4K-B02", "VT-C4K-B03", "VT-C4K-B04-HB"],
+                ["HV B Một", "HV B Hai", "HV B Ba", "HV B Bốn"],
+            ),
+        ):
+            self.job_repo = FakeJobRepository()
+            service.job_repo = self.job_repo
+            p = _NodeGraphqlRosterPage(mode_name)
+            rt_p, _ = self.runtime(page=p)
+            with (
+                patch.dict(os.environ, {"ZALO_QUALITY_ISOLATED": "0"}),
+                patch.object(service.Config, "LMS_URL", lms_url_with_centres),
+            ):
+                res_p = await service.run_googleform_fetch_lms_students(111, req_codes, runtime=rt_p)
+            self.assertEqual([s["name"] for s in res_p["students"]], expected_names)
+            self.assertTrue(all(q.get("type") == [] for q in p.queries))
+
+        # 3) Fail-closed boundary conditions
+        for mode_name, expected_frag in (
+            ("duplicate_class", "trùng mã lớp"),
+            ("duplicate_student_name", "trùng tên"),
+            ("overflow_205", "200"),
+            ("missing_class", "Không tìm thấy lớp"),
+            ("all_inactive", "Không tìm thấy danh sách học viên hợp lệ"),
+            ("auth_error", "xác thực"),
+        ):
+            self.job_repo = FakeJobRepository()
+            service.job_repo = self.job_repo
+            fail_page = _NodeGraphqlRosterPage(mode_name)
+            rt_fail, _ = self.runtime(page=fail_page)
+            fail_logs = []
+            with (
+                patch.dict(os.environ, {"ZALO_QUALITY_ISOLATED": "0"}),
+                patch.object(service.Config, "LMS_URL", lms_url_with_centres),
+                patch.object(
+                    service,
+                    "log_message",
+                    side_effect=lambda msg, *a, **k: fail_logs.append(str(msg)),
+                ),
+            ):
+                res_fail = await service.run_googleform_fetch_lms_students(
+                    112, ["VT-CSA04-HB"], runtime=rt_fail
+                )
+            self.assertIn("error", res_fail, msg=f"mode={mode_name}")
+            self.assertEqual(self.job_repo.updates[-1]["status"], "FAILED")
+            self.assertIn(expected_frag, self.job_repo.updates[-1]["message"])
+            self.assertFalse(any("Nguyễn Trùng Tên" in m for m in fail_logs))
 
 
 if __name__ == "__main__":

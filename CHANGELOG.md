@@ -4,6 +4,23 @@ Tài liệu này ghi lại toàn bộ quá trình hình thành, phát triển ki
 
 ---
 
+## [2026-11-20] — Sửa lỗi `Lấy từ LMS` trong `Nộp Google Form` bằng truy vấn GraphQL không lọc quá hạn (`type: []`) & hỗ trợ hậu tố `-HB` (`DEC-053`)
+
+- **Phân loại luồng & Review**: `[FULL GATE]` (`DEC-047`) · Review độc lập Read-Only `Carbon High` (`verifier-4`, `#33`, **`VERDICT: PASS`**).
+- **Nguyên nhân gốc (`Job #373`, `#376`, `#547`, `#548`)**:
+  - Luồng `GOOGLEFORM_LMS_STUDENTS` trước đây mở `Config.LMS_URL` vốn gắn sẵn `type=["MISS_ATTEND","DUE_COMMENT"]`, khiến mọi lớp hoàn tất đúng hạn không quá hạn trên LMS (điển hình `VT-CSA04-HB`) biến mất khỏi bảng dù tồn tại hợp lệ trên BCNB và `discovery_snapshots`; đồng thời ô tìm kiếm LMS rơi kết quả với mã có hậu tố `-HB`.
+- **Thay đổi mã nguồn**:
+  - `services/lms_quality_service.py`: Tách gọn helper Python/JS dùng chung (`_CLEAR_STALE_LMS_AUTH_JS`, `_LMS_JS_COMMON_HELPERS`, `_extract_lms_centres_from_config`, `_extract_pre_resolved_lms_token`, `_create_lms_graphql_request_sniffer`, `_open_and_authenticate_lms_page`, `_cleanup_lms_eval_resources`) và bổ sung `fetch_lms_active_students_via_page(page, *, class_codes, timeout_ms=15000)` truy vấn GraphQL `classesMissAttendOrComment` với `type: []`. Hỗ trợ ứng viên tìm kiếm mã ngắn cho `-HB`, ép khớp chính xác `item.name === code`, lọc `activeInClass !== false`, điều hướng từ `"about:blank"` về đúng origin LMS khi khởi động lạnh để tránh CORS `Origin: null`, triển khai Tier-1 bulk + Tier-2 3-pass fallback (`Pass 1`, `Pass 2a` bỏ `status`, `Pass 2b` bỏ `centres`) và giữ nguyên hành vi `fetch_lms_class_slots_via_page`.
+  - `services/lms_service.py`: Bổ sung `_parse_graphql_active_students` và tích hợp vào `_read_lms_students_by_classes` (fail-closed `LmsSafetyError` khi `__error__`/`__auth_error__`/`fetch_error`/`duplicate_class`/thiếu lớp/`0` học viên/trùng tên khác `stu_id`/vượt trần `200` học viên, kiểm tra hủy job, `0` PII trong log, và fallback nguyên vẹn về đọc DOM khi `ZALO_QUALITY_ISOLATED=1` hoặc test fake không có `.evaluate`).
+  - `tests/test_lms_service.py`: Thêm `test_googleform_graphql_active_roster_handles_hb_non_overdue_fallbacks_and_fail_closed` kiểm chứng Node + mock `global.fetch` cho cold-start `"about:blank"`, `VT-CSA04-HB` không quá hạn, `activeInClass !== false`, Pass 2a/2b, bulk `>3` lớp, 6 ca fail-closed và `0` PII trong `log_message`.
+- **Kiểm chứng**:
+  - Unit tests mục tiêu (`tests.test_lms_service`, `tests.test_lms_quality_service`, `tests.test_spck_session_fetch`, `tests.test_lms_plan`, `tests.test_lms_confirmation`): `75/75 OK`.
+  - `powershell -ExecutionPolicy Bypass -File .\CHECK_QUALITY.ps1 -Isolated`: **`QUALITY GATE PASSED`** (`exit 0`, **`777/777`** tests `OK`, branch coverage **`80.1%`**, Ruff `0`, Mypy `0` trên `80` files, `secrets=0`, `template-js-contract-ok scripts=8 handlers=46 behavior=14`).
+  - `$env:GRAPHIFY_BACKEND="none"; graphify update .`: `5213 nodes, 15744 edges, 188 communities`; `.graphifyignore` nguyên vẹn.
+  - Review độc lập Read-Only `verifier-4` (`gemini-4-carbon-high`, `#33`): `0` P0/P1/P2, **`VERDICT: PASS`** (`67/67` & `53/53` `OK`, `ruff`/`mypy`/`git diff --check` `0`).
+
+---
+
 ## [2026-11-20] — Đối chiếu đúng buổi theo tuần kiểm tra trong Tự động Tick LMS (`Hướng 1`) & Hoãn ghi lỗi sớm trước deadline trên `Lớp Hôm Nay` (`DEC-052`)
 
 - **Đối chiếu đúng buổi tuần kiểm tra trong `Tự động Tick LMS` (`services/lms_plan.py`, `services/lms_service.py`, `static/js/jobs.js`)**:
