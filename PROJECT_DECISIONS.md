@@ -1363,3 +1363,15 @@
     - Khi `ZALO_QUALITY_ISOLATED == "1"` hoặc page giả trong unit test không có `.evaluate`, trả `None` để chạy nguyên vẹn luồng đọc bảng DOM lịch sử.
 - Consequences: `Lấy từ LMS` trên `Nộp Google Form` lấy được danh sách học viên đang học cho mọi lớp hợp lệ (kể cả lớp không quá hạn LMS, lớp `PENDING`, lớp cơ sở khác và lớp có hậu tố `-HB`) với độ tin cậy cao, vẫn bảo toàn tuyệt đối các chốt chặn fail-closed và `0` PII trong log.
 - Supersedes: Nâng cấp cơ chế lấy học viên từ LMS của `DEC-035` và tái sử dụng hạ tầng xác thực/GraphQL của `DEC-051`.
+
+## DEC-054 — Nâng cấp Review độc lập luồng `[FULL GATE]` sang `Neon XHigh` (`gemini-4-neon-xhigh`) qua Swarm read-only
+
+- Date: 2026-11-22.
+- Status: Accepted by Owner.
+- Context: Owner chỉ đạo nâng cấp mô hình Reviewer độc lập từ `Argon High` (`gemini-4-argon-high`) sang mô hình mới tốt nhất của Google là **`Neon XHigh`** (`gemini-4-neon-xhigh` — `Gemini 4 Neon (XHigh)`).
+- Decision:
+  - Thay `Argon High` (`gemini-4-argon-high`) bằng **`Neon XHigh` (`gemini-4-neon-xhigh`)** cho bước Review độc lập bắt buộc của luồng **Đầy đủ (`[FULL GATE]`)** trong `AGENTS.md` và `HANDOFF.md` (luồng `[FAST-TRACK]` tiếp tục miễn Review độc lập `Neon XHigh` trừ khi Owner yêu cầu riêng).
+  - Giữ nguyên cơ chế cô lập ngữ cảnh qua `swarm` read-only (`action="add"`, `model="gemini-4-neon-xhigh"`, `workspace="inherit"`, không truyền `fork`) và dọn dẹp worker sau khi hoàn tất theo `DEC-049`.
+- Consequences: Bước Review độc lập của `[FULL GATE]` tận dụng mức suy luận cao nhất (`XHigh`) của dòng Gemini 4 Neon mới nhất trên cùng hạ tầng `swarm` read-only.
+- Evidence: Kiểm chứng danh mục model qua `swarm(action="models", all=true)` ngày `2026-11-22` xác nhận `"gemini-4-neon-xhigh"` (`"Gemini 4 Neon (XHigh)"`) khả dụng; cập nhật `AGENTS.md`, `HANDOFF.md`, `PROJECT_STATE.md`, `CHANGELOG.md`.
+- Supersedes: Cập nhật mô hình Review độc lập trong `DEC-049` (bổ sung cho `DEC-047`).

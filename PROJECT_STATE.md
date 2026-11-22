@@ -1,6 +1,6 @@
 # PROJECT STATE — Zalo Automation
 
-> Snapshot trạng thái hiện hành, cập nhật **2026-11-20**. Source/runtime kiểm chứng mới có độ tin cậy cao hơn tài liệu. Không dùng file này làm quyền chạy thao tác thật trên hệ thống ngoài. Toàn bộ lịch sử phát triển theo thời gian xem tại [CHANGELOG.md](CHANGELOG.md); các quyết định kiến trúc & quy trình xem tại [PROJECT_DECISIONS.md](PROJECT_DECISIONS.md).
+> Snapshot trạng thái hiện hành, cập nhật **2026-11-22**. Source/runtime kiểm chứng mới có độ tin cậy cao hơn tài liệu. Không dùng file này làm quyền chạy thao tác thật trên hệ thống ngoài. Toàn bộ lịch sử phát triển theo thời gian xem tại [CHANGELOG.md](CHANGELOG.md); các quyết định kiến trúc & quy trình xem tại [PROJECT_DECISIONS.md](PROJECT_DECISIONS.md).
 
 ## Tổng quan kiểm chứng & năng lực hiện hành
 
@@ -14,9 +14,12 @@
 | Kiểm định chất lượng LMS, SPCK & Ghi chú QC Teaching | Đã triển khai: Tier-1 Bulk + Tier-2 `centres`/short-token GraphQL, phát hiện `MISSING_ATTENDANCE` ghi gọn duy nhất `[LMS] Chưa điểm danh` (`❌ Chưa điểm danh LMS`, chặn tích `NX LMS`), Phễu 2 tầng AI nhận xét LMS khử PII, kiểm định SPCK Buổi 12–14 (`rawTitleKey` không PII, miễn PTB/CSB `DEC-044`, Robotics `DEC-045`), ghi chú QC ngắn gọn Mức A & khử trùng Legacy + Mức A (`DEC-038`, `DEC-050`, `DEC-051`) |
 | Báo cáo tuần, Xuất CSV lỗi & Email Quản lý | Đã triển khai: bảng 9 cột, lỗi thiếu Zalo mức đỏ nặng nhất (`❌ Chưa nhận xét`, `#dc2626` bọc `<span>` tương thích Webmail BizFly Cloud), lỗi `❌ Chưa điểm danh LMS` (`is_failed=True`), cảnh báo vàng `⚠️` (`#b45309`) cho `[SPCK] Chưa nộp` / `[SPCK] Chưa NX` (`DEC-046`, `DEC-050`, `DEC-051`), khóa cứng `MANAGER_EMAIL_ALLOWLIST` |
 | Tick LMS tự động & Nộp Google Form | Đã triển khai (`DEC-035`, `DEC-052`, `DEC-053`): quét Web LMS lập kế hoạch chọn từng lớp (`selection_digest`), tự động đối chiếu đúng buổi của tuần BCNB khi có lệch buổi giữa tuần cũ và tuần mới (Hướng 1 fail-closed), thông báo xanh khi tuần kiểm tra đã tích đủ, và truy vấn GraphQL không lọc quá hạn (`type: []`) lấy học viên `activeInClass !== false` cho cả lớp không quá hạn & hậu tố `-HB` trên `Nộp Google Form` kèm idempotency & ảnh bằng chứng ẩn danh |
-| Quy trình điều phối AI & Đồng bộ mã nguồn | Cơ chế 2 luồng `[FAST-TRACK]` / `[FULL GATE]` (`DEC-047`), review độc lập read-only `swarm` (`DEC-049`), nhánh chính `main` (`origin/main`) làm Source of Truth (`DEC-040`) |
+| Quy trình điều phối AI & Đồng bộ mã nguồn | Cơ chế 2 luồng `[FAST-TRACK]` / `[FULL GATE]` (`DEC-047`), review độc lập read-only `swarm` bằng `Neon XHigh` (`gemini-4-neon-xhigh`, `DEC-054`), nhánh chính `main` (`origin/main`) làm Source of Truth (`DEC-040`) |
 
 ## Các mốc cập nhật gần nhất
+
+- **2026-11-22 (Nâng cấp Reviewer độc lập luồng `[FULL GATE]` lên `Neon XHigh` — `DEC-054`, `[FAST-TRACK]`)**:
+  - Chuyển mô hình Reviewer độc lập bắt buộc của luồng `[FULL GATE]` từ `Argon High` (`gemini-4-argon-high`) sang **`Neon XHigh` (`gemini-4-neon-xhigh`)** trên cùng cơ chế `swarm` read-only không `fork` trong [AGENTS.md](AGENTS.md) và [HANDOFF.md](HANDOFF.md), bổ sung [DEC-054](PROJECT_DECISIONS.md) và giữ nguyên toàn bộ các mốc lịch sử trước đó (`git diff --check`, `scripts.phase9a_audit`, `node --test scripts/lib/*.test.mjs` PASS).
 
 - **2026-11-20 (Truy vấn trực tiếp GraphQL học viên đang học cho `Nộp Google Form -> Lấy từ LMS` — `DEC-053`, `[FULL GATE]`)**:
   - Khắc phục lỗi `GOOGLEFORM_LMS_STUDENTS` (`VT-CSA04-HB` biến mất vì `LMS_URL` lọc `type=["MISS_ATTEND","DUE_COMMENT"]` và ô tìm kiếm bỏ sót mã `-HB`) bằng `fetch_lms_active_students_via_page` (`services/lms_quality_service.py`) truy vấn GraphQL `classesMissAttendOrComment` với `type: []`, tái cấu trúc helper GraphQL dùng chung với `fetch_lms_class_slots_via_page`, hỗ trợ điều hướng khởi động lạnh từ `"about:blank"` sang origin LMS tránh CORS, tìm mã ngắn `-HB` + khớp cứng `item.name === code`, lọc `activeInClass !== false`, và fallback 3 lượt (`status`/`centres`).

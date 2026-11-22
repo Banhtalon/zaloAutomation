@@ -124,11 +124,11 @@ Không dùng “toàn bộ test đã xanh” làm bằng chứng duy nhất cho 
    - **Luồng Nhanh (`FAST-TRACK`)** — Áp dụng cho chỉnh sửa nhỏ, rủi ro thấp: giao diện (UI/CSS/HTML), màu sắc, câu chữ/nhãn hiển thị, định dạng Email/CSV, tài liệu, hoặc sửa nhỏ cục bộ không đụng vào điều khiển trình duyệt, ghi BCNB/Teaching, DB schema hay bảo mật/PII:
      1. Lead tự sửa trong phạm vi `allowlist`.
      2. Chạy gate mục tiêu nhanh: unit test liên quan + `node tests/check_template_js.js` (khi chạm JS/HTML) + `ruff check` & `mypy` trên các file Python thay đổi + `git diff --check`.
-     3. **Miễn** `.\CHECK_QUALITY.ps1 -Isolated` đầy đủ và **miễn** Review độc lập `Argon High` (trừ khi Owner yêu cầu riêng).
+     3. **Miễn** `.\CHECK_QUALITY.ps1 -Isolated` đầy đủ và **miễn** Review độc lập `Neon XHigh` (trừ khi Owner yêu cầu riêng).
    - **Luồng Đầy đủ (`FULL GATE`)** — Áp dụng cho thay đổi lớn hoặc rủi ro cao: tự động hóa trình duyệt (Zalo/LMS/Teaching/Form), thao tác ghi BCNB/Teaching, SQLite schema/migration, bảo mật/xác thực/khử PII, concurrency/lock, hoặc thay đổi logic nghiệp vụ cốt lõi liên module:
      1. Lead tự sửa trong phạm vi `allowlist` (hoặc điều phối subagent khi Owner chỉ định).
      2. Chạy đầy đủ: unit test mục tiêu + `node tests/check_template_js.js` + `.\CHECK_QUALITY.ps1 -Isolated` (`exit 0`).
-     3. Review độc lập (`Argon High` — `gemini-4-argon-high`): Khởi tạo verifier độc lập không chia sẻ ngữ cảnh (`swarm` `add` với `model="gemini-4-argon-high"`, không `fork`, chế độ chỉ đọc `workspace="inherit"`) để rà soát toàn bộ diff và hợp đồng an toàn. Nếu `NEEDS_FIX` -> sửa & re-verify cho tới `VERDICT: PASS`.
+     3. Review độc lập (`Neon XHigh` — `gemini-4-neon-xhigh`, `DEC-054`): Khởi tạo verifier độc lập không chia sẻ ngữ cảnh (`swarm` `add` với `model="gemini-4-neon-xhigh"`, không `fork`, chế độ chỉ đọc `workspace="inherit"`) để rà soát toàn bộ diff và hợp đồng an toàn. Nếu `NEEDS_FIX` -> sửa & re-verify cho tới `VERDICT: PASS`.
    - Khi ranh giới rủi ro chưa rõ hoặc phát hiện ảnh hưởng sang luồng ghi/bảo mật, tự động nâng lên **Luồng Đầy đủ**.
 2. **Môi trường Python**: Ứng dụng dùng `venv/Scripts/python.exe` (`requirements.txt`); bộ công cụ `.ai-workflow/` dùng `.venv/Scripts/python.exe` (`requirements-workflow.txt`). Không dùng Python toàn máy.
 3. **Changelog & GitHub Source of Truth (`DEC-040`)**: Sau khi đạt gate của luồng tương ứng, cập nhật `CHANGELOG.md` và `PROJECT_STATE.md` rõ ràng, commit các file thuộc phạm vi task (tuyệt đối không stage `.env`, `database.db`, secret hay dữ liệu nhạy cảm) và `git push` lên GitHub (`origin`).

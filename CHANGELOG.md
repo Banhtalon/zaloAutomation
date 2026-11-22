@@ -4,6 +4,19 @@ Tài liệu này ghi lại toàn bộ quá trình hình thành, phát triển ki
 
 ---
 
+## [2026-11-22] — Nâng cấp Reviewer độc lập luồng `[FULL GATE]` lên `Neon XHigh` (`gemini-4-neon-xhigh`, `DEC-054`)
+
+- **Phân loại luồng**: `[FAST-TRACK]` (`DEC-047`) — chỉ cập nhật quy chuẩn điều phối/tài liệu, không chạm mã nguồn runtime, trình duyệt, SQLite hay PII.
+- **Thay đổi quy trình & tài liệu**:
+  - `AGENTS.md`: Cập nhật mục `Luồng Nhanh (FAST-TRACK)` và `Luồng Đầy đủ (FULL GATE)` chuyển mô hình Review độc lập read-only (`swarm` không `fork`) từ `Argon High` (`gemini-4-argon-high`) sang **`Neon XHigh` (`gemini-4-neon-xhigh`, `DEC-054`)**.
+  - `HANDOFF.md`: Đồng bộ mô hình Review độc lập `[FULL GATE]` sang `Neon XHigh` (`gemini-4-neon-xhigh`, `read-only`, `DEC-054`).
+  - `PROJECT_DECISIONS.md`: Ghi nối tiếp `DEC-054` (giữ nguyên toàn bộ lịch sử `DEC-049` và các mốc lịch sử khác).
+  - `PROJECT_STATE.md`: Cập nhật trạng thái điều phối `DEC-054` và thêm mốc `2026-11-22`.
+- **Tệp thay đổi (5 files)**: `AGENTS.md`, `HANDOFF.md`, `PROJECT_DECISIONS.md`, `PROJECT_STATE.md`, `CHANGELOG.md`.
+- **Bằng chứng kiểm chứng (`[FAST-TRACK]`)**: `swarm(action="models", all=true)` xác nhận `"gemini-4-neon-xhigh"` (`"Gemini 4 Neon (XHigh)"`) khả dụng; chuẩn hóa `LF` cả 5 tệp; `git diff --check` exit `0`; `venv\Scripts\python.exe -m scripts.phase9a_audit` exit `0` (`secrets=0`, `dependency_lock` `73` entries `ok`); `node --test scripts/lib/*.test.mjs` (kèm `.venv\Scripts` trong `PATH`) `112/112 PASS`.
+
+---
+
 ## [2026-11-20] — Sửa lỗi `Lấy từ LMS` trong `Nộp Google Form` bằng truy vấn GraphQL không lọc quá hạn (`type: []`) & hỗ trợ hậu tố `-HB` (`DEC-053`)
 
 - **Phân loại luồng & Review**: `[FULL GATE]` (`DEC-047`) · Review độc lập Read-Only `Carbon High` (`verifier-4`, `#33`, **`VERDICT: PASS`**).
