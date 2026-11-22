@@ -4,6 +4,33 @@ Tài liệu này ghi lại toàn bộ quá trình hình thành, phát triển ki
 
 ---
 
+## [2026-11-22] — Nâng cấp `Lớp Hôm Nay (Live)`: Mặc định `Tuần thực tế`, Bỏ qua lớp đã tick đủ & Tick-only BCNB + Lưu từng dòng (`Wave 8`, `DEC-055`)
+
+- **Phân loại luồng & Review**: `[FULL GATE]` (`DEC-047`, `DEC-054`) · Pre-Wave 8 SQLite hot backup + restore drill (`5d16848` -> `.backups/db/pre-wave8-20261122-080139.sqlite3`) · Review độc lập Read-Only `Neon XHigh` (`gemini-4-neon-xhigh`, `@verifier`, `#11` `NEEDS_FIX` -> sửa đủ 4 findings & thêm 4 regression tests `#14` -> **`#16` `VERDICT: PASS`**, `[P0]=0, [P1]=0, [P2]=0`).
+- **Thay đổi Backend & BCNB**:
+  - `services/zalo_bcnb_service.py`: Bổ sung `defer_all_new_checker_notes: bool = False` vào `update_bcnb_reports` (giữ mặc định `False` để `ZALO_SCAN` nguyên vẹn); trong `_maybe_update_row_checker_note`, khi bật cờ này thì coi cả `zalo_expired=False` & `lms_expired=False` bất kể deadline (`DEFERRED_FOR_FULL_SCAN`), đồng thời thêm `_deferred_issue_family_keys` bảo toàn ghi chú auto đang mở trên BCNB khi thay đổi số đếm (`(3/5)->(2/5)`), cụm câu phụ Mức A hoặc tương đương legacy<->Mức A (0 POST, không xóa nhầm lỗi chưa sửa), vẫn xóa lỗi auto cũ đã khắc phục và bảo toàn ghi chú tay QC từng byte.
+  - `services/today_ops_service.py`:
+    - Bật `defer_all_new_checker_notes=True` cùng `defer_unexpired_checker_notes=True` trong `_run_bcnb_sync_on_session`, claim sẵn dòng ghi qua `ZaloBatchRepository.claim_write` và nối `on_row_finalized` để lưu `update_target_result` + `complete_write` ngay sau từng dòng, theo dõi `completed_claimed_ids` chống double-complete, và chuẩn hóa status qua `_ALLOWED_WRITE_FINAL_STATUSES` / `_normalize_write_final_status` (loại `"SKIPPED"` khỏi `complete_write` theo `ZaloBatchRepository.WRITE_STATUSES`, map về `"FAILED_BEFORE_WRITE"`).
+    - Bổ sung `parse_today_scope` (`"date"` | `"current_week"`), mở rộng `_collect_today_entries_from_snapshot` lấy toàn bộ buổi thuộc `latest_week` giữ nguyên `class_date_iso` riêng từng buổi, khớp bảng BCNB ưu tiên `(kt, bcnb_session_id)` với fallback `kt` duy nhất không xung đột session ID, sắp xếp `_timeline_sort_key` theo `(class_date_iso, start_hm, end_hm, class_code, lesson_num)`.
+    - Mở rộng `_load_persisted_today_overlays` cô lập banner `TODAY_REALTIME_SYNC` theo `scope`, lọc kết quả `(week, year)` và bỏ qua item `skipped_already_completed=True`; cập nhật `_merge_entry_with_overlay(..., snapshot_observed_at=observed_dt)` bảo toàn `nx_zalo_checked`/`nx_lms_checked`/`qc_issue_note`/`instructor_note` của snapshot mới hơn trên cả `merged` & `scan_target` mà vẫn giữ ảnh/bằng chứng của overlay cũ hơn.
+    - Mở rộng `build_today_overview` (`scope`, `scope_week`, `scope_label`, `bcnb_completed_both`, `skipped_already_completed`, `completed_both_count`) và `run_today_realtime_sync` (`scope`, `_is_entry_bcnb_completed`, `skip_completed_bcnb` bỏ qua lớp tick đủ mà không ghi placeholder đè bằng chứng cũ, vẫn bị override bởi `selected_target_keys`, kết thúc `SUCCESS` sạch không mở trình duyệt khi toàn bộ lớp đã tick đủ).
+  - `api/today_routes.py`: Bổ sung `scope` trên `GET /api/today/overview` (bỏ trống giữ nguyên hành vi `"date"` tương thích ngược) và `scope` + `skip_completed_bcnb` trên `POST /api/today/sync` kèm kiểm tra HTTP 400 `INVALID_TODAY_SCOPE`.
+- **Thay đổi Frontend & Hợp đồng JS**:
+  - `templates/partials/today.html`: Thêm nút chuyển phạm vi `#today-scope-week-btn` / `#today-scope-date-btn`, checkbox `#today-skip-completed-checkbox`, nhãn động `#today-kpi-total-label` & `#today-table-title`.
+  - `static/js/today.js`: Mặc định `todayActiveScope='current_week'` và `todaySkipCompletedBcnb=true`, hiển thị thứ + ngày `dd/mm` đa ngày trên timeline & thẻ SPCK, gắn huy hiệu `✅ Đã tick đủ BCNB`, truyền `scope` + `skip_completed_bcnb` khi gọi API và cập nhật `copyTodayReminders`.
+- **Kiểm thử & Tài liệu**:
+  - `tests/test_today_ops_service.py`, `tests/test_today_routes.py`, `tests/check_template_js.js`: Bổ sung unit test cho `defer_all_new_checker_notes`, bảo toàn họ lỗi `(3/5)->(2/5)` / SPCK / composite / legacy<->Mức A, lưu `complete_write` từng dòng & non-SKIPPED status, `current_week` đa ngày, giữ bằng chứng cũ khi `skip_completed_bcnb=True`, khớp `(kt, bcnb_session_id)`, ưu tiên snapshot mới hơn overlay cũ, API `INVALID_TODAY_SCOPE` và hợp đồng JS.
+  - `UPGRADE_PROGRESS.md` (Wave 8 `19/19` ✅), `PROJECT_DECISIONS.md` (`DEC-055`), `PROJECT_STATE.md`, `CHANGELOG.md`.
+- **Tệp thay đổi (12 files)**: `api/today_routes.py`, `services/{today_ops_service,zalo_bcnb_service}.py`, `templates/partials/today.html`, `static/js/today.js`, `tests/{check_template_js.js,test_today_ops_service.py,test_today_routes.py}`, `UPGRADE_PROGRESS.md`, `PROJECT_DECISIONS.md`, `PROJECT_STATE.md`, `CHANGELOG.md`.
+- **Bằng chứng kiểm chứng (`[FULL GATE]`)**:
+  - Targeted suites (`tests.test_today_ops_service`, `tests.test_today_routes`, `tests.test_bcnb_actions`, `tests.test_report_status`): `77/77 OK` (`11.011s` ở `@backend` `#14`; `21.525s` ở `@verifier` `#16`).
+  - `powershell -ExecutionPolicy Bypass -File .\CHECK_QUALITY.ps1 -Isolated`: **`QUALITY GATE PASSED`** (`exit 0`, **`788/788`** tests `OK` trong `378.646s`, branch coverage **`80.3%`**, Ruff `0`, Mypy `0` trên `80` files, `PHASE 9A QUALITY PASS` `secrets=0`, Phase 3–9B + schema `scan_jobs_columns=23` + `phase3-app-smoke-ok` + compileall).
+  - `node tests/check_template_js.js`: `template-js-contract-ok scripts=8 handlers=48 behavior=14` (`exit 0`).
+  - `$env:GRAPHIFY_BACKEND="none"; graphify update .`: `Rebuilt: 5258 nodes, 15927 edges, 204 communities` (`.graphifyignore` nguyên vẹn).
+  - Review độc lập Read-Only `Neon XHigh` (`gemini-4-neon-xhigh`, `@verifier`, `#16`): `0` P0/P1/P2, **`VERDICT: PASS`**.
+
+---
+
 ## [2026-11-22] — Nâng cấp Reviewer độc lập luồng `[FULL GATE]` lên `Neon XHigh` (`gemini-4-neon-xhigh`, `DEC-054`)
 
 - **Phân loại luồng**: `[FAST-TRACK]` (`DEC-047`) — chỉ cập nhật quy chuẩn điều phối/tài liệu, không chạm mã nguồn runtime, trình duyệt, SQLite hay PII.

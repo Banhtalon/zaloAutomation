@@ -8,7 +8,7 @@
                     <i class="fa-solid fa-calendar-check" aria-hidden="true"></i>
                 </div>
                 <div class="min-w-0">
-                    <p class="metric-card__label uppercase">Tổng lớp hôm nay</p>
+                    <p id="today-kpi-total-label" class="metric-card__label uppercase">Tổng lớp tuần thực tế</p>
                     <h3 class="metric-card__value font-extrabold font-mono mt-0.5 tabular-nums" id="today-kpi-total">0</h3>
                     <p id="today-kpi-total-sub" class="text-[11px] font-semibold text-slate-600 mt-0.5 truncate">Đang tải lịch...</p>
                 </div>
@@ -75,16 +75,22 @@
 
     <!-- CONTROL & REALTIME SYNC BAR -->
     <div class="glass-panel p-3.5 space-y-2.5 shrink-0">
-        <!-- ROW 1: DATE, SNAPSHOT STATUS & REALTIME ACTIONS -->
+        <!-- ROW 1: SCOPE, DATE, SNAPSHOT STATUS & REALTIME ACTIONS -->
         <div class="flex flex-wrap items-center justify-between gap-2.5">
             <div class="flex flex-wrap items-center gap-2 bg-slate-100 p-1.5 rounded-xl border border-slate-300">
-                <label for="today-date-input" class="text-xs font-extrabold text-slate-700 uppercase pl-1.5 whitespace-nowrap">
-                    <i class="fa-regular fa-calendar mr-1 text-blue-700" aria-hidden="true"></i>Ngày:
-                </label>
-                <input type="date" id="today-date-input" onchange="onTodayDateChange()" class="input-3d rounded-lg px-2.5 py-1 text-xs font-bold text-slate-900">
-                <button type="button" id="today-reset-date-btn" onclick="resetTodayDate()" class="action-button action-button--tool text-xs px-2.5 py-1.5" title="Quay về ngày hôm nay (giờ Việt Nam)">
-                    <i class="fa-solid fa-clock-rotate-left text-blue-600" aria-hidden="true"></i> Hôm nay
-                </button>
+                <div class="flex items-center gap-1 bg-white p-0.5 rounded-lg border border-slate-300" role="group" aria-label="Phạm vi hiển thị Lớp Hôm Nay">
+                    <button type="button" id="today-scope-week-btn" onclick="setTodayScope('current_week')" class="px-2.5 py-1 rounded-md border font-bold text-xs bg-blue-600 text-white border-blue-700 transition-colors duration-150" aria-pressed="true" title="Hiển thị và đồng bộ toàn bộ các buổi học thuộc tuần thực tế">Tuần thực tế</button>
+                    <button type="button" id="today-scope-date-btn" onclick="setTodayScope('date')" class="px-2.5 py-1 rounded-md border font-bold text-xs bg-white text-slate-700 border-slate-300 transition-colors duration-150" aria-pressed="false" title="Hiển thị và đồng bộ theo một ngày cụ thể">Theo ngày</button>
+                </div>
+                <div id="today-date-controls" class="flex flex-wrap items-center gap-1.5">
+                    <label for="today-date-input" class="text-xs font-extrabold text-slate-700 uppercase pl-1 whitespace-nowrap">
+                        <i class="fa-regular fa-calendar mr-1 text-blue-700" aria-hidden="true"></i>Ngày:
+                    </label>
+                    <input type="date" id="today-date-input" onchange="onTodayDateChange()" class="input-3d rounded-lg px-2.5 py-1 text-xs font-bold text-slate-900">
+                    <button type="button" id="today-reset-date-btn" onclick="resetTodayDate()" class="action-button action-button--tool text-xs px-2.5 py-1.5" title="Chuyển sang xem ngày hôm nay (giờ Việt Nam)">
+                        <i class="fa-solid fa-clock-rotate-left text-blue-600" aria-hidden="true"></i> Hôm nay
+                    </button>
+                </div>
                 <button type="button" id="today-refresh-overview-btn" onclick="loadTodayOverview()" class="preflight-refresh px-2.5 py-1.5" title="Tải lại dữ liệu tổng quan Lớp Hôm Nay" aria-label="Làm mới dữ liệu Lớp Hôm Nay">
                     <i class="fa-solid fa-arrows-rotate text-blue-600" aria-hidden="true"></i>
                 </button>
@@ -93,13 +99,17 @@
             </div>
 
             <div class="flex flex-wrap items-center gap-2 bg-slate-200/90 p-1.5 rounded-xl border border-slate-400/80" role="group" aria-label="Thao tác kiểm tra và đồng bộ Lớp Hôm Nay">
+                <label id="today-skip-completed-wrap" for="today-skip-completed-checkbox" class="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-white border border-slate-300 text-xs font-bold text-slate-800 cursor-pointer select-none" title="Khi bật, bỏ qua các lớp đã tick đủ cả NX Zalo và NX LMS khi quét hàng loạt (chọn riêng từng lớp vẫn quét lại)">
+                    <input type="checkbox" id="today-skip-completed-checkbox" checked onchange="toggleTodaySkipCompleted(this.checked)" class="w-4 h-4 rounded border-slate-400 cursor-pointer">
+                    <span>Bỏ qua lớp đã tick đủ (Zalo + LMS)</span>
+                </label>
                 <button type="button" id="today-check-live-btn" onclick="triggerTodayLiveSync(true)" class="action-button action-button--scan" title="Kiểm tra Live tin nhắn Zalo và LMS mà không ghi BCNB">
                     <i class="fa-solid fa-bolt" aria-hidden="true"></i> Kiểm tra Live ngay
                 </button>
-                <button type="button" id="today-sync-bcnb-btn" onclick="triggerTodayLiveSync(false)" class="action-button action-button--lms" title="Quét Live Zalo + LMS các lớp đã tan ca và tick đúng tuần BCNB">
-                    <i class="fa-solid fa-check-double" aria-hidden="true"></i> Quét &amp; Tick BCNB đúng tuần
+                <button type="button" id="today-sync-bcnb-btn" onclick="triggerTodayLiveSync(false)" class="action-button action-button--lms" title="Quét Live Zalo + LMS các lớp đã tan ca và chỉ tick xanh (NX Zalo + NX LMS) trên BCNB; không ghi chú lỗi Teaching (dùng Dashboard để quét lỗi toàn phần)">
+                    <i class="fa-solid fa-check-double" aria-hidden="true"></i> Quét &amp; Tick xanh BCNB
                 </button>
-                <button type="button" id="today-sync-selected-btn" onclick="triggerTodaySelectedSync()" disabled class="action-button action-button--purple" title="Chỉ quét & tick BCNB cho các lớp đã chọn">
+                <button type="button" id="today-sync-selected-btn" onclick="triggerTodaySelectedSync()" disabled class="action-button action-button--purple" title="Chỉ quét Live &amp; tick xanh NX Zalo / NX LMS cho các lớp đã chọn (không bỏ qua lớp đã tick đủ, không ghi chú lỗi Teaching)">
                     <i class="fa-solid fa-list-check" aria-hidden="true"></i> Quét các lớp đã chọn (0)
                 </button>
                 <button type="button" id="today-copy-reminders-btn" onclick="copyTodayReminders()" class="action-button action-button--tool" title="Copy danh sách lớp thiếu Zalo, LMS, hoặc SPCK theo từng giáo viên">
@@ -112,8 +122,8 @@
         <div class="well-inset p-2.5 flex flex-wrap items-center justify-between gap-2.5 text-xs text-slate-800">
             <label class="search-box search-box--compact input-3d rounded-lg flex items-center overflow-hidden min-w-[230px]" for="today-search-input">
                 <span class="pl-3 text-slate-500" aria-hidden="true"><i class="fa-solid fa-magnifying-glass"></i></span>
-                <span class="sr-only">Tìm lớp, nhóm Zalo hoặc giáo viên trong ngày</span>
-                <input type="search" id="today-search-input" onkeyup="filterTodayRows()" onchange="filterTodayRows()" class="bg-transparent border-none text-xs font-semibold text-slate-900 focus:ring-0 block w-full py-1.5 px-2.5 outline-none" placeholder="Tìm mã lớp, nhóm, giáo viên...">
+                <span class="sr-only">Tìm lớp, ngày, nhóm Zalo hoặc giáo viên</span>
+                <input type="search" id="today-search-input" onkeyup="filterTodayRows()" onchange="filterTodayRows()" class="bg-transparent border-none text-xs font-semibold text-slate-900 focus:ring-0 block w-full py-1.5 px-2.5 outline-none" placeholder="Tìm mã lớp, ngày, nhóm, giáo viên...">
             </label>
 
             <div class="flex flex-wrap items-center gap-1.5" role="group" aria-label="Bộ lọc trạng thái lớp hôm nay">
@@ -130,7 +140,7 @@
 
         <!-- ROW 3: SYNC STATUS BANNER -->
         <div id="today-sync-banner" class="well-inset px-3 py-2 flex flex-wrap items-center justify-between gap-2 text-xs font-semibold text-slate-800">
-            Đang chờ tải lịch lớp hôm nay...
+            Đang chờ tải lịch lớp tuần thực tế...
         </div>
     </div>
 
@@ -151,9 +161,9 @@
         <div class="bg-slate-900 text-white px-5 py-2.5 border-b-2 border-slate-950 flex flex-wrap items-center justify-between gap-2 shrink-0">
             <div class="flex items-center gap-2.5">
                 <i class="fa-solid fa-clock text-emerald-400" aria-hidden="true"></i>
-                <span class="text-xs font-extrabold uppercase tracking-wider">Bảng theo dõi Real-time lớp học trong ngày (theo khung giờ)</span>
+                <span id="today-table-title" class="text-xs font-extrabold uppercase tracking-wider">Bảng theo dõi Real-time tuần thực tế (theo ngày &amp; khung giờ)</span>
             </div>
-            <span class="text-[11px] font-bold text-slate-300">Chỉ lớp đã tan ca &amp; có nhóm Zalo mới được quét và tick BCNB đúng tuần</span>
+            <span class="text-[11px] font-bold text-slate-300">Chỉ lớp đã tan ca &amp; có nhóm Zalo mới được tick xanh NX Zalo / NX LMS; lỗi Teaching quét ở Dashboard</span>
         </div>
 
         <div class="table-scroll shrink-0 flex-1">
@@ -163,7 +173,7 @@
                         <th class="px-3 py-3 w-10 text-center">
                             <input type="checkbox" id="today-select-all" onchange="toggleSelectAllTodayRows(this.checked)" aria-label="Chọn tất cả lớp đang hiển thị">
                         </th>
-                        <th class="px-4 py-3">Khung giờ &amp; Trạng thái</th>
+                        <th class="px-4 py-3">Ngày · Khung giờ &amp; Trạng thái</th>
                         <th class="px-4 py-3">Lớp · Nhóm · Tuần</th>
                         <th class="px-4 py-3">Giáo viên</th>
                         <th class="px-4 py-3">Zalo &amp; Minh chứng</th>
@@ -179,7 +189,7 @@
                                     <i class="fa-regular fa-calendar text-3xl" aria-hidden="true"></i>
                                 </div>
                                 <p class="font-extrabold text-slate-800">Chưa có dữ liệu Lớp Hôm Nay</p>
-                                <p class="mt-1 text-sm font-medium text-slate-600">Mở tab này hoặc bấm Kiểm tra Live ngay để tổng hợp lịch học trong ngày.</p>
+                                <p class="mt-1 text-sm font-medium text-slate-600">Mở tab này hoặc bấm Kiểm tra Live ngay để tổng hợp lịch học tuần thực tế hoặc theo ngày.</p>
                             </div>
                         </td>
                     </tr>

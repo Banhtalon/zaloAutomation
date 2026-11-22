@@ -3,6 +3,8 @@ let todayAllItems = [];
 let todayVisibleItems = [];
 let todayActiveFilter = 'all';
 let todaySelectedDateIso = '';
+let todayActiveScope = 'current_week';
+let todaySkipCompletedBcnb = true;
 let todayOverviewRequestSeq = 0;
 let todayOverviewLoading = false;
 
@@ -22,6 +24,9 @@ const TODAY_FILTER_CHIP_CONFIG = [
 
 const TODAY_FILTER_ACTIVE_CLASS = 'today-filter-chip px-2.5 py-1 rounded-lg border font-bold text-xs bg-blue-600 text-white border-blue-700 transition-colors duration-150';
 const TODAY_FILTER_IDLE_CLASS = 'today-filter-chip px-2.5 py-1 rounded-lg border font-bold text-xs bg-white text-slate-700 border-slate-300 transition-colors duration-150';
+const TODAY_SCOPE_ACTIVE_CLASS = 'px-2.5 py-1 rounded-md border font-bold text-xs bg-blue-600 text-white border-blue-700 transition-colors duration-150';
+const TODAY_SCOPE_IDLE_CLASS = 'px-2.5 py-1 rounded-md border font-bold text-xs bg-white text-slate-700 border-slate-300 transition-colors duration-150';
+const TODAY_WEEKDAY_SHORT = ['CN', 'T2', 'T3', 'T4', 'T5', 'T6', 'T7'];
 
 function getTodayConfirmFn() {
     if (typeof window !== 'undefined' && typeof window.confirm === 'function') {
@@ -54,6 +59,70 @@ function makeTodayEl(tag, className = '', text = null) {
 function setTodayText(id, value) {
     const el = getTodayEl(id);
     if (el) el.textContent = String(value ?? '');
+}
+
+function parseTodayClassDateParts(item) {
+    const rawIso = String(item?.class_date_iso || '').trim();
+    const isoMatch = rawIso.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (isoMatch) {
+        return {
+            year: Number(isoMatch[1]),
+            month: Number(isoMatch[2]),
+            day: Number(isoMatch[3]),
+        };
+    }
+    const rawDisplay = String(item?.class_date || '').trim();
+    const dmyMatch = rawDisplay.match(/^(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?/);
+    if (dmyMatch) {
+        let year = dmyMatch[3] ? Number(dmyMatch[3]) : null;
+        if (year !== null && year < 100) year += 2000;
+        return {
+            year,
+            month: Number(dmyMatch[2]),
+            day: Number(dmyMatch[1]),
+        };
+    }
+    const altIsoMatch = rawDisplay.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (altIsoMatch) {
+        return {
+            year: Number(altIsoMatch[1]),
+            month: Number(altIsoMatch[2]),
+            day: Number(altIsoMatch[3]),
+        };
+    }
+    return null;
+}
+
+function formatTodayDdMm(item) {
+    const parts = parseTodayClassDateParts(item);
+    if (!parts) {
+        return String(item?.class_date || item?.class_date_iso || '').trim();
+    }
+    const dd = String(parts.day).padStart(2, '0');
+    const mm = String(parts.month).padStart(2, '0');
+    return `${dd}/${mm}`;
+}
+
+function formatTodayShortDayDate(item) {
+    const parts = parseTodayClassDateParts(item);
+    if (!parts) {
+        return String(item?.class_date || item?.class_date_iso || '').trim();
+    }
+    const dd = String(parts.day).padStart(2, '0');
+    const mm = String(parts.month).padStart(2, '0');
+    const ddMm = `${dd}/${mm}`;
+    if (parts.year && parts.month >= 1 && parts.month <= 12 && parts.day >= 1 && parts.day <= 31) {
+        const utcDate = new Date(Date.UTC(parts.year, parts.month - 1, parts.day));
+        if (
+            utcDate.getUTCFullYear() === parts.year
+            && utcDate.getUTCMonth() === parts.month - 1
+            && utcDate.getUTCDate() === parts.day
+        ) {
+            const weekday = TODAY_WEEKDAY_SHORT[utcDate.getUTCDay()];
+            return `${weekday} · ${ddMm}`;
+        }
+    }
+    return ddMm;
 }
 
 function resolveTodayEvidenceUrl(rawUrl) {
@@ -113,6 +182,7 @@ function isTodayItemMissingLms(item) {
 
 function hasPendingBcnbTick(item) {
     if (!item || !item.eligible_for_sync) return false;
+    if (item.bcnb_completed_both === true) return false;
     const zaloReadyForTick = !item.missing_zalo_group && ['DONE', 'LATE', 'EXEMPT'].includes(String(item.zalo_category || '').toUpperCase());
     const needZalo = zaloReadyForTick && item.nx_zalo_checked !== true;
     const needLms = Boolean(item.lms_ready_for_tick) && item.nx_lms_checked !== true;
@@ -155,6 +225,9 @@ function todayItemMatchesSearch(item, query) {
         item?.class_code,
         item?.group_name,
         item?.person,
+        item?.class_date,
+        item?.class_date_iso,
+        formatTodayShortDayDate(item),
         item?.lesson ? `buổi ${item.lesson}` : '',
         item?.lesson ? `b${item.lesson}` : '',
         item?.week_label,
@@ -209,8 +282,26 @@ function renderTodayHeaderAndBadges(data) {
     const banner = getTodayEl('today-sync-banner');
     if (banner) {
         const parts = [];
-        const dateTag = data?.is_today ? `Hôm nay (${data?.target_date_iso || ''})` : `Ngày ${data?.target_date_iso || ''}`;
-        parts.push(dateTag);
+        const scopeLabel = String(data?.scope_label || '').trim();
+        const fallbackDateTag = data?.is_today ? `Hôm nay (${data?.target_date_iso || ''})` : `Ngày ${data?.target_date_iso || ''}`;
+        if (scopeLabel) {
+            parts.push(
+                todayActiveScope === 'current_week' && data?.today_iso
+                    ? `${scopeLabel} (Hôm nay ${data.today_iso})`
+                    : scopeLabel,
+            );
+        } else {
+            parts.push(fallbackDateTag);
+        }
+        parts.push('Live chỉ tick xanh NX Zalo / NX LMS (lỗi Teaching quét ở Dashboard)');
+        const completedBothCount = Number(data?.kpis?.bcnb_pending?.completed_both_count || 0);
+        if (completedBothCount > 0) {
+            parts.push(
+                todaySkipCompletedBcnb
+                    ? `Đã tick đủ ${completedBothCount} lớp (bỏ qua khi quét hàng loạt)`
+                    : `Đã tick đủ ${completedBothCount} lớp (đang tắt bỏ qua)`,
+            );
+        }
         if (!snap.snapshot_id) {
             parts.push('Chưa có snapshot BCNB trong DB; thao tác Live sẽ tự động dò kế hoạch mới.');
         } else if (snap.is_stale) {
@@ -280,10 +371,15 @@ function renderTodayKpis(kpis) {
     );
 
     setTodayText('today-kpi-bcnb', Number(bcnb.total_pending_rows || 0));
-    setTodayText(
-        'today-kpi-bcnb-sub',
-        `Chờ NX Zalo ${Number(bcnb.need_nx_zalo || 0)} · Chờ NX LMS ${Number(bcnb.need_nx_lms || 0)}`,
-    );
+    const completedBothCount = Number(bcnb.completed_both_count || 0);
+    const bcnbSubParts = [
+        `Chờ NX Zalo ${Number(bcnb.need_nx_zalo || 0)}`,
+        `Chờ NX LMS ${Number(bcnb.need_nx_lms || 0)}`,
+    ];
+    if (completedBothCount > 0) {
+        bcnbSubParts.push(`Đủ ${completedBothCount}`);
+    }
+    setTodayText('today-kpi-bcnb-sub', bcnbSubParts.join(' · '));
 }
 
 function renderTodayFilterChips(items) {
@@ -343,8 +439,10 @@ function renderTodaySpckPanel(items, kpis) {
         top.appendChild(makeTodayEl('span', trackBadgeClass, trackBadgeText));
         card.appendChild(top);
 
+        const spckDayDate = formatTodayShortDayDate(item);
+        const spckTimePrefix = spckDayDate ? `${spckDayDate} · ` : '';
         card.appendChild(
-            makeTodayEl('div', 'font-semibold text-slate-700', `${item.time_range_display || 'Chưa rõ giờ'} · ${item.person || 'Chưa xác định'}`),
+            makeTodayEl('div', 'font-semibold text-slate-700', `${spckTimePrefix}${item.time_range_display || 'Chưa rõ giờ'} · ${item.person || 'Chưa xác định'}`),
         );
         const cardSummaryText = spckInfo.summary_text || (isCourseExempt ? '⚪ Miễn SPCK (PTB/CSB)' : '⏳ Chưa kiểm tra SPCK');
         card.appendChild(
@@ -412,7 +510,12 @@ function formatTodayBcnbTickText(flag) {
 }
 
 function buildTodayTableRow(item) {
-    const tr = makeTodayEl('tr', isTodayItemNeedsAttention(item) ? 'bg-rose-50/40' : 'bg-white');
+    const tr = makeTodayEl(
+        'tr',
+        isTodayItemNeedsAttention(item)
+            ? 'bg-rose-50/40'
+            : (item?.bcnb_completed_both === true ? 'bg-emerald-50/30' : 'bg-white'),
+    );
     const targetKey = String(item?.target_key || '');
     const eligible = Boolean(item?.eligible_for_sync && targetKey);
 
@@ -427,8 +530,20 @@ function buildTodayTableRow(item) {
     tdCheck.appendChild(cb);
     tr.appendChild(tdCheck);
 
-    // Col 2: Khung giờ & Trạng thái
+    // Col 2: Ngày · Khung giờ & Trạng thái
     const tdTime = makeTodayEl('td', 'px-4 py-3 align-top space-y-1');
+    const shortDayDate = formatTodayShortDayDate(item);
+    if (shortDayDate) {
+        tdTime.appendChild(
+            makeTodayEl(
+                'div',
+                todayActiveScope === 'current_week'
+                    ? 'inline-block px-1.5 py-0.5 rounded bg-blue-50 border border-blue-300 font-extrabold text-[11px] text-blue-900'
+                    : 'text-[11px] font-bold text-slate-600',
+                shortDayDate,
+            ),
+        );
+    }
     tdTime.appendChild(makeTodayEl('div', 'font-extrabold font-mono text-slate-900', item?.time_range_display || 'Chưa rõ giờ'));
     tdTime.appendChild(buildTodayPhaseBadge(item));
     if (item?.time_source) {
@@ -553,6 +668,15 @@ function buildTodayTableRow(item) {
 
     // Col 7: BCNB & Thao tác
     const tdOps = makeTodayEl('td', 'px-4 py-3 align-top space-y-1.5 text-center');
+    if (item?.bcnb_completed_both === true) {
+        tdOps.appendChild(
+            makeTodayEl(
+                'div',
+                'inline-block px-2 py-0.5 rounded bg-emerald-100 text-emerald-900 border border-emerald-400 text-[10px] font-extrabold',
+                '✅ Đã tick đủ BCNB',
+            ),
+        );
+    }
     tdOps.appendChild(makeTodayEl('div', 'text-[11px] font-bold text-slate-800', `NX Zalo: ${formatTodayBcnbTickText(item?.nx_zalo_checked)}`));
     tdOps.appendChild(makeTodayEl('div', 'text-[11px] font-bold text-slate-800', `NX LMS: ${formatTodayBcnbTickText(item?.nx_lms_checked)}`));
     if (item?.phase === 'ENDED' && !item?.lms_ready_for_tick && item?.lms_ready_reason) {
@@ -572,9 +696,10 @@ function buildTodayTableRow(item) {
     const rowSyncBtn = makeTodayEl(
         'button',
         'px-2 py-1 rounded-md border border-emerald-500 bg-emerald-50 text-emerald-900 text-[11px] font-bold hover:bg-emerald-100 disabled:opacity-50',
-        'Quét & Tick',
+        'Quét & Tick xanh',
     );
     rowSyncBtn.type = 'button';
+    rowSyncBtn.title = 'Chỉ quét Live & tick xanh NX Zalo / NX LMS cho lớp này (không ghi lỗi Teaching)';
     rowSyncBtn.disabled = !eligible;
     rowSyncBtn.onclick = () => triggerSingleTodayRowSync(targetKey, false);
 
@@ -606,7 +731,13 @@ function renderTodayTable(items) {
         emptyTd.colSpan = 7;
         emptyTd.appendChild(makeTodayEl('p', 'font-extrabold text-slate-800', 'Không có lớp học nào khớp bộ lọc'));
         emptyTd.appendChild(
-            makeTodayEl('p', 'mt-1 text-sm font-medium text-slate-600', 'Thử chọn ngày khác hoặc bấm Kiểm tra Live ngay để quét kế hoạch BCNB.'),
+            makeTodayEl(
+                'p',
+                'mt-1 text-sm font-medium text-slate-600',
+                todayActiveScope === 'current_week'
+                    ? 'Thử đổi bộ lọc, chuyển sang Theo ngày, hoặc bấm Kiểm tra Live ngay để quét kế hoạch BCNB.'
+                    : 'Thử chọn ngày khác, chuyển sang Tuần thực tế, hoặc bấm Kiểm tra Live ngay để quét kế hoạch BCNB.',
+            ),
         );
         emptyTr.appendChild(emptyTd);
         tbody.replaceChildren(emptyTr);
@@ -627,13 +758,66 @@ function renderTodayView() {
     renderTodayTable(getFilteredTodayItems());
 }
 
+function syncTodayScopeUi(data = todayOverviewData, scopeOverride = null) {
+    const effectiveScope = scopeOverride === 'date' || scopeOverride === 'current_week'
+        ? scopeOverride
+        : (todayActiveScope === 'date' ? 'date' : 'current_week');
+    const isWeekScope = effectiveScope === 'current_week';
+
+    const weekBtn = getTodayEl('today-scope-week-btn');
+    const dateBtn = getTodayEl('today-scope-date-btn');
+    const scopeWeekNum = Number(data?.scope_week?.week || 0);
+    if (weekBtn) {
+        weekBtn.textContent = scopeWeekNum > 0 ? `Tuần thực tế (W${scopeWeekNum})` : 'Tuần thực tế';
+        weekBtn.className = isWeekScope ? TODAY_SCOPE_ACTIVE_CLASS : TODAY_SCOPE_IDLE_CLASS;
+        weekBtn.setAttribute('aria-pressed', String(isWeekScope));
+    }
+    if (dateBtn) {
+        dateBtn.className = !isWeekScope ? TODAY_SCOPE_ACTIVE_CLASS : TODAY_SCOPE_IDLE_CLASS;
+        dateBtn.setAttribute('aria-pressed', String(!isWeekScope));
+    }
+
+    const dateControls = getTodayEl('today-date-controls');
+    if (dateControls) {
+        dateControls.className = isWeekScope
+            ? 'flex flex-wrap items-center gap-1.5 opacity-75'
+            : 'flex flex-wrap items-center gap-1.5';
+    }
+
+    setTodayText(
+        'today-kpi-total-label',
+        isWeekScope ? 'Tổng lớp tuần thực tế' : (data?.is_today ? 'Tổng lớp hôm nay' : 'Tổng lớp theo ngày'),
+    );
+    setTodayText(
+        'today-table-title',
+        isWeekScope
+            ? 'Bảng theo dõi Real-time tuần thực tế (theo ngày & khung giờ)'
+            : 'Bảng theo dõi Real-time lớp học trong ngày (theo khung giờ)',
+    );
+
+    const skipWrap = getTodayEl('today-skip-completed-wrap');
+    if (skipWrap && skipWrap.classList) {
+        skipWrap.classList.remove('hidden');
+    }
+    const skipCheckbox = getTodayEl('today-skip-completed-checkbox');
+    if (skipCheckbox) {
+        skipCheckbox.checked = Boolean(todaySkipCompletedBcnb);
+        skipCheckbox.disabled = false;
+    }
+}
+
 async function loadTodayOverview(options = {}) {
     const reqSeq = ++todayOverviewRequestSeq;
     todayOverviewLoading = true;
+    const rawScope = options.scope !== undefined
+        ? String(options.scope)
+        : (options.dateIso ? 'date' : todayActiveScope);
+    const reqScope = rawScope === 'date' ? 'date' : 'current_week';
     const requestedDate = options.dateIso !== undefined ? String(options.dateIso || '') : todaySelectedDateIso;
-    const url = requestedDate
-        ? `/api/today/overview?date=${encodeURIComponent(requestedDate)}`
-        : '/api/today/overview';
+    let url = `/api/today/overview?scope=${encodeURIComponent(reqScope)}`;
+    if (reqScope === 'date' && requestedDate) {
+        url += `&date=${encodeURIComponent(requestedDate)}`;
+    }
 
     try {
         const res = await fetch(url);
@@ -646,6 +830,8 @@ async function loadTodayOverview(options = {}) {
         const data = await res.json();
         if (reqSeq !== todayOverviewRequestSeq) return null;
 
+        const resolvedScope = data?.scope === 'date' || data?.scope === 'current_week' ? data.scope : reqScope;
+        todayActiveScope = resolvedScope;
         todayOverviewData = data;
         todayAllItems = Array.isArray(data.items) ? data.items : [];
 
@@ -661,6 +847,7 @@ async function loadTodayOverview(options = {}) {
             dateInput.value = data.target_date_iso || '';
         }
 
+        syncTodayScopeUi(data, resolvedScope);
         renderTodayHeaderAndBadges(data);
         renderTodayKpis(data.kpis || {});
         renderTodaySpckPanel(todayAllItems, data.kpis || {});
@@ -678,17 +865,38 @@ async function loadTodayOverview(options = {}) {
     }
 }
 
+function setTodayScope(scope) {
+    const normalized = String(scope || '').trim() === 'date' ? 'date' : 'current_week';
+    todayActiveScope = normalized;
+    todaySelectedTargetKeys.clear();
+    syncTodayScopeUi(todayOverviewData, normalized);
+    return loadTodayOverview({ scope: normalized });
+}
+
+function toggleTodaySkipCompleted(checked) {
+    todaySkipCompletedBcnb = Boolean(checked);
+    const cb = getTodayEl('today-skip-completed-checkbox');
+    if (cb) cb.checked = todaySkipCompletedBcnb;
+    if (todayOverviewData) {
+        renderTodayHeaderAndBadges(todayOverviewData);
+    }
+}
+
 function onTodayDateChange() {
     const dateInput = getTodayEl('today-date-input');
     todaySelectedDateIso = String((dateInput && dateInput.value) || '').trim();
+    todayActiveScope = 'date';
     todaySelectedTargetKeys.clear();
-    return loadTodayOverview({ dateIso: todaySelectedDateIso });
+    syncTodayScopeUi(todayOverviewData, 'date');
+    return loadTodayOverview({ scope: 'date', dateIso: todaySelectedDateIso });
 }
 
 function resetTodayDate() {
     todaySelectedDateIso = '';
+    todayActiveScope = 'date';
     todaySelectedTargetKeys.clear();
-    return loadTodayOverview({ dateIso: '', forceSyncDateInput: true });
+    syncTodayScopeUi(todayOverviewData, 'date');
+    return loadTodayOverview({ scope: 'date', dateIso: '', forceSyncDateInput: true });
 }
 
 function setTodayFilter(filterKey) {
@@ -750,13 +958,19 @@ async function executeTodaySyncRequest(options = {}) {
     const selectedKeys = Array.isArray(options.selectedTargetKeys)
         ? options.selectedTargetKeys.filter(Boolean)
         : null;
+    const reqScope = todayActiveScope === 'date' ? 'date' : 'current_week';
     const targetDateIso = String(todaySelectedDateIso || todayOverviewData?.target_date_iso || '').trim() || null;
+    const skipCompleted = Boolean(selectedKeys && selectedKeys.length > 0 ? false : todaySkipCompletedBcnb);
 
     if (!checkOnly && !skipProdConfirm && todayOverviewData?.execution_mode === 'production') {
         const confirmFn = getTodayConfirmFn();
+        const scopeDesc = reqScope === 'current_week'
+            ? (todayOverviewData?.scope_label || 'Tuần thực tế')
+            : `Ngày ${targetDateIso || 'hôm nay'}`;
+        const skipNote = skipCompleted ? ' (bỏ qua lớp đã tick đủ BCNB)' : '';
         const prodWarning = selectedKeys && selectedKeys.length > 0
-            ? `Bạn sắp chạy QUÉT LIVE & TICK BCNB (PRODUCTION) cho ${selectedKeys.length} lớp đã chọn. Xác nhận ghi lên BCNB?`
-            : 'Bạn sắp chạy QUÉT LIVE & TICK BCNB ĐÚNG TUẦN ở chế độ PRODUCTION (có ghi dữ liệu lên BCNB). Xác nhận tiếp tục?';
+            ? `Bạn sắp chạy QUÉT LIVE & TICK XANH BCNB (PRODUCTION) cho ${selectedKeys.length} lớp đã chọn (${scopeDesc}).\nLưu ý: Live chỉ tick xanh NX Zalo / NX LMS, không ghi chú lỗi Teaching (dùng Dashboard để quét lỗi toàn phần). Xác nhận tiếp tục?`
+            : `Bạn sắp chạy QUÉT LIVE & TICK XANH BCNB (PRODUCTION) cho ${scopeDesc}${skipNote}.\nLưu ý: Live chỉ tick xanh NX Zalo / NX LMS, không ghi chú lỗi Teaching (dùng Dashboard để quét lỗi toàn phần). Xác nhận tiếp tục?`;
         if (confirmFn && !confirmFn(prodWarning)) {
             return null;
         }
@@ -764,6 +978,8 @@ async function executeTodaySyncRequest(options = {}) {
 
     const body = {
         target_date_iso: targetDateIso,
+        scope: reqScope,
+        skip_completed_bcnb: skipCompleted,
         check_only: checkOnly,
         tick_lms: !checkOnly,
         refresh_discovery_if_stale: true,
@@ -869,8 +1085,12 @@ async function copyTodayReminders() {
         if (reasons.length === 0) continue;
         const teacher = String(item?.person || 'Chưa xác định').trim();
         if (!byTeacher.has(teacher)) byTeacher.set(teacher, []);
+        const dayLabel = formatTodayDdMm(item);
+        const timePart = dayLabel
+            ? `${dayLabel} ${item.time_range_display || ''}`.trim()
+            : (item.time_range_display || '');
         byTeacher.get(teacher).push(
-            `- ${item.time_range_display || ''} | ${item.class_code || ''} B${item.lesson || '?'} (${item.week_label || ''}): ${reasons.join(', ')}`,
+            `- ${timePart} | ${item.class_code || ''} B${item.lesson || '?'} (${item.week_label || ''}): ${reasons.join(', ')}`,
         );
     }
 
@@ -880,7 +1100,16 @@ async function copyTodayReminders() {
     }
 
     const dateLabel = todayOverviewData?.target_date_iso || todaySelectedDateIso || '';
-    const sections = [`Nhắc bổ sung Lớp Hôm Nay (${dateLabel}):`];
+    const scopeWeek = todayOverviewData?.scope_week;
+    const weekLabel = (scopeWeek && scopeWeek.week && scopeWeek.year)
+        ? `W${scopeWeek.week}/${scopeWeek.year}`
+        : (scopeWeek && scopeWeek.week ? `W${scopeWeek.week}` : '');
+    const header = todayActiveScope === 'current_week'
+        ? (weekLabel
+            ? `Nhắc bổ sung Tuần thực tế (${weekLabel}):`
+            : `Nhắc bổ sung ${todayOverviewData?.scope_label || `Tuần thực tế (${dateLabel})`}:`)
+        : `Nhắc bổ sung Lớp Hôm Nay (${dateLabel}):`;
+    const sections = [header];
     for (const [teacher, lines] of byTeacher.entries()) {
         sections.push(`\n${teacher}:`);
         sections.push(...lines);

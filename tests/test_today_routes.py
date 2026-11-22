@@ -251,3 +251,65 @@ class TodayRoutesUnitTests(unittest.IsolatedAsyncioTestCase):
                 refresh_discovery_if_stale=True,
             )
             self.assertEqual(ok_resp["job_id"], 501)
+
+    async def test_get_today_overview_validates_and_forwards_scope(self) -> None:
+        container = _make_container()
+        with self.assertRaises(HTTPException) as bad_scope:
+            await get_today_overview(container=container, date="2026-11-22", scope="monthly")
+        self.assertEqual(bad_scope.exception.status_code, 400)
+        self.assertEqual(bad_scope.exception.detail["code"], "INVALID_TODAY_SCOPE")
+
+        mock_overview = {"scope": "current_week", "items": [], "kpis": {}}
+        with patch(
+            "api.today_routes.build_today_overview",
+            AsyncMock(return_value=mock_overview),
+        ) as build_mock:
+            resp = await get_today_overview(
+                container=container,
+                date="2026-11-22",
+                scope="current_week",
+            )
+        self.assertEqual(resp, mock_overview)
+        build_mock.assert_awaited_once_with(
+            container,
+            target_date_iso="2026-11-22",
+            scope="current_week",
+        )
+
+    async def test_sync_today_scope_and_skip_completed_validation_and_payload(self) -> None:
+        container = _make_container(dry_run=True)
+        with self.assertRaises(HTTPException) as bad_scope:
+            await sync_today_sessions(
+                container=container,
+                scope="invalid_scope",
+                check_only=True,
+            )
+        self.assertEqual(bad_scope.exception.status_code, 400)
+        self.assertEqual(bad_scope.exception.detail["code"], "INVALID_TODAY_SCOPE")
+
+        with patch(
+            "api.today_routes.assess_zalo_scan_preflight",
+            AsyncMock(return_value={"status": "GREEN", "checks": []}),
+        ):
+            resp = await sync_today_sessions(
+                container=container,
+                target_date_iso="2026-11-22",
+                scope="current_week",
+                skip_completed_bcnb=True,
+                check_only=False,
+            )
+        self.assertEqual(resp["scope"], "current_week")
+        self.assertTrue(resp["skip_completed_bcnb"])
+        self.assertIn("tuần thực tế", resp["message"])
+        created = container.job_repo.created[0]
+        self.assertEqual(created["payload"]["scope"], "current_week")
+        self.assertTrue(created["payload"]["skip_completed_bcnb"])
+
+        default_resp = await sync_today_sessions(
+            container=container,
+            target_date_iso="2026-11-22",
+            check_only=True,
+        )
+        self.assertEqual(default_resp["scope"], "date")
+        self.assertFalse(default_resp["skip_completed_bcnb"])
+        self.assertIn("ngày 2026-11-22", default_resp["message"])

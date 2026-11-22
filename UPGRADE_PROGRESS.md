@@ -1,7 +1,7 @@
 # KẾ HOẠCH CHI TIẾT & TIẾN ĐỘ NÂNG CẤP DỰ ÁN (UPGRADE PLAN & PROGRESS)
 
-> **Cập nhật lần cuối:** `2026-11-16 00:13 +07:00`
-> **Trạng thái hiện tại:** Đã hoàn tất **Phase 0 → Phase 3.2 (`45/45` ✅)**, hoàn tất **Wave 4 (Phase 4.0 → Phase 4.4: `25/25` ✅ — Kiểm định chất lượng nội dung LMS/Zalo, Tự động ghi `Mô tả vấn đề` lên Teaching & Bảng Email Quản lý 9 cột)**, hoàn tất **Wave 5 (Phase 5.0 → 5.8: `59/59` ✅ — Hardening toàn diện luồng kiểm tra báo cáo)**, hoàn tất **Phase 6.1 (`7/7` ✅ — Kiểm định Nộp Sản Phẩm Cuối Khóa SPCK Buổi 12, 13, 14 & Hotfix GraphQL/PII `DEC-042`)**, hoàn tất **Phase 6.2 → 6.5 (`20/20` ✅ Source/local đạt kiểm chứng)**, hoàn tất **Phase 6.6 (`4/4` ✅ Source/local đạt kiểm chứng — Phân cấp lỗi đỏ `❌ Chưa nhận xét` Zalo & cảnh báo vàng `⚠️` SPCK trong Email Quản lý / Dashboard `DEC-046`)**, và hoàn tất **Wave 7 + Live Hotfix (`17/17` ✅ Source/local đạt kiểm chứng — Trang riêng `Lớp Hôm Nay (Live)`: Live LMS/Zalo, SPCK Coding B12–14, Tick `NX Zalo + NX LMS` đúng tuần, Hotfix `TimeoutError` `about:blank` & cô lập setup Zalo `PARTIAL_SUCCESS`, `Argon High` #44/#47 PASS, `DEC-048`, `DEC-049`)**.
+> **Cập nhật lần cuối:** `2026-11-22 16:00 +07:00`
+> **Trạng thái hiện tại:** Đã hoàn tất **Phase 0 → Phase 3.2 (`45/45` ✅)**, hoàn tất **Wave 4 (`25/25` ✅)**, **Wave 5 (`59/59` ✅)**, **Phase 6.1 → 6.6 (`31/31` ✅)**, **Wave 7 + Live Hotfix (`17/17` ✅ `DEC-048`, `DEC-049`)**, **DEC-050 → DEC-054**, và **Wave 8 (`19/19` ✅ `DEC-055`: `Lớp Hôm Nay` chế độ Tuần thực tế, Bỏ qua lớp đã tick đủ & Tick-only BCNB)**.
 
 ---
 
@@ -42,6 +42,44 @@
 | **Phase 7.2** | **Backend `today_ops_service.py`, Job `TODAY_REALTIME_SYNC`, Tick `NX LMS + NX Zalo` & API Routes** | P1 (Cao) | ✅ Xong (`Argon High` #41 PASS) | `5/5` |
 | **Phase 7.3** | **Giao diện Trang riêng `Lớp Hôm Nay (Live)` + SPCK Coding B12–14 & Kiểm thử Frontend** | P1 (Cao) | ✅ Xong (`Argon High` #42 PASS) | `4/4` |
 | **Phase 7.4** | **Graphify Sync, `CHECK_QUALITY.ps1 -Isolated`, Final `Argon High` Review & Đồng bộ GitHub (`DEC-040`)** | P0 (Bắt buộc) | ✅ Hoàn thành (`Argon High` #44 & #47 PASS) | `5/5` |
+| **Phase 8.0** | **Baseline sạch & Sao lưu nóng SQLite Pre-Wave 8 (`5d16848` + Restore Drill)** | P0 (Bắt buộc) | ✅ Hoàn thành | `3/3` |
+| **Phase 8.1** | **Tick-only BCNB cho `Lớp Hôm Nay (Live)` (`defer_all_new_checker_notes`) & Lưu `complete_write` từng dòng** | P1 (Cao) | ✅ Hoàn thành | `4/4` |
+| **Phase 8.2** | **Backend phạm vi `current_week` \| `date`, `skip_completed_bcnb` & mở rộng API `/api/today/*`** | P1 (Cao) | ✅ Hoàn thành | `5/5` |
+| **Phase 8.3** | **Giao diện `Lớp Hôm Nay` mặc định `Tuần thực tế`, lọc bỏ qua lớp đã tick đủ & Contract Tests JS** | P1 (Cao) | ✅ Hoàn thành | `3/3` |
+| **Phase 8.4** | **Graphify Sync, `CHECK_QUALITY.ps1 -Isolated`, Final `Neon XHigh` Review & Đồng bộ GitHub (`DEC-040`)** | P0 (Bắt buộc) | ✅ Hoàn thành (`Neon XHigh` #16 PASS) | `4/4` |
+
+### 🚀 Kế hoạch & Tiến độ Wave 8 — Nâng cấp `Lớp Hôm Nay (Live)`: Chế độ `Tuần thực tế`, Bỏ qua lớp đã tick đủ & Tick-only BCNB
+
+> **Cơ chế kiểm chứng (`DEC-047`, `DEC-054` `[FULL GATE]`):** Luồng chỉnh sửa backend/BCNB/frontend chạy cổng cô lập `.\CHECK_QUALITY.ps1 -Isolated` + `node tests/check_template_js.js` và **Review độc lập `Neon XHigh` (`gemini-4-neon-xhigh`, swarm read-only, không `fork`)** tới khi đạt `VERDICT: PASS`.
+
+#### Phase 8.0 — Sao lưu an toàn & Khởi tạo Checklist Wave 8 ✅ (`3/3`)
+- [x] **8.0.1.** Kiểm tra `git status --short` sạch tại baseline HEAD `5d16848` (`5d16848da0c29087c7655ed6d217937ca138cc5f`).
+- [x] **8.0.2.** Sao lưu nóng `database.db` (`scripts/backup_restore.py backup --label pre-wave8 --keep 20`) sang `.backups/db/pre-wave8-20261122-080139.sqlite3` (`83,038,208` bytes, SHA-256 `4BAE104E602D91BFEF12992AEBE4BBF0EB26FA7107D08E4E4641EDDBAA3ADE07`, `integrity="ok"`, `foreign_key_errors=[]`) và chạy `restore-drill` thành công (`schema_migrations=4`, `scan_jobs=555`, `external_action_audit=3193`).
+- [x] **8.0.3.** Khởi tạo bảng theo dõi tổng thể & checklist chi tiết Wave 8 (`Phase 8.0 → 8.4`, 19 hạng mục) trong `UPGRADE_PROGRESS.md`.
+
+#### Phase 8.1 — Tick-only BCNB cho Live (`defer_all_new_checker_notes`) & Lưu từng dòng `on_row_finalized` ✅ (`4/4`)
+- [x] **8.1.1.** Mở rộng `services/zalo_bcnb_service.py`: thêm tham số `defer_all_new_checker_notes: bool = False` vào `update_bcnb_reports(...)` (giữ mặc định `False` để `ZALO_SCAN` nguyên vẹn); trong `_maybe_update_row_checker_note(...)`, khi `defer_all_new_checker_notes=True`, coi cả `zalo_expired=False` và `lms_expired=False` bất kể quá hạn BCNB (`>48h`), giữ nguyên dọn lỗi tự động cũ khi GV đã sửa & bảo toàn ghi chú tay QC từng byte, không ghi lỗi mới `[Zalo]`/`[LMS]`/`[SPCK]`, gắn `checker_note_outcome="DEFERRED_FOR_FULL_SCAN"`.
+- [x] **8.1.2.** Cập nhật `services/today_ops_service.py` (`_run_bcnb_sync_on_session`): truyền cả `defer_unexpired_checker_notes=True` và `defer_all_new_checker_notes=True` khi gọi `update_bcnb_reports(...)`.
+- [x] **8.1.3.** Nối `on_row_finalized` trong `_run_bcnb_sync_on_session` / `run_today_realtime_sync`: claim các dòng ghi qua `batch_repo.claim_write(job_id, "today-ops-bcnb-1")` trước khi gọi `update_bcnb_reports`, lưu ngay `update_target_result` + `complete_write` sau mỗi dòng hoàn tất Stage A+B+C, theo dõi `completed_claimed_ids` và hoàn tất phần còn lại trong `_persist_batch_write_outcomes` không double-complete.
+- [x] **8.1.4.** Bổ sung unit test trong `tests/test_today_ops_service.py` kiểm chứng hoãn ghi lỗi mới dù quá hạn `>48h`, dọn lỗi cũ đã sửa, bảo toàn ghi chú tay, và lưu `complete_write` từng dòng khi gián đoạn giữa chừng.
+
+#### Phase 8.2 — Backend phạm vi `current_week` | `date`, `skip_completed_bcnb` & API `/api/today/*` ✅ (`5/5`)
+- [x] **8.2.1.** Bổ sung `parse_today_scope`, mở rộng `_collect_today_entries_from_snapshot(..., scope="date")` lấy toàn bộ các buổi thuộc `latest_pair` giữ nguyên `class_date_iso` từng buổi khi `scope="current_week"`, mở rộng `_load_persisted_today_overlays(..., scope="date", scope_week=None)` và `_timeline_sort_key` sắp theo `(class_date_iso, start_hm, end_hm, class_code, lesson_num)`.
+- [x] **8.2.2.** Cập nhật `build_today_overview`: bổ sung `scope`, `scope_week`, `scope_label`, cờ `bcnb_completed_both` / `skipped_already_completed` trên từng item và `completed_both_count` trong `kpis["bcnb_pending"]`.
+- [x] **8.2.3.** Cập nhật `run_today_realtime_sync`: hỗ trợ `scope="current_week"` & `skip_completed_bcnb` (`_is_entry_bcnb_completed`), bỏ qua lớp đã tick đủ `NX Zalo && NX LMS` khi không chọn lọc thủ công mà không ghi placeholder đè bằng chứng cũ vào `items`/`today_items`, trả kết quả `SUCCESS` sạch khi toàn bộ lớp đã tick đủ.
+- [x] **8.2.4.** Mở rộng `api/today_routes.py`: hỗ trợ `scope` trên `GET /api/today/overview` và `scope` + `skip_completed_bcnb` trên `POST /api/today/sync` kèm kiểm tra lỗi HTTP 400 `INVALID_TODAY_SCOPE`.
+- [x] **8.2.5.** Bổ sung unit test đầy đủ trong `tests/test_today_ops_service.py` & `tests/test_today_routes.py` cho chế độ `current_week` đa ngày, skip lớp đã tick đủ, giữ bằng chứng cũ, lọc chọn lọc `selected_target_keys` và xác thực API routes.
+
+#### Phase 8.3 — Giao diện `Lớp Hôm Nay (Live)` mặc định `Tuần thực tế` & Kiểm thử Frontend ✅ (`3/3`)
+- [x] **8.3.1.** Cập nhật `templates/partials/today.html`: bổ sung nút chuyển phạm vi `#today-scope-week-btn` / `#today-scope-date-btn`, checkbox `#today-skip-completed-checkbox`, nhãn động `#today-kpi-total-label` & `#today-table-title`, bảo toàn toàn bộ ID và invariant HTML hiện hành.
+- [x] **8.3.2.** Cập nhật `static/js/today.js`: mặc định `todayActiveScope='current_week'` & `todaySkipCompletedBcnb=true`, hiển thị thứ + ngày `dd/mm` đa ngày trên bảng và thẻ SPCK, gắn huy hiệu `✅ Đã tick đủ BCNB`, truyền `scope` + `skip_completed_bcnb` và cập nhật `copyTodayReminders`.
+- [x] **8.3.3.** Cập nhật `tests/check_template_js.js` và chạy `node tests/check_template_js.js` + `venv\Scripts\python.exe tests/check_phase3_quality.py` đạt `exit 0`.
+
+#### Phase 8.4 — Graphify Sync, `CHECK_QUALITY.ps1 -Isolated`, Final `Neon XHigh` Review & Đồng bộ GitHub ✅ (`4/4`)
+- [x] **8.4.1.** Chạy `$env:GRAPHIFY_BACKEND="none"; graphify update .` đồng bộ AST cục bộ 100% offline (`Rebuilt: 5258 nodes, 15927 edges, 204 communities`).
+- [x] **8.4.2.** Chạy `.\CHECK_QUALITY.ps1 -Isolated` (`exit 0`, `QUALITY GATE PASSED`, `788 tests OK`, `80.3%` branch coverage) và `node tests/check_template_js.js` (`exit 0`, `template-js-contract-ok scripts=8 handlers=48 behavior=14`).
+- [x] **8.4.3.** Chạy Review độc lập `Neon XHigh` (`gemini-4-neon-xhigh`, swarm read-only không `fork`) trên toàn bộ diff Wave 8 đạt `VERDICT: PASS` (`#11` `NEEDS_FIX` -> sửa 4 finding & thêm 4 regression tests `#14` -> `#16` `VERDICT: PASS`, `[P0]=0, [P1]=0, [P2]=0`, `77/77` targeted tests OK).
+- [x] **8.4.4.** Cập nhật `UPGRADE_PROGRESS.md` (`19/19`), `PROJECT_DECISIONS.md` (`DEC-055`), `PROJECT_STATE.md`, `CHANGELOG.md`, kiểm tra `git diff --check` + LF sạch trên 12 tệp và đồng bộ GitHub (`DEC-040`).
 
 ### 🚀 Kế hoạch & Tiến độ Wave 7 — Trang riêng `Lớp Hôm Nay` (Live LMS, Zalo, SPCK Coding B12–14 & Tick BCNB Đúng Tuần)
 

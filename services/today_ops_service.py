@@ -117,9 +117,26 @@ PHASE_UPCOMING = "UPCOMING"
 PHASE_ONGOING = "ONGOING"
 PHASE_ENDED = "ENDED"
 PHASE_TIME_UNKNOWN = "TIME_UNKNOWN"
+TODAY_SCOPE_DATE = "date"
+TODAY_SCOPE_CURRENT_WEEK = "current_week"
+VALID_TODAY_SCOPES = frozenset({TODAY_SCOPE_DATE, TODAY_SCOPE_CURRENT_WEEK})
 _ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _SPCK_APPLICABLE_LESSONS: frozenset[int] = frozenset({12, 13, 14})
 _SCAN_ONLY_DECISION_DEFERRED = "SESSION_NOT_ENDED_DEFERRED"
+
+
+def parse_today_scope(raw_scope: str | None = None) -> str:
+    """Validate optional Lớp Hôm Nay scope ('date' or 'current_week')."""
+    if raw_scope is None:
+        return TODAY_SCOPE_DATE
+    clean = str(raw_scope).strip().lower()
+    if not clean:
+        return TODAY_SCOPE_DATE
+    if clean not in VALID_TODAY_SCOPES:
+        raise ValueError(
+            "Phạm vi Lớp Hôm Nay không hợp lệ (chỉ hỗ trợ 'date' hoặc 'current_week')."
+        )
+    return clean
 
 
 def parse_target_date_iso(
@@ -259,9 +276,11 @@ def _collect_today_entries_from_snapshot(
     snapshot: Mapping[str, Any] | None,
     *,
     target_date_iso: str,
+    scope: str = TODAY_SCOPE_DATE,
     teacher_by_class_code: Mapping[str, str] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Gather all sessions on ``target_date_iso`` across both bounded BCNB weeks."""
+    """Gather scheduled sessions for ``target_date_iso`` or ``current_week``."""
+    resolved_scope = parse_today_scope(scope)
     teacher_map = teacher_by_class_code or {}
     if not isinstance(snapshot, Mapping):
         return [], {
@@ -280,6 +299,42 @@ def _collect_today_entries_from_snapshot(
     required_week = week_plan_map.get("required_week")
     latest_pair = _week_pair(latest_week)
     required_pair = _week_pair(required_week)
+
+    if resolved_scope == TODAY_SCOPE_CURRENT_WEEK and latest_pair is None:
+        return [], {
+            "snapshot_id": snapshot.get("snapshot_id"),
+            "observed_at": snapshot.get("observed_at"),
+            "latest_week": latest_week,
+            "required_week": required_week,
+        }
+
+    def _matches_scope(kt: tuple[int, int, str, str, str]) -> bool:
+        if resolved_scope == TODAY_SCOPE_CURRENT_WEEK:
+            return latest_pair is not None and (kt[0], kt[1]) == latest_pair
+        return kt[4] == target_date_iso
+
+    bcnb_rows_by_key: dict[tuple[int, int, str, str, str], list[Mapping[str, Any]]] = {}
+    bcnb_rows_by_key_sid: dict[
+        tuple[tuple[int, int, str, str, str], str], list[Mapping[str, Any]]
+    ] = {}
+    for pair, data_key in ((required_pair, "required_data"), (latest_pair, "latest_data")):
+        raw_rows = week_plan_map.get(data_key)
+        if pair is None or not isinstance(raw_rows, list):
+            continue
+        for row in raw_rows:
+            if not isinstance(row, Mapping):
+                continue
+            r_date_iso = _extract_bcnb_row_date_iso(row)
+            r_code = normalize_class_code(row.get("ma_lop") or row.get("class_code") or "")
+            r_lesson_raw = str(row.get("buoi_so") or row.get("lesson") or "").strip()
+            r_lesson_num = normalize_lesson_number(r_lesson_raw)
+            r_lesson = str(r_lesson_num) if r_lesson_num is not None else r_lesson_raw
+            if r_code and r_date_iso:
+                r_kt = (pair[0], pair[1], r_code, r_lesson, r_date_iso)
+                bcnb_rows_by_key.setdefault(r_kt, []).append(row)
+                r_sid = str(row.get("bcnb_session_id") or "").strip()
+                if r_sid:
+                    bcnb_rows_by_key_sid.setdefault((r_kt, r_sid), []).append(row)
 
     seen_keys: set[tuple[int, int, str, str, str]] = set()
     entries: list[dict[str, Any]] = []
@@ -301,7 +356,7 @@ def _collect_today_entries_from_snapshot(
             if not isinstance(item, Mapping):
                 continue
             kt = _entry_key_tuple(item)
-            if kt is None or kt[4] != target_date_iso:
+            if kt is None or not _matches_scope(kt):
                 continue
             if kt in seen_keys:
                 continue
@@ -312,16 +367,40 @@ def _collect_today_entries_from_snapshot(
             ).strip()
             copy_item["class_code"] = normalize_class_code(copy_item.get("class_code"))
             copy_item["lesson"] = raw_item_lesson or kt[3]
-            copy_item["class_date_iso"] = target_date_iso
+            copy_item["class_date_iso"] = kt[4]
             copy_item["week"] = kt[0]
             copy_item["year"] = kt[1]
             copy_item["is_current_week"] = (kt[0], kt[1]) == latest_pair
             copy_item["person"] = _enrich_person(copy_item["class_code"], str(copy_item.get("person") or ""))
+            item_sid = _entry_session_id(copy_item)
+            matched_bcnb_row: Mapping[str, Any] | None = None
+            if item_sid:
+                sid_matches = bcnb_rows_by_key_sid.get((kt, item_sid)) or []
+                if len(sid_matches) == 1:
+                    matched_bcnb_row = sid_matches[0]
+            if matched_bcnb_row is None:
+                kt_matches = bcnb_rows_by_key.get(kt) or []
+                if len(kt_matches) == 1:
+                    cand_row = kt_matches[0]
+                    cand_sid = str(cand_row.get("bcnb_session_id") or "").strip()
+                    if not item_sid or not cand_sid or item_sid == cand_sid:
+                        matched_bcnb_row = cand_row
+            if matched_bcnb_row is not None:
+                for flag_key in ("nx_zalo_checked", "nx_lms_checked"):
+                    if not isinstance(copy_item.get(flag_key), bool) and isinstance(
+                        matched_bcnb_row.get(flag_key), bool
+                    ):
+                        copy_item[flag_key] = matched_bcnb_row[flag_key]
+                for note_key in ("qc_issue_note", "instructor_note"):
+                    if not copy_item.get(note_key) and isinstance(
+                        matched_bcnb_row.get(note_key), str
+                    ):
+                        copy_item[note_key] = matched_bcnb_row[note_key]
             copy_item.setdefault("missing_zalo_group", False)
             copy_item.setdefault("snapshot_bucket", bucket_name)
             entries.append(copy_item)
 
-    # Also surface BCNB schedule rows on target_date_iso missing a unique Zalo group match.
+    # Also surface BCNB schedule rows missing a unique Zalo group match.
     dropped_reasons_by_key: dict[tuple[int, int, str, str, str], tuple[str, list[str]]] = {}
     dropped_rows = plan_map.get("dropped_rows")
     if isinstance(dropped_rows, Mapping):
@@ -333,13 +412,18 @@ def _collect_today_entries_from_snapshot(
                 if not isinstance(dropped, Mapping):
                     continue
                 kt = _entry_key_tuple(dropped)
-                if kt is not None and kt[4] == target_date_iso:
+                if kt is not None and _matches_scope(kt):
                     dropped_reasons_by_key[kt] = (
                         str(dropped.get("reason") or group_key.upper()),
                         list(dropped.get("candidate_group_names") or []),
                     )
 
-    for pair, data_key in ((required_pair, "required_data"), (latest_pair, "latest_data")):
+    bcnb_sources = (
+        ((latest_pair, "latest_data"),)
+        if resolved_scope == TODAY_SCOPE_CURRENT_WEEK
+        else ((required_pair, "required_data"), (latest_pair, "latest_data"))
+    )
+    for pair, data_key in bcnb_sources:
         raw_rows = week_plan_map.get(data_key)
         if pair is None or not isinstance(raw_rows, list):
             continue
@@ -347,7 +431,10 @@ def _collect_today_entries_from_snapshot(
             if not isinstance(row, Mapping):
                 continue
             row_date_iso = _extract_bcnb_row_date_iso(row)
-            if row_date_iso != target_date_iso:
+            if resolved_scope == TODAY_SCOPE_CURRENT_WEEK:
+                if not _ISO_DATE_RE.fullmatch(row_date_iso):
+                    continue
+            elif row_date_iso != target_date_iso:
                 continue
             class_code = normalize_class_code(row.get("ma_lop") or row.get("class_code") or "")
             raw_lesson = str(row.get("buoi_so") or row.get("lesson") or "").strip()
@@ -562,6 +649,8 @@ def _overlay_matches_entry_identity(
 async def _load_persisted_today_overlays(
     *,
     target_date_iso: str,
+    scope: str = TODAY_SCOPE_DATE,
+    scope_week: tuple[int, int] | None = None,
     current_execution_mode: str,
 ) -> tuple[
     dict[tuple[tuple[int, int, str, str, str], str], dict[str, Any]],
@@ -569,6 +658,7 @@ async def _load_persisted_today_overlays(
     dict[str, Any] | None,
 ]:
     """Load newest persisted per-session overlays from SQLite (scan_jobs & zalo_batch_targets)."""
+    resolved_scope = parse_today_scope(scope)
     overlay_by_key: dict[tuple[tuple[int, int, str, str, str], str], dict[str, Any]] = {}
     teacher_by_class_code: dict[str, str] = {}
     latest_sync_job: dict[str, Any] | None = None
@@ -621,22 +711,59 @@ async def _load_persisted_today_overlays(
             j_mode = _job_exec_mode(req_map, row[8])
             if not is_check_only and j_mode != current_execution_mode:
                 continue
+            raw_job_scope = (
+                envelope.get("scope")
+                if isinstance(envelope, Mapping) and envelope.get("scope") is not None
+                else req_map.get("scope")
+            )
+            try:
+                job_scope = parse_today_scope(
+                    str(raw_job_scope) if raw_job_scope is not None else None
+                )
+            except ValueError:
+                job_scope = TODAY_SCOPE_DATE
             if (
                 j_type == "TODAY_REALTIME_SYNC"
                 and latest_sync_job is None
                 and isinstance(envelope, Mapping)
-                and str(envelope.get("target_date_iso") or "") == target_date_iso
             ):
-                latest_sync_job = {
-                    "job_id": j_id,
-                    "status": j_status,
-                    "check_only": is_check_only,
-                    "observed_at": j_obs_at,
-                    "execution_mode": j_mode,
-                    "bcnb_summary": _sanitize_public_bcnb_summary(
-                        envelope.get("bcnb_summary")
-                    ),
-                }
+                if resolved_scope == TODAY_SCOPE_CURRENT_WEEK:
+                    env_scope_week = (
+                        _week_pair(envelope.get("scope_week"))
+                        or _week_pair(envelope.get("latest_week"))
+                        or _week_pair(req_map.get("scope_week"))
+                    )
+                    banner_matches = (
+                        job_scope == TODAY_SCOPE_CURRENT_WEEK
+                        and scope_week is not None
+                        and env_scope_week == scope_week
+                    )
+                else:
+                    banner_matches = (
+                        job_scope != TODAY_SCOPE_CURRENT_WEEK
+                        and str(envelope.get("target_date_iso") or "") == target_date_iso
+                    )
+                if banner_matches:
+                    latest_sync_job = {
+                        "job_id": j_id,
+                        "status": j_status,
+                        "check_only": is_check_only,
+                        "observed_at": j_obs_at,
+                        "execution_mode": j_mode,
+                        "scope": job_scope,
+                        "scope_week": (
+                            {"week": scope_week[0], "year": scope_week[1]}
+                            if job_scope == TODAY_SCOPE_CURRENT_WEEK and scope_week is not None
+                            else None
+                        ),
+                        "skipped_completed_count": _safe_int(
+                            envelope.get("skipped_completed_count")
+                        )
+                        or 0,
+                        "bcnb_summary": _sanitize_public_bcnb_summary(
+                            envelope.get("bcnb_summary")
+                        ),
+                    }
             matching_job_ids.append(j_id)
             job_meta_by_id[j_id] = {
                 "job_id": j_id,
@@ -656,8 +783,15 @@ async def _load_persisted_today_overlays(
                     raw_items = [it for it in envelope["items"] if isinstance(it, dict)]
 
             for item in raw_items:
+                if item.get("skipped_already_completed") is True:
+                    continue
                 kt = _entry_key_tuple(item)
-                if kt is None or kt[4] != target_date_iso:
+                if kt is None:
+                    continue
+                if resolved_scope == TODAY_SCOPE_CURRENT_WEEK:
+                    if scope_week is None or (kt[0], kt[1]) != scope_week:
+                        continue
+                elif kt[4] != target_date_iso:
                     continue
                 ov_sid = _entry_session_id(item)
                 if not ov_sid:
@@ -669,12 +803,27 @@ async def _load_persisted_today_overlays(
                     enriched["_overlay_job_type"] = j_type
                     enriched["_overlay_observed_at"] = j_obs_at
                     enriched["_overlay_check_only"] = is_check_only
+                    enriched["_overlay_execution_mode"] = j_mode
                     overlay_by_key[sub_key] = enriched
 
-        if matching_job_ids:
+        if matching_job_ids and (
+            resolved_scope != TODAY_SCOPE_CURRENT_WEEK or scope_week is not None
+        ):
             placeholders = ",".join("?" for _ in matching_job_ids)
-            async with db.execute(
-                f"""
+            if resolved_scope == TODAY_SCOPE_CURRENT_WEEK:
+                assert scope_week is not None
+                bt_sql = f"""
+                SELECT job_id, class_code, week, year, lesson, class_date_iso,
+                       scan_status, write_status, evidence_path, result_json, updated_at
+                FROM zalo_batch_targets
+                WHERE job_id IN ({placeholders})
+                  AND week = ? AND year = ?
+                ORDER BY job_id DESC, id DESC
+                LIMIT 1000
+                """
+                bt_params: tuple[Any, ...] = (*matching_job_ids, scope_week[0], scope_week[1])
+            else:
+                bt_sql = f"""
                 SELECT job_id, class_code, week, year, lesson, class_date_iso,
                        scan_status, write_status, evidence_path, result_json, updated_at
                 FROM zalo_batch_targets
@@ -682,9 +831,9 @@ async def _load_persisted_today_overlays(
                   AND class_date_iso = ?
                 ORDER BY job_id DESC, id DESC
                 LIMIT 1000
-                """,
-                (*matching_job_ids, target_date_iso),
-            ) as cursor:
+                """
+                bt_params = (*matching_job_ids, target_date_iso)
+            async with db.execute(bt_sql, bt_params) as cursor:
                 for bt_row in await cursor.fetchall():
                     bt_job_id = int(bt_row[0])
                     bt_code = normalize_class_code(bt_row[1])
@@ -694,10 +843,17 @@ async def _load_persisted_today_overlays(
                     bt_lesson_num = normalize_lesson_number(bt_lesson_raw)
                     bt_lesson = str(bt_lesson_num) if bt_lesson_num is not None else bt_lesson_raw
                     bt_date = str(bt_row[5] or "").strip()
-                    if not bt_code or bt_week is None or bt_year is None or bt_date != target_date_iso:
+                    if not bt_code or bt_week is None or bt_year is None:
+                        continue
+                    if resolved_scope == TODAY_SCOPE_CURRENT_WEEK:
+                        if scope_week is None or (bt_week, bt_year) != scope_week or not _ISO_DATE_RE.fullmatch(bt_date):
+                            continue
+                    elif bt_date != target_date_iso:
                         continue
                     kt = (bt_week, bt_year, bt_code, bt_lesson, bt_date)
                     parsed_bt_res = _parse_json_safe(bt_row[9], {})
+                    if isinstance(parsed_bt_res, dict) and parsed_bt_res.get("skipped_already_completed") is True:
+                        continue
                     bt_sid = (
                         _entry_session_id(parsed_bt_res)
                         if isinstance(parsed_bt_res, dict)
@@ -719,6 +875,9 @@ async def _load_persisted_today_overlays(
                             item_bt["_overlay_job_type"] = j_meta.get("job_type", "ZALO_SCAN")
                             item_bt["_overlay_observed_at"] = j_meta.get("observed_at") or bt_row[10]
                             item_bt["_overlay_check_only"] = bool(j_meta.get("check_only", False))
+                            item_bt["_overlay_execution_mode"] = j_meta.get(
+                                "execution_mode", current_execution_mode
+                            )
                             overlay_by_key[sub_key] = item_bt
                         elif existing is not None:
                             existing.setdefault("scan_status", bt_row[6])
@@ -732,21 +891,46 @@ async def _load_persisted_today_overlays(
 def _merge_entry_with_overlay(
     base_entry: Mapping[str, Any],
     overlay: Mapping[str, Any] | None,
+    *,
+    snapshot_observed_at: datetime | None = None,
 ) -> dict[str, Any]:
     merged = dict(base_entry)
     if not overlay or not _overlay_matches_entry_identity(base_entry, overlay):
         return merged
+    ov_obs_dt = parse_timestamp(overlay.get("_overlay_observed_at"))
+    overlay_is_older = snapshot_observed_at is not None and (
+        ov_obs_dt is None or ov_obs_dt < snapshot_observed_at
+    )
     merged_st = dict(base_entry)
     overlay_st = overlay.get("scan_target")
     if isinstance(overlay_st, Mapping):
         for k, v in overlay_st.items():
+            if overlay_is_older and (
+                (k in {"nx_zalo_checked", "nx_lms_checked"} and isinstance(base_entry.get(k), bool))
+                or (k in {"qc_issue_note", "instructor_note"} and isinstance(base_entry.get(k), str))
+            ):
+                continue
             if v is not None and v != "":
                 merged_st[k] = v
     for k, v in overlay.items():
         if k == "scan_target":
             continue
+        if overlay_is_older and (
+            (k in {"nx_zalo_checked", "nx_lms_checked"} and isinstance(base_entry.get(k), bool))
+            or (k in {"qc_issue_note", "instructor_note"} and isinstance(base_entry.get(k), str))
+        ):
+            continue
         if v is not None:
             merged[k] = v
+    if overlay_is_older:
+        for flag_key in ("nx_zalo_checked", "nx_lms_checked"):
+            if isinstance(base_entry.get(flag_key), bool):
+                merged[flag_key] = base_entry[flag_key]
+                merged_st[flag_key] = base_entry[flag_key]
+        for note_key in ("qc_issue_note", "instructor_note"):
+            if isinstance(base_entry.get(note_key), str):
+                merged[note_key] = base_entry[note_key]
+                merged_st[note_key] = base_entry[note_key]
     # Preserve BCNB base row identity and group flags
     for keep_key in (
         "week",
@@ -1017,6 +1201,10 @@ def _normalize_today_item(
             "detail_notes": spck_detail_notes,
         },
         "nx_lms_checked": nx_lms_checked,
+        "bcnb_completed_both": bool(nx_zalo_checked is True and nx_lms_checked is True),
+        "skipped_already_completed": bool(
+            row_for_display.get("skipped_already_completed", False)
+        ),
         "lms_ready_for_tick": lms_ready,
         "lms_ready_reason": lms_ready_reason,
         "qc_issue_note": str(row_for_display.get("qc_issue_note") or "").strip(),
@@ -1132,6 +1320,9 @@ def _compute_today_kpis(items: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         "need_nx_zalo": need_nx_zalo,
         "need_nx_lms": need_nx_lms,
         "total_pending_rows": total_pending_rows,
+        "completed_both_count": sum(
+            1 for it in items if it.get("bcnb_completed_both") is True
+        ),
     }
     return {
         "total": total,
@@ -1142,21 +1333,24 @@ def _compute_today_kpis(items: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _timeline_sort_key(item: Mapping[str, Any]) -> tuple[str, str, str, int]:
+def _timeline_sort_key(item: Mapping[str, Any]) -> tuple[str, str, str, str, int]:
+    date_iso = str(item.get("class_date_iso") or "9999-99-99")
     start_hm = str(item.get("start_hm") or "99:99")
     end_hm = str(item.get("end_hm") or "99:99")
     code = str(item.get("class_code") or "")
     lesson_num = _safe_int(item.get("lesson_num"))
-    return (start_hm, end_hm, code, lesson_num if lesson_num is not None else 9999)
+    return (date_iso, start_hm, end_hm, code, lesson_num if lesson_num is not None else 9999)
 
 
 async def build_today_overview(
     container: AppContainer,
     *,
     target_date_iso: str | None = None,
+    scope: str = TODAY_SCOPE_DATE,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    """Build the real-time timeline overview for ``target_date_iso`` across both BCNB weeks."""
+    """Build the real-time timeline overview for ``target_date_iso`` or ``current_week``."""
+    resolved_scope = parse_today_scope(scope)
     current_now = now or now_business()
     resolved_date_iso = parse_target_date_iso(
         target_date_iso,
@@ -1167,13 +1361,25 @@ async def build_today_overview(
     max_age_minutes = int(getattr(container.settings, "zalo_plan_max_age_minutes", 30))
 
     snapshot = await container.group_repo.get_latest_discovery_snapshot()
+    snap_plan = snapshot.get("plan") if isinstance(snapshot, Mapping) else None
+    snap_week_plan = (
+        snap_plan.get("bcnb_week_plan") if isinstance(snap_plan, Mapping) else None
+    )
+    latest_pair = (
+        _week_pair(snap_week_plan.get("latest_week"))
+        if isinstance(snap_week_plan, Mapping)
+        else None
+    )
     overlays, teacher_by_code, latest_sync_job = await _load_persisted_today_overlays(
         target_date_iso=resolved_date_iso,
+        scope=resolved_scope,
+        scope_week=latest_pair,
         current_execution_mode=execution_mode,
     )
     entries, snapshot_meta = _collect_today_entries_from_snapshot(
         snapshot,
         target_date_iso=resolved_date_iso,
+        scope=resolved_scope,
         teacher_by_class_code=teacher_by_code,
     )
 
@@ -1189,16 +1395,37 @@ async def build_today_overview(
         kt = _entry_key_tuple(entry)
         base_sid = _entry_session_id(entry)
         overlay = overlays.get((kt, base_sid)) if (kt is not None and base_sid) else None
-        merged = _merge_entry_with_overlay(entry, overlay)
+        merged = _merge_entry_with_overlay(
+            entry,
+            overlay,
+            snapshot_observed_at=observed_dt,
+        )
         normalized_items.append(_normalize_today_item(merged, now_dt=current_now))
 
     normalized_items.sort(key=_timeline_sort_key)
     kpis = _compute_today_kpis(normalized_items)
 
+    scope_week_dict = (
+        {"week": latest_pair[0], "year": latest_pair[1]}
+        if latest_pair is not None
+        else None
+    )
+    if resolved_scope == TODAY_SCOPE_CURRENT_WEEK:
+        scope_label = (
+            f"Tuần thực tế W{latest_pair[0]:02d}/{latest_pair[1]}"
+            if latest_pair is not None
+            else "Tuần thực tế"
+        )
+    else:
+        scope_label = f"Ngày {resolved_date_iso}"
+
     return {
         "target_date_iso": resolved_date_iso,
         "today_iso": today_iso,
         "is_today": resolved_date_iso == today_iso,
+        "scope": resolved_scope,
+        "scope_week": scope_week_dict,
+        "scope_label": scope_label,
         "generated_at": utc_iso(now_utc()),
         "execution_mode": execution_mode,
         "snapshot": snapshot_meta,
@@ -1902,6 +2129,48 @@ async def _scan_ended_zalo_targets(
     return results, scan_failures, setup_notice
 
 
+def _is_entry_bcnb_completed(entry: Mapping[str, Any]) -> bool:
+    """Return True only when BOTH NX Zalo and NX LMS are already ticked on BCNB."""
+    return bool(
+        entry.get("nx_zalo_checked") is True
+        and entry.get("nx_lms_checked") is True
+    )
+
+
+def _index_target_ids_by_key(
+    target_id_by_key: Mapping[str, int] | None,
+) -> dict[str, int]:
+    indexed: dict[str, int] = {}
+    if not target_id_by_key:
+        return indexed
+    for raw_k, tid in target_id_by_key.items():
+        clean_k = str(raw_k).strip()
+        if not clean_k:
+            continue
+        indexed[clean_k] = int(tid)
+        indexed.setdefault(_normalized_today_target_key_str(clean_k), int(tid))
+    return indexed
+
+
+_ALLOWED_WRITE_FINAL_STATUSES = frozenset(
+    {
+        "VERIFIED",
+        "ALREADY_DONE",
+        "DRY_RUN",
+        "FAILED_BEFORE_WRITE",
+        "OUTCOME_UNKNOWN",
+        "BLOCKED_BATCH_HALT",
+    }
+)
+
+
+def _normalize_write_final_status(raw_status: Any) -> str:
+    status_str = str(raw_status or "").strip().upper()
+    if status_str in _ALLOWED_WRITE_FINAL_STATUSES:
+        return status_str
+    return "FAILED_BEFORE_WRITE"
+
+
 async def _persist_batch_write_outcomes(
     *,
     job_id: int,
@@ -1909,6 +2178,9 @@ async def _persist_batch_write_outcomes(
     batch_repo: ZaloBatchRepository,
     results: list[dict[str, Any]],
     bcnb_summary: Mapping[str, Any],
+    target_id_by_key: Mapping[str, int] | None = None,
+    claimed_rows: Sequence[Mapping[str, Any]] | None = None,
+    completed_claimed_ids: set[int] | None = None,
 ) -> None:
     """Update claimed write rows on ``zalo_batch_targets`` cleanly for Weekly Summary."""
     result_by_key: dict[str, dict[str, Any]] = {}
@@ -1916,6 +2188,12 @@ async def _persist_batch_write_outcomes(
         lk = _today_lookup_key(item)
         if lk:
             result_by_key[lk] = item
+        with contextlib.suppress(ValueError):
+            st_raw = item.get("scan_target")
+            st_src = dict(st_raw) if isinstance(st_raw, Mapping) else dict(item)
+            ck = canonical_target_key(st_src)
+            result_by_key.setdefault(ck, item)
+            result_by_key.setdefault(_normalized_today_target_key_str(ck), item)
     outcome_by_key: dict[str, dict[str, Any]] = {}
     for outcome in bcnb_summary.get("target_outcomes") or []:
         if not isinstance(outcome, dict):
@@ -1923,6 +2201,30 @@ async def _persist_batch_write_outcomes(
         lk = _today_lookup_key(outcome)
         if lk:
             outcome_by_key[lk] = outcome
+        with contextlib.suppress(ValueError):
+            ck = canonical_target_key(outcome)
+            outcome_by_key.setdefault(ck, outcome)
+            outcome_by_key.setdefault(_normalized_today_target_key_str(ck), outcome)
+
+    indexed_target_ids = _index_target_ids_by_key(target_id_by_key)
+    if indexed_target_ids and hasattr(batch_repo, "update_target_result"):
+        for item in results:
+            lk = _today_lookup_key(item)
+            tid = indexed_target_ids.get(lk) if lk else None
+            if tid is None:
+                with contextlib.suppress(ValueError):
+                    st_raw = item.get("scan_target")
+                    st_src = dict(st_raw) if isinstance(st_raw, Mapping) else dict(item)
+                    ck = canonical_target_key(st_src)
+                    tid = indexed_target_ids.get(ck) or indexed_target_ids.get(
+                        _normalized_today_target_key_str(ck)
+                    )
+            if tid is not None:
+                await batch_repo.update_target_result(tid, result=item)
+
+    if not hasattr(batch_repo, "complete_write"):
+        return
+
     complete_write_accepts_result = (
         "result" in inspect.signature(batch_repo.complete_write).parameters
         or any(
@@ -1930,11 +2232,13 @@ async def _persist_batch_write_outcomes(
             for p in inspect.signature(batch_repo.complete_write).parameters.values()
         )
     )
-    while True:
-        claimed = await batch_repo.claim_write(job_id, "today-ops-bcnb-1")
-        if claimed is None:
-            break
-        key = claimed["target_key"]
+    completed_ids = completed_claimed_ids if completed_claimed_ids is not None else set()
+
+    async def _finalize_remaining_claimed(claimed: Mapping[str, Any]) -> None:
+        claimed_id = int(claimed["id"])
+        if claimed_id in completed_ids:
+            return
+        key = str(claimed["target_key"])
         norm_key = _normalized_today_target_key_str(key)
         outcome = outcome_by_key.get(norm_key) or outcome_by_key.get(key)
         res = result_by_key.get(norm_key) or result_by_key.get(key)
@@ -1942,25 +2246,38 @@ async def _persist_batch_write_outcomes(
             {"result": res} if complete_write_accepts_result and res is not None else {}
         )
         if outcome is None:
-            status = "SKIPPED" if str((res or {}).get("evidence_state") or "") == "NOT_FOUND_VERIFIED" else "FAILED_BEFORE_WRITE"
             await batch_repo.complete_write(
-                claimed["id"],
-                status=status,
-                error_code=None if status == "SKIPPED" else "TARGET_NOT_UPDATED",
-                error_message=None if status == "SKIPPED" else "Chưa ghi nhận kết quả BCNB.",
+                claimed_id,
+                status="FAILED_BEFORE_WRITE",
+                error_code="TARGET_NOT_UPDATED",
+                error_message="Chưa ghi nhận kết quả BCNB.",
                 **extra_kwargs,
             )
-            continue
-        status_str = str(outcome.get("status") or "FAILED_BEFORE_WRITE")
-        if status_str not in {"VERIFIED", "ALREADY_DONE", "DRY_RUN", "SKIPPED", "FAILED_BEFORE_WRITE", "OUTCOME_UNKNOWN", "BLOCKED_BATCH_HALT"}:
-            status_str = "FAILED_BEFORE_WRITE"
+            completed_ids.add(claimed_id)
+            return
+        status_str = _normalize_write_final_status(outcome.get("status"))
         await batch_repo.complete_write(
-            claimed["id"],
+            claimed_id,
             status=status_str,
-            error_code="BCNB_WRITE_FAILED" if status_str in {"FAILED_BEFORE_WRITE", "OUTCOME_UNKNOWN"} else None,
+            error_code=(
+                "BCNB_WRITE_FAILED"
+                if status_str in {"FAILED_BEFORE_WRITE", "OUTCOME_UNKNOWN"}
+                else None
+            ),
             error_message=outcome.get("error"),
             **extra_kwargs,
         )
+        completed_ids.add(claimed_id)
+
+    for preclaimed in claimed_rows or ():
+        await _finalize_remaining_claimed(preclaimed)
+
+    if hasattr(batch_repo, "claim_write"):
+        while True:
+            claimed = await batch_repo.claim_write(job_id, "today-ops-bcnb-1")
+            if claimed is None:
+                break
+            await _finalize_remaining_claimed(claimed)
 
 
 async def _run_bcnb_sync_on_session(
@@ -1981,6 +2298,10 @@ async def _run_bcnb_sync_on_session(
     now_dt: datetime,
     job_repo: JobRepository,
     audit_repo: AuditRepository,
+    batch_repo: ZaloBatchRepository | None = None,
+    target_id_by_key: Mapping[str, int] | None = None,
+    claimed_write_rows: list[dict[str, Any]] | None = None,
+    completed_claimed_ids: set[int] | None = None,
 ) -> dict[str, Any]:
     week_plan = snapshot_plan.get("bcnb_week_plan") or {}
     latest_week = week_plan.get("latest_week")
@@ -2039,6 +2360,137 @@ async def _run_bcnb_sync_on_session(
         if Config.BCNB_URL:
             await bcnb_page.goto(Config.BCNB_URL)
         await _login_bcnb_if_needed(bcnb_page)
+
+        update_params = inspect.signature(update_bcnb_reports).parameters
+        accepts_var_kw = any(
+            p.kind == inspect.Parameter.VAR_KEYWORD
+            for p in update_params.values()
+        )
+        extra_update_kwargs: dict[str, Any] = {}
+        if "defer_all_new_checker_notes" in update_params or accepts_var_kw:
+            extra_update_kwargs["defer_all_new_checker_notes"] = True
+
+        if (
+            not effective_check_only
+            and batch_repo is not None
+            and ("on_row_finalized" in update_params or accepts_var_kw)
+        ):
+            claimed_rows_local = (
+                claimed_write_rows if claimed_write_rows is not None else []
+            )
+            completed_ids_local = (
+                completed_claimed_ids if completed_claimed_ids is not None else set()
+            )
+            if hasattr(batch_repo, "claim_write"):
+                while True:
+                    claimed_target = await batch_repo.claim_write(
+                        job_id, "today-ops-bcnb-1"
+                    )
+                    if claimed_target is None:
+                        break
+                    claimed_rows_local.append(claimed_target)
+            claimed_by_key: dict[str, dict[str, Any]] = {}
+            for target_row in claimed_rows_local:
+                raw_tk = str(target_row["target_key"])
+                claimed_by_key[raw_tk] = target_row
+                claimed_by_key.setdefault(
+                    _normalized_today_target_key_str(raw_tk), target_row
+                )
+            indexed_target_ids = _index_target_ids_by_key(target_id_by_key)
+            result_by_key: dict[str, dict[str, Any]] = {}
+            for item in scan_results_for_bcnb:
+                lk = _today_lookup_key(item)
+                if lk:
+                    result_by_key[lk] = item
+                with contextlib.suppress(ValueError):
+                    st_raw = item.get("scan_target")
+                    st_src = dict(st_raw) if isinstance(st_raw, Mapping) else dict(item)
+                    ck = canonical_target_key(st_src)
+                    result_by_key.setdefault(ck, item)
+                    result_by_key.setdefault(_normalized_today_target_key_str(ck), item)
+
+            complete_write_accepts_result = (
+                hasattr(batch_repo, "complete_write")
+                and (
+                    "result" in inspect.signature(batch_repo.complete_write).parameters
+                    or any(
+                        p.kind == inspect.Parameter.VAR_KEYWORD
+                        for p in inspect.signature(
+                            batch_repo.complete_write
+                        ).parameters.values()
+                    )
+                )
+            )
+
+            async def _finalize_claimed_row(row_outcome: dict[str, Any]) -> None:
+                lk = _today_lookup_key(row_outcome)
+                raw_ck = ""
+                with contextlib.suppress(ValueError):
+                    raw_ck = canonical_target_key(row_outcome)
+                norm_ck = _normalized_today_target_key_str(raw_ck) if raw_ck else ""
+                candidate_keys = [k for k in (lk, raw_ck, norm_ck) if k]
+                if not candidate_keys:
+                    return
+                target = next(
+                    (claimed_by_key[k] for k in candidate_keys if k in claimed_by_key),
+                    None,
+                )
+                row_res = row_outcome.get("target_result")
+                if isinstance(row_res, dict):
+                    for k in candidate_keys:
+                        result_by_key[k] = row_res
+                else:
+                    row_res = next(
+                        (result_by_key[k] for k in candidate_keys if k in result_by_key),
+                        None,
+                    )
+                row_tid = (
+                    int(target["id"])
+                    if target is not None
+                    else next(
+                        (
+                            indexed_target_ids[k]
+                            for k in candidate_keys
+                            if k in indexed_target_ids
+                        ),
+                        None,
+                    )
+                )
+                if (
+                    isinstance(row_res, dict)
+                    and row_tid is not None
+                    and hasattr(batch_repo, "update_target_result")
+                ):
+                    await batch_repo.update_target_result(row_tid, result=row_res)
+                if target is None or not hasattr(batch_repo, "complete_write"):
+                    return
+                target_id = int(target["id"])
+                if target_id in completed_ids_local:
+                    return
+                raw_status = str(row_outcome.get("status") or "").strip()
+                if not raw_status:
+                    return
+                status_str = _normalize_write_final_status(raw_status)
+                extra_write_kwargs: dict[str, Any] = (
+                    {"result": row_res}
+                    if complete_write_accepts_result and isinstance(row_res, dict)
+                    else {}
+                )
+                await batch_repo.complete_write(
+                    target_id,
+                    status=status_str,
+                    error_code=(
+                        "BCNB_WRITE_FAILED"
+                        if status_str in {"FAILED_BEFORE_WRITE", "OUTCOME_UNKNOWN"}
+                        else None
+                    ),
+                    error_message=row_outcome.get("error"),
+                    **extra_write_kwargs,
+                )
+                completed_ids_local.add(target_id)
+
+            extra_update_kwargs["on_row_finalized"] = _finalize_claimed_row
+
         return await update_bcnb_reports(
             bcnb_page,
             job_id=job_id,
@@ -2056,6 +2508,7 @@ async def _run_bcnb_sync_on_session(
             tick_lms=effective_tick_lms,
             check_only=effective_check_only,
             defer_unexpired_checker_notes=True,
+            **extra_update_kwargs,
         )
     finally:
         await _close_scan_page(session, bcnb_page)
@@ -2086,6 +2539,10 @@ async def run_today_realtime_sync(
     check_only = bool(req.get("check_only", False))
     tick_lms = False if check_only else bool(req.get("tick_lms", True))
     refresh_discovery_if_stale = bool(req.get("refresh_discovery_if_stale", True))
+    scope = parse_today_scope(
+        str(req.get("scope")) if req.get("scope") is not None else None
+    )
+    skip_completed_bcnb = bool(req.get("skip_completed_bcnb", False))
     selected_keys_raw = req.get("selected_target_keys")
     selected_target_keys = (
         [str(k).strip() for k in selected_keys_raw if str(k).strip()]
@@ -2116,6 +2573,118 @@ async def run_today_realtime_sync(
         if runtime is not None
         else WorkerRuntime(external=effective_external, evidence_root=evidence_root)
     )
+    effective_skip_completed = bool(skip_completed_bcnb) and not selected_target_keys
+
+    def _build_scope_meta(snap: Mapping[str, Any] | None) -> tuple[Any, Any, list[Any], dict[str, int] | None, str]:
+        snap_plan = snap.get("plan") if isinstance(snap, Mapping) else {}
+        plan_map = snap_plan if isinstance(snap_plan, Mapping) else {}
+        wp = plan_map.get("bcnb_week_plan")
+        wp_map = wp if isinstance(wp, Mapping) else {}
+        l_week = wp_map.get("latest_week")
+        r_week = wp_map.get("required_week")
+        s_weeks = list(wp_map.get("selected_weeks") or [r_week, l_week])
+        l_pair = _week_pair(l_week)
+        s_week_payload = (
+            {"week": l_pair[0], "year": l_pair[1]} if l_pair is not None else None
+        )
+        if scope == TODAY_SCOPE_CURRENT_WEEK:
+            s_label = (
+                f"Tuần thực tế W{l_pair[0]:02d}/{l_pair[1]}"
+                if l_pair is not None
+                else "Tuần thực tế"
+            )
+        else:
+            s_label = f"Ngày {target_date_iso}"
+        return l_week, r_week, s_weeks, s_week_payload, s_label
+
+    async def _prepare_entries(
+        snap: Mapping[str, Any], *, refreshed: bool
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+        l_week, _, _, _, _ = _build_scope_meta(snap)
+        l_pair = _week_pair(l_week)
+        collected, _ = _collect_today_entries_from_snapshot(
+            snap,
+            target_date_iso=target_date_iso,
+            scope=scope,
+        )
+        if not refreshed and effective_skip_completed and collected:
+            snap_obs_dt = parse_timestamp(snap.get("observed_at"))
+            overlays, _, _ = await _load_persisted_today_overlays(
+                target_date_iso=target_date_iso,
+                scope=scope,
+                scope_week=l_pair,
+                current_execution_mode=effective_mode,
+            )
+            for entry in collected:
+                kt = _entry_key_tuple(entry)
+                sid = _entry_session_id(entry)
+                ov = overlays.get((kt, sid)) if (kt is not None and sid) else None
+                if not ov or not _overlay_matches_entry_identity(entry, ov):
+                    continue
+                ov_mode = str(ov.get("_overlay_execution_mode") or "").strip().lower()
+                if not check_only and ov_mode != effective_mode:
+                    continue
+                ov_obs_dt = parse_timestamp(ov.get("_overlay_observed_at"))
+                if snap_obs_dt is not None and (ov_obs_dt is None or ov_obs_dt < snap_obs_dt):
+                    continue
+                for flag_key in ("nx_zalo_checked", "nx_lms_checked"):
+                    if isinstance(ov.get(flag_key), bool):
+                        entry[flag_key] = ov[flag_key]
+        filtered = _filter_selected_targets(collected, selected_target_keys)
+        if effective_skip_completed:
+            skipped = [e for e in filtered if _is_entry_bcnb_completed(e)]
+            active = [e for e in filtered if not _is_entry_bcnb_completed(e)]
+        else:
+            skipped = []
+            active = list(filtered)
+        return filtered, active, skipped
+
+    async def _complete_without_active(
+        snap: Mapping[str, Any],
+        *,
+        all_entries: list[dict[str, Any]],
+        skipped_entries: list[dict[str, Any]],
+    ) -> None:
+        l_week, r_week, s_weeks, s_week_payload, s_label = _build_scope_meta(snap)
+        skipped_keys = [k for e in skipped_entries if (k := _today_lookup_key(e))]
+        envelope = {
+            "kind": "today_realtime_sync",
+            "selective_rescan": True,
+            "check_only": check_only,
+            "tick_lms": tick_lms,
+            "scope": scope,
+            "scope_week": s_week_payload,
+            "scope_label": s_label,
+            "skip_completed_bcnb": skip_completed_bcnb,
+            "skipped_completed_count": len(skipped_entries),
+            "skipped_completed_keys": skipped_keys,
+            "target_date_iso": target_date_iso,
+            "snapshot_id": snap.get("snapshot_id"),
+            "latest_week": l_week,
+            "required_week": r_week,
+            "selected_weeks": s_weeks,
+            "items": [],
+            "today_items": [],
+            "bcnb_summary": {"updated_count": 0, "lms_updated_count": 0},
+        }
+        if not all_entries:
+            msg = (
+                f"Không có lớp nào trong {s_label}."
+                if scope == TODAY_SCOPE_CURRENT_WEEK
+                else f"Không có lớp nào diễn ra trong ngày {target_date_iso}."
+            )
+        else:
+            msg = (
+                f"Tất cả {len(skipped_entries)} lớp đều đã tick đủ NX Zalo & NX LMS "
+                "trên BCNB (bỏ qua quét lại)."
+            )
+        await j_repo.update_job(
+            job_id,
+            status="SUCCESS",
+            message=msg,
+            progress=100,
+            results=json.dumps(envelope, ensure_ascii=False),
+        )
 
     try:
         async with exclusive_browser_job(
@@ -2124,16 +2693,54 @@ async def run_today_realtime_sync(
             lock=effective_runtime.browser_lock,
             process_lock=getattr(effective_runtime, "profile_lock", None),
         ):
+            scope_desc = (
+                "tuần thực tế"
+                if scope == TODAY_SCOPE_CURRENT_WEEK
+                else f"ngày {target_date_iso}"
+            )
             await j_repo.update_job(
                 job_id,
                 status="RUNNING",
                 message=(
-                    f"Đang kiểm tra Live LMS & Zalo ngày {target_date_iso}..."
+                    f"Đang kiểm tra Live LMS & Zalo {scope_desc}..."
                     if check_only
-                    else f"Đang quét Live & tick BCNB đúng tuần ngày {target_date_iso}..."
+                    else (
+                        "Đang quét Live & tick BCNB tuần thực tế..."
+                        if scope == TODAY_SCOPE_CURRENT_WEEK
+                        else f"Đang quét Live & tick BCNB đúng tuần ngày {target_date_iso}..."
+                    )
                 ),
                 progress=5,
             )
+
+            max_age_minutes = int(getattr(Config, "ZALO_PLAN_MAX_AGE_MINUTES", 30))
+            snapshot = await g_repo.get_latest_discovery_snapshot()
+            needs_refresh = bool(
+                refresh_discovery_if_stale
+                and _snapshot_needs_refresh(snapshot, max_age_minutes=max_age_minutes)
+            )
+            preloaded_entries: tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]] | None = None
+
+            if not needs_refresh:
+                if not isinstance(snapshot, Mapping) or not isinstance(snapshot.get("plan"), Mapping):
+                    await j_repo.update_job(
+                        job_id,
+                        status="FAILED",
+                        message="Chưa có kế hoạch Dò tìm 2 tuần từ BCNB; hãy chạy Dò tìm hoặc bật làm mới snapshot.",
+                        progress=100,
+                    )
+                    return
+                all_entries, active_entries, skipped_completed_entries = await _prepare_entries(
+                    snapshot, refreshed=False
+                )
+                if not all_entries or not active_entries:
+                    await _complete_without_active(
+                        snapshot,
+                        all_entries=all_entries,
+                        skipped_entries=skipped_completed_entries,
+                    )
+                    return
+                preloaded_entries = (all_entries, active_entries, skipped_completed_entries)
 
             if effective_mode == "production" and not check_only:
                 try:
@@ -2141,13 +2748,8 @@ async def run_today_realtime_sync(
                 except Exception as exc:
                     raise RuntimeError("Backup SQLite production không đạt; dừng an toàn.") from exc
 
-            max_age_minutes = int(getattr(Config, "ZALO_PLAN_MAX_AGE_MINUTES", 30))
-            snapshot = await g_repo.get_latest_discovery_snapshot()
-
             async with effective_external.browser.persistent_session() as session:
-                if refresh_discovery_if_stale and _snapshot_needs_refresh(
-                    snapshot, max_age_minutes=max_age_minutes
-                ):
+                if needs_refresh:
                     await j_repo.update_job(
                         job_id,
                         message="Đang làm mới snapshot 2 tuần từ BCNB & Zalo...",
@@ -2174,48 +2776,35 @@ async def run_today_realtime_sync(
                     return
 
                 snapshot_plan = snapshot["plan"]
-                week_plan = snapshot_plan.get("bcnb_week_plan") or {}
-                latest_week = week_plan.get("latest_week")
-                required_week = week_plan.get("required_week")
-                selected_weeks = week_plan.get("selected_weeks") or [required_week, latest_week]
-
-                all_entries, _ = _collect_today_entries_from_snapshot(
-                    snapshot,
-                    target_date_iso=target_date_iso,
+                latest_week, required_week, selected_weeks, scope_week_payload, scope_label = _build_scope_meta(
+                    snapshot
                 )
-                all_entries = _filter_selected_targets(all_entries, selected_target_keys)
-                if not all_entries:
-                    empty_envelope = {
-                        "kind": "today_realtime_sync",
-                        "selective_rescan": True,
-                        "check_only": check_only,
-                        "tick_lms": tick_lms,
-                        "target_date_iso": target_date_iso,
-                        "snapshot_id": snapshot.get("snapshot_id"),
-                        "latest_week": latest_week,
-                        "required_week": required_week,
-                        "selected_weeks": selected_weeks,
-                        "items": [],
-                        "today_items": [],
-                        "bcnb_summary": {"updated_count": 0, "lms_updated_count": 0},
-                    }
-                    await j_repo.update_job(
-                        job_id,
-                        status="SUCCESS",
-                        message=f"Không có lớp nào diễn ra trong ngày {target_date_iso}.",
-                        progress=100,
-                        results=json.dumps(empty_envelope, ensure_ascii=False),
+                if preloaded_entries is not None:
+                    all_entries, active_entries, skipped_completed_entries = preloaded_entries
+                else:
+                    all_entries, active_entries, skipped_completed_entries = await _prepare_entries(
+                        snapshot, refreshed=True
                     )
-                    return
+                    if not all_entries or not active_entries:
+                        await _complete_without_active(
+                            snapshot,
+                            all_entries=all_entries,
+                            skipped_entries=skipped_completed_entries,
+                        )
+                        return
+
+                skipped_completed_keys = [
+                    k for e in skipped_completed_entries if (k := _today_lookup_key(e))
+                ]
 
                 await j_repo.update_job(
                     job_id,
-                    message=f"Đang kiểm tra lịch, nhận xét & SPCK B12–14 trên LMS ({len(all_entries)} lớp)...",
+                    message=f"Đang kiểm tra lịch, nhận xét & SPCK B12–14 trên LMS ({len(active_entries)} lớp)...",
                     progress=25,
                 )
                 today_candidates = [
                     _make_today_placeholder_result(entry, today=today, deferred=False)
-                    for entry in all_entries
+                    for entry in active_entries
                 ]
                 ai_reviewer = getattr(effective_external, "lms_ai_reviewer", None) or getattr(
                     effective_external, "lms_comment_reviewer", None
@@ -2236,7 +2825,7 @@ async def run_today_realtime_sync(
                 ended_missing_entries: list[dict[str, Any]] = []
                 lms_by_key: dict[str, Mapping[str, Any]] = {}
 
-                for entry, candidate in zip(all_entries, today_candidates, strict=True):
+                for entry, candidate in zip(active_entries, today_candidates, strict=True):
                     _copy_lms_fields(entry, candidate)
                     if isinstance(candidate.get("scan_target"), dict):
                         _copy_lms_fields(entry, candidate["scan_target"])
@@ -2264,10 +2853,13 @@ async def run_today_realtime_sync(
                             ended_exempt_targets,
                             applied_at=utc_iso(current_now),
                         )
-                    target_id_by_key = {
-                        row["target_key"]: int(row["id"])
-                        for row in await b_repo.list_for_job(job_id)
-                    }
+                    for row in await b_repo.list_for_job(job_id):
+                        raw_tk = str(row["target_key"])
+                        tid = int(row["id"])
+                        target_id_by_key[raw_tk] = tid
+                        target_id_by_key.setdefault(
+                            _normalized_today_target_key_str(raw_tk), tid
+                        )
 
                 await j_repo.update_job(
                     job_id,
@@ -2345,8 +2937,10 @@ async def run_today_realtime_sync(
                                 res_src = dict(res_st) if isinstance(res_st, Mapping) else res
                                 rk = canonical_target_key(res_src)
                                 rl = _today_lookup_key(res_src)
-                                tid = target_id_by_key.get(rk)
-                                if tid is not None and rl not in ended_exempt_lks:
+                                res_tid = target_id_by_key.get(rk) or (
+                                    target_id_by_key.get(rl) if rl else None
+                                )
+                                if res_tid is not None and rl not in ended_exempt_lks:
                                     ev_state = str(res.get("evidence_state") or "")
                                     ev_path, ev_sha = get_evidence_reference(res)
                                     err_code = str(res.get("error_code") or "").strip() or None
@@ -2356,7 +2950,7 @@ async def run_today_realtime_sync(
                                         else None
                                     )
                                     await b_repo.finalize_registered_scan(
-                                        tid,
+                                        res_tid,
                                         result=res,
                                         write_ready=ev_state
                                         in {"SUBMITTED_VERIFIED", "SUBMITTED_LATE_VERIFIED"},
@@ -2376,6 +2970,8 @@ async def run_today_realtime_sync(
                     ),
                     progress=75,
                 )
+                claimed_write_rows: list[dict[str, Any]] = []
+                completed_claimed_ids: set[int] = set()
                 bcnb_summary = await _run_bcnb_sync_on_session(
                     session,
                     job_id=job_id,
@@ -2393,6 +2989,10 @@ async def run_today_realtime_sync(
                     now_dt=eval_now,
                     job_repo=j_repo,
                     audit_repo=a_repo,
+                    batch_repo=b_repo if persist_batch else None,
+                    target_id_by_key=target_id_by_key,
+                    claimed_write_rows=claimed_write_rows,
+                    completed_claimed_ids=completed_claimed_ids,
                 )
 
                 if persist_batch and ended_writable_results:
@@ -2402,6 +3002,9 @@ async def run_today_realtime_sync(
                         batch_repo=b_repo,
                         results=ended_writable_results,
                         bcnb_summary=bcnb_summary,
+                        target_id_by_key=target_id_by_key,
+                        claimed_rows=claimed_write_rows,
+                        completed_claimed_ids=completed_claimed_ids,
                     )
 
                 public_bcnb_summary = (
@@ -2416,13 +3019,19 @@ async def run_today_realtime_sync(
                     if check_only
                     else ("[DRY-RUN]" if effective_mode == "dry-run" else "[PRODUCTION]")
                 )
+                skip_note = (
+                    f" Bỏ qua {len(skipped_completed_entries)} lớp đã tick đủ BCNB."
+                    if skipped_completed_entries
+                    else ""
+                )
                 summary_msg = (
-                    f"{mode_tag} Ngày {target_date_iso}: {len(all_today_items)} lớp "
+                    f"{mode_tag} {scope_label}: {len(all_today_items)} lớp "
                     f"({len(ended_writable_results)} đủ nhóm/đã tan ca, "
                     f"{len(ended_missing_results)} thiếu nhóm Zalo, "
                     f"{len(deferred_results)} chờ giờ học); "
                     f"NX Zalo: {int(public_bcnb_summary.get('updated_count') or 0)}, "
                     f"NX LMS: {int(public_bcnb_summary.get('lms_updated_count') or 0)}."
+                    f"{skip_note}"
                 )
                 if zalo_setup_notice:
                     summary_msg = f"{summary_msg} Lưu ý Zalo: {zalo_setup_notice}"
@@ -2431,6 +3040,12 @@ async def run_today_realtime_sync(
                     "selective_rescan": True,
                     "check_only": check_only,
                     "tick_lms": tick_lms,
+                    "scope": scope,
+                    "scope_week": scope_week_payload,
+                    "scope_label": scope_label,
+                    "skip_completed_bcnb": skip_completed_bcnb,
+                    "skipped_completed_count": len(skipped_completed_entries),
+                    "skipped_completed_keys": skipped_completed_keys,
                     "target_date_iso": target_date_iso,
                     "snapshot_id": snapshot.get("snapshot_id"),
                     "latest_week": latest_week,
@@ -2464,6 +3079,7 @@ async def run_today_realtime_sync(
                 {
                     "kind": "today_realtime_sync",
                     "check_only": check_only,
+                    "scope": scope,
                     "target_date_iso": target_date_iso,
                     "cancelled": True,
                 },

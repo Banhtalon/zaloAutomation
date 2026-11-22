@@ -63,6 +63,8 @@ from services.report_status import (
     ISSUE_CODE_LMS_SPCK_MISSING,
     ISSUE_CODE_LMS_SPCK_NOTE,
     ISSUE_CODE_LMS_SUMMARY_NOTE,
+    ISSUE_CODE_ZALO_REPORT_NO_DATE,
+    ISSUE_CODE_ZALO_REPORT_WRONG_DATE,
     SUBMITTED_EVIDENCE_STATES,
     VERIFIED_EVIDENCE_STATES,
     categorize_row,
@@ -1151,6 +1153,93 @@ def _collect_row_verifiable_auto_issues(
     return combined, should_sync
 
 
+_DEFERRED_COUNT_PAREN_RE = re.compile(r"\s*\(\s*\d+\s*/\s*\d+(?:\s*hs)?\s*\)")
+_ISSUE_TAG_BODY_RE = re.compile(r"^\s*\[(zalo|lms|spck)\]\s*(.+)$", flags=re.IGNORECASE)
+
+
+def _deferred_issue_family_keys(item: Any) -> set[str]:
+    """Return family keys for matching live auto issues against deferred BCNB notes."""
+    raw_txt = issue_text(item)
+    if not raw_txt:
+        return set()
+    norm_txt = normalize_auto_issue_text(raw_txt) or " ".join(str(raw_txt).split()).strip()
+    norm_key = norm_txt.casefold()
+    keys: set[str] = {f"exact:{norm_key}"}
+    prefix_key = " ".join(_DEFERRED_COUNT_PAREN_RE.sub("", norm_key).split())
+    if prefix_key:
+        keys.add(f"prefix:{prefix_key}")
+
+    code = issue_code(item)
+    tag_match = _ISSUE_TAG_BODY_RE.match(norm_txt)
+    if not tag_match:
+        return keys
+    tag = tag_match.group(1).lower()
+    folded_body = fold_text(tag_match.group(2))
+
+    if tag == "lms":
+        if folded_body.startswith(
+            ("chua nx", "chua nhan xet", "chua co nhan xet", "thieu nhan xet")
+        ):
+            keys.add("family:lms_missing_comment")
+        if (
+            "dien tom tat bai" in folded_body
+            or "chua ghi noi dung bai hoc" in folded_body
+            or code == ISSUE_CODE_LMS_SUMMARY_NOTE
+        ):
+            keys.add("family:lms_summary")
+        if (
+            "viet ky nx" in folded_body
+            or "nhan xet hs so sai" in folded_body
+            or "nhan xet so sai" in folded_body
+            or "nhan xet can xem lai" in folded_body
+            or "nhan xet buoi hoc can xem lai" in folded_body
+        ):
+            keys.add("family:lms_comment")
+        if "du khung checkpoint" in folded_body or "nhan xet checkpoint" in folded_body:
+            keys.add("family:lms_checkpoint")
+        if (
+            "kiem tra diem danh-nx" in folded_body
+            or "loi diem danh" in folded_body
+            or code == ISSUE_CODE_LMS_ATTENDANCE_CONFLICT_NOTE
+        ):
+            keys.add("family:lms_att_conflict")
+        if code == ISSUE_CODE_LMS_SPCK_MISSING:
+            keys.add("family:spck_missing")
+        elif code == ISSUE_CODE_LMS_SPCK_COMMENT_MISSING:
+            keys.add("family:spck_comment")
+        elif code == ISSUE_CODE_LMS_SPCK_NOTE:
+            keys.add("family:spck_note")
+    elif tag == "spck":
+        if code == ISSUE_CODE_LMS_SPCK_MISSING or folded_body.startswith("chua nop"):
+            keys.add("family:spck_missing")
+        elif code == ISSUE_CODE_LMS_SPCK_COMMENT_MISSING or folded_body.startswith(
+            ("chua nx", "chua co nhan xet", "chua nhan xet")
+        ):
+            keys.add("family:spck_comment")
+        elif code == ISSUE_CODE_LMS_SPCK_NOTE or folded_body.startswith("bo sung"):
+            keys.add("family:spck_note")
+    elif tag == "zalo":
+        if (
+            code == ISSUE_CODE_ZALO_REPORT_NO_DATE
+            or "thieu ngay/buoi" in folded_body
+            or "bao cao khong ghi ngay/buoi" in folded_body
+            or folded_body == "thieu ngay"
+        ):
+            keys.add("family:zalo_no_date")
+        if (
+            code == ISSUE_CODE_ZALO_REPORT_WRONG_DATE
+            or "sai ngay (" in folded_body
+            or "ghi sai ngay" in folded_body
+        ):
+            keys.add("family:zalo_wrong_date")
+        if "sai so buoi" in folded_body or "ghi sai buoi" in folded_body:
+            keys.add("family:zalo_wrong_lesson")
+        if "sai ngay/buoi" in folded_body:
+            keys.add("family:zalo_wrong_date_lesson")
+        if "lech ten bai voi lms" in folded_body:
+            keys.add("family:zalo_title_mismatch")
+    return keys
+
 
 async def update_bcnb_reports(
     page,
@@ -1175,6 +1264,7 @@ async def update_bcnb_reports(
     tick_lms: bool = False,
     check_only: bool = False,
     defer_unexpired_checker_notes: bool = False,
+    defer_all_new_checker_notes: bool = False,
 ) -> dict[str, Any]:
     """Update both bounded weeks with exact-row matching and server read-back."""
     await job_repo.ensure_not_cancelled(job_id)
@@ -1453,46 +1543,90 @@ async def update_bcnb_reports(
         )
         if not should_sync:
             return lms_used_page
-        if defer_unexpired_checker_notes:
-            zalo_expired = _is_bcnb_deadline_expired(
-                bcnb_row.get("zalo_deadline"), now_dt=current_time
-            )
-            lms_expired = _is_bcnb_deadline_expired(
-                bcnb_row.get("lms_deadline") or bcnb_row.get("zalo_deadline"),
-                now_dt=current_time,
-            )
+        if defer_all_new_checker_notes or defer_unexpired_checker_notes:
+            if defer_all_new_checker_notes:
+                zalo_expired = False
+                lms_expired = False
+            else:
+                zalo_expired = _is_bcnb_deadline_expired(
+                    bcnb_row.get("zalo_deadline"), now_dt=current_time
+                )
+                lms_expired = _is_bcnb_deadline_expired(
+                    bcnb_row.get("lms_deadline") or bcnb_row.get("zalo_deadline"),
+                    now_dt=current_time,
+                )
             if not zalo_expired or not lms_expired:
                 _, existing_auto = split_checker_issue_note(
                     existing_note,
                     proven_auto_issues=proven_auto_issues,
                 )
-                existing_norm_keys = {
-                    normalize_auto_issue_text(issue_text(item)).casefold()
-                    for item in existing_auto
+
+                def _is_deferred_issue_text(text_val: str) -> bool:
+                    norm_u = (normalize_auto_issue_text(text_val) or text_val).upper()
+                    if norm_u.startswith("[ZALO]"):
+                        return not zalo_expired
+                    if norm_u.startswith(("[LMS]", "[SPCK]")):
+                        return not lms_expired
+                    return bool(defer_all_new_checker_notes)
+
+                effective_family_keys: set[str] = set()
+                for item in effective_auto:
+                    effective_family_keys.update(_deferred_issue_family_keys(item))
+
+                non_deferred_effective = [
+                    item
+                    for item in effective_auto
+                    if not _is_deferred_issue_text(issue_text(item))
+                ]
+                non_deferred_norm_keys = {
+                    (normalize_auto_issue_text(issue_text(item)) or issue_text(item)).casefold()
+                    for item in non_deferred_effective
                     if issue_text(item)
                 }
+
                 filtered_auto: list[Any] = []
-                for item in effective_auto:
-                    raw_item_txt = issue_text(item)
-                    norm_txt = normalize_auto_issue_text(raw_item_txt) or raw_item_txt
-                    norm_upper = norm_txt.upper()
-                    norm_key = norm_txt.casefold()
-                    if norm_upper.startswith("[ZALO]") and not zalo_expired:
-                        if norm_key in existing_norm_keys:
-                            filtered_auto.append(item)
-                    elif norm_upper.startswith(("[LMS]", "[SPCK]")) and not lms_expired:
-                        if norm_key in existing_norm_keys:
-                            filtered_auto.append(item)
-                    else:
+                seen_filtered_norm: set[str] = set()
+                for ex in existing_auto:
+                    ex_txt = issue_text(ex)
+                    if not ex_txt:
+                        continue
+                    ex_norm = (normalize_auto_issue_text(ex_txt) or ex_txt).casefold()
+                    if ex_norm in seen_filtered_norm:
+                        continue
+                    if _is_deferred_issue_text(ex_txt):
+                        if _deferred_issue_family_keys(ex) & effective_family_keys:
+                            filtered_auto.append(ex)
+                            seen_filtered_norm.add(ex_norm)
+                    elif ex_norm in non_deferred_norm_keys:
+                        filtered_auto.append(ex)
+                        seen_filtered_norm.add(ex_norm)
+
+                for item in non_deferred_effective:
+                    item_txt = issue_text(item)
+                    if not item_txt:
+                        continue
+                    item_norm = (normalize_auto_issue_text(item_txt) or item_txt).casefold()
+                    if item_norm not in seen_filtered_norm:
                         filtered_auto.append(item)
+                        seen_filtered_norm.add(item_norm)
+
                 candidate_merged = merge_checker_issue_note(
                     existing_note,
                     filtered_auto,
                     proven_auto_issues=proven_auto_issues,
                 )
                 if candidate_merged == preserve_bcnb_note_text(existing_note):
-                    if len(filtered_auto) < len(effective_auto):
-                        target_result["checker_note_outcome"] = "DEFERRED_BEFORE_DEADLINE"
+                    effective_norm_set = {
+                        (normalize_auto_issue_text(issue_text(item)) or issue_text(item)).casefold()
+                        for item in effective_auto
+                        if issue_text(item)
+                    }
+                    if seen_filtered_norm != effective_norm_set:
+                        target_result["checker_note_outcome"] = (
+                            "DEFERRED_FOR_FULL_SCAN"
+                            if defer_all_new_checker_notes
+                            else "DEFERRED_BEFORE_DEADLINE"
+                        )
                     return lms_used_page
                 effective_auto = filtered_auto
         if not has_readable_note:

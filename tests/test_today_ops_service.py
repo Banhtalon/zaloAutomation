@@ -10,19 +10,23 @@ import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from core.time_utils import BUSINESS_TIMEZONE
-from db.database import database_context, init_db
+from db.database import database_context, get_db_connection, init_db
 from repositories.audit_repository import AuditRepository
 from repositories.evidence_repository import EvidenceRepository
 from repositories.group_repository import GroupRepository
-from repositories.job_repository import JobRepository
+from repositories.job_repository import JobCancelledError, JobRepository
 from repositories.report_repository import ReportRepository
 from repositories.zalo_batch_repository import ZaloBatchRepository, canonical_target_key
 from services.external_gateways import ExternalGateways
 from services.runtime import WorkerRuntime
 from services.today_ops_service import (
+    _collect_today_entries_from_snapshot,
+    _merge_entry_with_overlay,
+    _persist_batch_write_outcomes,
     _scan_ended_zalo_targets,
     build_today_overview,
     parse_target_date_iso,
+    parse_today_scope,
     run_today_realtime_sync,
 )
 from services.zalo_bcnb_service import update_bcnb_reports
@@ -3077,3 +3081,1640 @@ class TodayOpsServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(_is_bcnb_deadline_expired("", now_dt=ref))
         self.assertFalse(_is_bcnb_deadline_expired("—", now_dt=ref))
         self.assertTrue(_is_bcnb_deadline_expired("hết hạn", now_dt=ref))
+
+    async def test_defer_all_new_checker_notes_defers_expired_faults_clears_fixed_and_preserves_manual(
+        self,
+    ) -> None:
+        now_dt = datetime(2026, 11, 22, 15, 0, tzinfo=BUSINESS_TIMEZONE)
+        today = now_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+        page = MagicMock()
+
+        # Row A: Expired >48h ago (13/11), has new [Zalo], [LMS], and [SPCK] issues + manual note.
+        # defer_all_new_checker_notes=True must NOT write new issues and must set DEFERRED_FOR_FULL_SCAN.
+        overdue_new_fault_res = {
+            "group": "MindX - VT-OVERDUE1 (18:00-20:00)",
+            "status": "❌ Chưa báo cáo",
+            "evidence_state": "NOT_FOUND_VERIFIED",
+            "submitted_for_bcnb": False,
+            "zalo_content_issues": [
+                {"code": "ZALO_MISSING_FAIL", "severity": "FAIL", "text": "[Zalo] Chưa gửi báo cáo"}
+            ],
+            "lms_attendance": {"status": "MISSING_ATTENDANCE", "unverified_count": 0, "attended_count": 0},
+            "lms_comments": {"status": "MISSING_ATTENDANCE", "submitted_count": 0},
+            "lms_spck": {"status": "MISSING", "submitted_count": 0},
+            "lms_quality_issues": [
+                {"code": "LMS_QUALITY_FAIL", "severity": "FAIL", "text": "[LMS] Chưa điểm danh"},
+                {"code": "LMS_SPCK_MISSING", "severity": "FAIL", "text": "[SPCK] Chưa nộp (0/5)"},
+            ],
+            "scan_target": {
+                "week": 47,
+                "year": 2026,
+                "class_code": "VT-OVERDUE1",
+                "lesson": "12",
+                "class_date": "16/11/2026",
+                "class_date_iso": "2026-11-16",
+                "bcnb_session_id": "sess-od-1",
+            },
+            "evidence": {
+                "date_context": {
+                    "target_week": 47,
+                    "target_year": 2026,
+                    "target_class_code": "VT-OVERDUE1",
+                    "target_lesson": "12",
+                    "target_class_date": "2026-11-16",
+                },
+                "classifier_result": {},
+                "images": {},
+            },
+        }
+        # Row B: Expired >48h ago, teacher fixed LMS + submitted Zalo; obsolete proven auto note must clear while keeping manual note.
+        fixed_cleared_res = {
+            "group": "MindX - VT-FIXED1 (18:00-20:00)",
+            "status": "✅ Đã báo cáo",
+            "evidence_state": "SUBMITTED_VERIFIED",
+            "submitted_for_bcnb": True,
+            "delay_days": 0,
+            "lms_attendance": {"status": "VERIFIED", "unverified_count": 0, "attended_count": 5},
+            "lms_comments": {"status": "COMPLETE", "submitted_count": 5},
+            "lms_spck": {"status": "NOT_REQUIRED"},
+            "scan_target": {
+                "week": 47,
+                "year": 2026,
+                "class_code": "VT-FIXED1",
+                "lesson": "5",
+                "class_date": "16/11/2026",
+                "class_date_iso": "2026-11-16",
+                "bcnb_session_id": "sess-fx-1",
+            },
+            "evidence": {
+                "date_context": {
+                    "target_week": 47,
+                    "target_year": 2026,
+                    "target_class_code": "VT-FIXED1",
+                    "target_lesson": "5",
+                    "target_class_date": "2026-11-16",
+                },
+                "classifier_result": {"matched_ui_sent_at": "16/11/2026"},
+                "images": {"proof": {"path": "/api/evidence/1/fx.png", "sha256": "FXSHA"}},
+            },
+        }
+        # Row C: Expired >48h ago, teacher fixed old proven LMS issue, but has a NEW Zalo missing fault.
+        # Must clear old LMS issue, keep manual note byte-for-byte, and NEVER write the new Zalo issue.
+        mixed_clear_defer_res = {
+            "group": "MindX - VT-MIXED1 (18:00-20:00)",
+            "status": "❌ Chưa báo cáo",
+            "evidence_state": "NOT_FOUND_VERIFIED",
+            "submitted_for_bcnb": False,
+            "zalo_content_issues": [
+                {"code": "ZALO_MISSING_FAIL", "severity": "FAIL", "text": "[Zalo] Chưa gửi báo cáo"}
+            ],
+            "lms_attendance": {"status": "VERIFIED", "unverified_count": 0, "attended_count": 4},
+            "lms_comments": {"status": "COMPLETE", "submitted_count": 4},
+            "lms_spck": {"status": "NOT_REQUIRED"},
+            "scan_target": {
+                "week": 47,
+                "year": 2026,
+                "class_code": "VT-MIXED1",
+                "lesson": "4",
+                "class_date": "16/11/2026",
+                "class_date_iso": "2026-11-16",
+                "bcnb_session_id": "sess-mx-1",
+            },
+            "evidence": {
+                "date_context": {
+                    "target_week": 47,
+                    "target_year": 2026,
+                    "target_class_code": "VT-MIXED1",
+                    "target_lesson": "4",
+                    "target_class_date": "2026-11-16",
+                },
+                "classifier_result": {},
+                "images": {},
+            },
+        }
+
+        row_od = _make_fake_bcnb_row(
+            class_code="VT-OVERDUE1",
+            lesson="12",
+            date_str="16/11/2026",
+            date_iso="2026-11-16",
+            session_id="sess-od-1",
+            zalo_deadline="20:00 18/11/2026\nhết hạn",
+            lms_deadline="20:00 18/11/2026\nhết hạn",
+        )
+        row_od["qc_issue_note"] = "QC: Học viên xin phép"
+        row_fx = _make_fake_bcnb_row(
+            class_code="VT-FIXED1",
+            lesson="5",
+            date_str="16/11/2026",
+            date_iso="2026-11-16",
+            session_id="sess-fx-1",
+            zalo_deadline="20:00 18/11/2026\nhết hạn",
+            lms_deadline="20:00 18/11/2026\nhết hạn",
+        )
+        row_fx["qc_issue_note"] = "QC: Ghi chú tay | [LMS] Chưa điểm danh"
+        row_mx = _make_fake_bcnb_row(
+            class_code="VT-MIXED1",
+            lesson="4",
+            date_str="16/11/2026",
+            date_iso="2026-11-16",
+            session_id="sess-mx-1",
+            zalo_deadline="20:00 18/11/2026\nhết hạn",
+            lms_deadline="20:00 18/11/2026\nhết hạn",
+        )
+        row_mx["qc_issue_note"] = "QC: Giữ nguyên | [LMS] Chưa điểm danh"
+
+        seed_job_id = await self.job_repo.create_job("ZALO_SCAN", {"execution_mode": "production"})
+        for code, lesson, sid, note in (
+            ("VT-FIXED1", "5", "sess-fx-1", "QC: Ghi chú tay | [LMS] Chưa điểm danh"),
+            ("VT-MIXED1", "4", "sess-mx-1", "QC: Giữ nguyên | [LMS] Chưa điểm danh"),
+        ):
+            arow, _ = await self.audit_repo.record_intent(
+                action_key=f"seed-prev-{code}",
+                job_id=seed_job_id,
+                action_type="BCNB_UPDATE_CHECKER_NOTE",
+                target_type="CLASS",
+                target_id=code,
+                mode="production",
+                before_state={"qc_issue_note": ""},
+                intended_state={"qc_issue_note": note},
+                reason={
+                    "week": 47,
+                    "year": 2026,
+                    "lesson": lesson,
+                    "class_date": "2026-11-16",
+                    "bcnb_session_id": sid,
+                    "auto_issues": ["[LMS] Chưa điểm danh"],
+                    "merged_note": note,
+                },
+            )
+            await self.audit_repo.complete_action(
+                arow["id"],
+                outcome="VERIFIED",
+                after_state={"qc_issue_note": note, "post_verified": True},
+            )
+
+        async def _read_by_week(_page, *, week, **_kwargs):
+            return [row_od, row_fx, row_mx] if int(week) == 47 else []
+
+        tick_mock = AsyncMock(return_value="VERIFIED")
+        note_mock = AsyncMock(return_value="VERIFIED")
+        scan_plan = {
+            "latest_week": {"week": 47, "year": 2026},
+            "required_week": {"week": 46, "year": 2026},
+            "selected_weeks": [{"week": 46, "year": 2026}, {"week": 47, "year": 2026}],
+            "targets": [
+                overdue_new_fault_res["scan_target"],
+                fixed_cleared_res["scan_target"],
+                mixed_clear_defer_res["scan_target"],
+            ],
+        }
+        with (
+            patch("services.zalo_bcnb_service._read_bcnb_schedule_rows", AsyncMock(side_effect=_read_by_week)),
+            patch("services.zalo_bcnb_service.resolve_report_columns", AsyncMock(return_value=(3, 4, 5))),
+            patch("services.zalo_bcnb_service.resolve_lms_columns", AsyncMock(return_value=(0, 6))),
+            patch("services.zalo_bcnb_service.execute_verified_checkbox_action", tick_mock),
+            patch("services.zalo_bcnb_service.execute_verified_checker_note_action", note_mock),
+            patch(
+                "services.zalo_bcnb_service.fetch_and_evaluate_lms_quality",
+                AsyncMock(return_value={"VT-OVERDUE1": [{}], "VT-FIXED1": [{}], "VT-MIXED1": [{}]}),
+            ),
+            patch("services.zalo_bcnb_service.inspect_and_attach_quality_issues_async", AsyncMock()),
+        ):
+            summary = await update_bcnb_reports(
+                page,
+                job_id=955,
+                execution_mode="production",
+                scan_results=[overdue_new_fault_res, fixed_cleared_res, mixed_clear_defer_res],
+                today=today,
+                now=now_dt,
+                scan_plan=scan_plan,
+                job_repo=self.job_repo,
+                audit_repo=self.audit_repo,
+                tick_lms=True,
+                check_only=False,
+                defer_unexpired_checker_notes=True,
+                defer_all_new_checker_notes=True,
+            )
+
+        self.assertEqual(summary["updated_count"], 1)
+        self.assertEqual(summary["lms_updated_count"], 2)
+        self.assertEqual(overdue_new_fault_res.get("checker_note_outcome"), "DEFERRED_FOR_FULL_SCAN")
+        note_calls = {c.kwargs["class_code"]: c.kwargs for c in note_mock.await_args_list}
+        self.assertNotIn("VT-OVERDUE1", note_calls)
+        self.assertEqual(note_calls["VT-FIXED1"]["auto_issues"], [])
+        self.assertEqual(note_calls["VT-FIXED1"]["reason"]["merged_note"], "QC: Ghi chú tay")
+        self.assertEqual(note_calls["VT-MIXED1"]["auto_issues"], [])
+        self.assertEqual(note_calls["VT-MIXED1"]["reason"]["merged_note"], "QC: Giữ nguyên")
+
+        # Default (defer_all_new_checker_notes=False) STILL writes expired issues for full ZALO_SCAN
+        note_mock_default = AsyncMock(return_value="VERIFIED")
+        overdue_default_res = json.loads(json.dumps(overdue_new_fault_res))
+        with (
+            patch("services.zalo_bcnb_service._read_bcnb_schedule_rows", AsyncMock(side_effect=_read_by_week)),
+            patch("services.zalo_bcnb_service.resolve_report_columns", AsyncMock(return_value=(3, 4, 5))),
+            patch("services.zalo_bcnb_service.resolve_lms_columns", AsyncMock(return_value=(0, 6))),
+            patch("services.zalo_bcnb_service.execute_verified_checkbox_action", AsyncMock(return_value="VERIFIED")),
+            patch("services.zalo_bcnb_service.execute_verified_checker_note_action", note_mock_default),
+            patch("services.zalo_bcnb_service.fetch_and_evaluate_lms_quality", AsyncMock(return_value={"VT-OVERDUE1": [{}]})),
+            patch("services.zalo_bcnb_service.inspect_and_attach_quality_issues_async", AsyncMock()),
+        ):
+            await update_bcnb_reports(
+                page,
+                job_id=956,
+                execution_mode="production",
+                scan_results=[overdue_default_res],
+                today=today,
+                now=now_dt,
+                scan_plan=scan_plan,
+                job_repo=self.job_repo,
+                audit_repo=self.audit_repo,
+                tick_lms=False,
+                check_only=False,
+                defer_unexpired_checker_notes=True,
+                defer_all_new_checker_notes=False,
+            )
+        default_calls = {c.kwargs["class_code"]: c.kwargs for c in note_mock_default.await_args_list}
+        self.assertIn("VT-OVERDUE1", default_calls)
+        self.assertEqual(len(default_calls["VT-OVERDUE1"]["auto_issues"]), 3)
+
+    async def test_run_today_realtime_sync_persists_per_row_complete_write_before_mid_run_cancel(
+        self,
+    ) -> None:
+        snap = _make_two_week_snapshot()
+        # Both VT-PTA01 and VT-PTB01 are ended at 15:00 on 2026-11-14
+        await self.group_repo.apply_discovery_snapshot(snap)
+        job_id = await self.job_repo.create_job(
+            "TODAY_REALTIME_SYNC",
+            {
+                "execution_mode": "production",
+                "check_only": False,
+                "tick_lms": True,
+                "refresh_discovery_if_stale": False,
+                "target_date_iso": "2026-11-14",
+            },
+            mutates_external=True,
+        )
+        runtime = WorkerRuntime(evidence_root=self.evidence_root)
+        gateways = ExternalGateways.production()
+
+        class _FakeSess:
+            landing_facts_provider = None
+
+        @asynccontextmanager
+        async def _fake_session():
+            yield _FakeSess()
+
+        gateways.browser.persistent_session = _fake_session
+
+        async def _fake_prefetch(_page, *, today_candidates, **_kwargs):
+            for c in today_candidates:
+                c["lms_attendance"] = {"status": "VERIFIED", "unverified_count": 0, "attended_count": 5}
+                c["lms_comments"] = {"status": "COMPLETE", "submitted_count": 5}
+                c["lms_spck"] = {"status": "COMPLETE", "submitted_count": 5, "missing_comment_count": 0}
+            return {"VT-PTA01": [{}], "VT-PTB01": [{}]}
+
+        async def _fake_scan_one(_page, *, job_id: int, target: dict, screenshots_dir: str, **_kw):
+            shot_file = Path(screenshots_dir) / f"{target['class_code']}.png"
+            shot_bytes = b"\x89PNG\r\n\x1a\nfake"
+            shot_file.write_bytes(shot_bytes)
+            shot_sha = hashlib.sha256(shot_bytes).hexdigest()
+            return {
+                "group": target["group_name"],
+                "person": target.get("person") or "GV",
+                "status": "✅ Đã báo cáo",
+                "evidence_state": "SUBMITTED_VERIFIED",
+                "submitted_for_bcnb": True,
+                "delay_days": 0,
+                "scan_target": dict(target),
+                "evidence": {
+                    "date_context": {
+                        "target_week": target["week"],
+                        "target_year": target["year"],
+                        "target_class_code": target["class_code"],
+                        "target_lesson": target["lesson"],
+                        "target_class_date": target["class_date_iso"],
+                    },
+                    "classifier_result": {"matched_ui_sent_at": "14/11/2026"},
+                    "images": {
+                        "proof": {
+                            "path": f"/api/evidence/{job_id}/{target['class_code']}.png",
+                            "stored_path": str(shot_file),
+                            "sha256": shot_sha,
+                        }
+                    },
+                },
+            }
+
+        row_pta = _make_fake_bcnb_row(
+            class_code="VT-PTA01",
+            lesson="12",
+            date_str="14/11/2026",
+            date_iso="2026-11-14",
+            session_id="sess-45-pta",
+        )
+        row_ptb = _make_fake_bcnb_row(
+            class_code="VT-PTB01",
+            lesson="13",
+            date_str="14/11/2026",
+            date_iso="2026-11-14",
+            session_id="sess-46-ptb",
+        )
+
+        async def _read_by_week(_page, *, week, **_kwargs):
+            return [row_pta] if int(week) == 45 else [row_ptb]
+
+        async def _tick_then_cancel(**kwargs):
+            if kwargs.get("class_code") == "VT-PTB01":
+                raise JobCancelledError("Cancelled on second row")
+            return "VERIFIED"
+
+        fake_page = MagicMock()
+        fake_page.goto = AsyncMock()
+        now_dt = datetime(2026, 11, 14, 15, 0, tzinfo=BUSINESS_TIMEZONE)
+        with (
+            patch("services.today_ops_service._create_production_backup", AsyncMock()),
+            patch("services.today_ops_service._new_scan_page", AsyncMock(return_value=fake_page)),
+            patch("services.today_ops_service._close_scan_page", AsyncMock()),
+            patch("services.today_ops_service._setup_scan_page", AsyncMock(return_value={"decision": "SYNC_VERIFIED", "verified": True})),
+            patch("services.today_ops_service._scan_one_target", AsyncMock(side_effect=_fake_scan_one)),
+            patch("services.today_ops_service._login_bcnb_if_needed", AsyncMock()),
+            patch("services.today_ops_service._prefetch_lms_for_today", AsyncMock(side_effect=_fake_prefetch)),
+            patch("services.today_ops_service.inspect_and_attach_quality_issues_async", AsyncMock()),
+            patch("services.zalo_bcnb_service.select_week_checked", AsyncMock()),
+            patch("services.zalo_bcnb_service._read_bcnb_schedule_rows", AsyncMock(side_effect=_read_by_week)),
+            patch("services.zalo_bcnb_service.resolve_report_columns", AsyncMock(return_value=(3, 4, 5))),
+            patch("services.zalo_bcnb_service.resolve_lms_columns", AsyncMock(return_value=(0, 6))),
+            patch("services.zalo_bcnb_service.execute_verified_checkbox_action", AsyncMock(side_effect=_tick_then_cancel)),
+            patch("services.zalo_bcnb_service.execute_verified_checker_note_action", AsyncMock(return_value="NO_CHANGE")),
+            patch("services.zalo_bcnb_service.fetch_and_evaluate_lms_quality", AsyncMock(return_value={"VT-PTA01": [{}], "VT-PTB01": [{}]})),
+            patch("services.zalo_bcnb_service.inspect_and_attach_quality_issues_async", AsyncMock()),
+            patch("services.today_ops_service.Config.BCNB_URL", "https://bcnb.example.invalid"),
+        ):
+            await run_today_realtime_sync(
+                job_id,
+                {"target_date_iso": "2026-11-14", "check_only": False, "tick_lms": True},
+                "production",
+                runtime=runtime,
+                external=gateways,
+                job_repo=self.job_repo,
+                group_repo=self.group_repo,
+                audit_repo=self.audit_repo,
+                evidence_repo=self.evidence_repo,
+                batch_repo=self.batch_repo,
+                now_override=now_dt,
+            )
+
+        job = await self.job_repo.get_job(job_id)
+        self.assertEqual(job["status"], "CANCELLED")
+        persisted = {r["class_code"]: r for r in await self.batch_repo.list_for_job(job_id)}
+        self.assertEqual(persisted["VT-PTA01"]["write_status"], "VERIFIED")
+        self.assertTrue((persisted["VT-PTA01"]["result"] or {}).get("nx_zalo_checked"))
+        self.assertEqual(persisted["VT-PTB01"]["write_status"], "OUTCOME_UNKNOWN")
+
+    async def test_parse_today_scope_and_build_today_overview_current_week_multiday(
+        self,
+    ) -> None:
+        self.assertEqual(parse_today_scope(None), "date")
+        self.assertEqual(parse_today_scope(""), "date")
+        self.assertEqual(parse_today_scope("date"), "date")
+        self.assertEqual(parse_today_scope("current_week"), "current_week")
+        with self.assertRaises(ValueError):
+            parse_today_scope("invalid_scope")
+
+        snap = {
+            "version": 4,
+            "reliable": True,
+            "discovered_groups": [
+                {"TenNhom": "MindX - VT-MON01 (18:00-20:00)", "MaLop": "VT-MON01", "CohortKey": "K1"},
+                {"TenNhom": "MindX - VT-WED02 (18:00-20:00)", "MaLop": "VT-WED02", "CohortKey": "K2"},
+                {"TenNhom": "MindX - VT-SUN04 (18:00-20:00)", "MaLop": "VT-SUN04", "CohortKey": "K4"},
+            ],
+            "source_group_names": [
+                "MindX - VT-MON01 (18:00-20:00)",
+                "MindX - VT-WED02 (18:00-20:00)",
+                "MindX - VT-SUN04 (18:00-20:00)",
+            ],
+            "expected_count": 3,
+            "bcnb_week_plan": {
+                "latest_week": {"week": 47, "year": 2026},
+                "required_week": {"week": 46, "year": 2026},
+                "selected_weeks": [{"week": 46, "year": 2026}, {"week": 47, "year": 2026}],
+                "required_data": [
+                    {
+                        "ma_lop": "VT-OLD46",
+                        "buoi_so": "9",
+                        "ngay_hoc": "22/11/2026",
+                        "ngay_hoc_iso": "2026-11-22",
+                        "giao_vien": "GV Old",
+                        "khoi": "Coding",
+                        "bcnb_session_id": "sess-46-old",
+                    }
+                ],
+                "latest_data": [
+                    {
+                        "ma_lop": "VT-MON01",
+                        "buoi_so": "1",
+                        "ngay_hoc": "16/11/2026",
+                        "ngay_hoc_iso": "2026-11-16",
+                        "giao_vien": "GV Mon",
+                        "khoi": "Coding",
+                        "bcnb_session_id": "sess-47-mon",
+                        "nx_zalo_checked": True,
+                        "nx_lms_checked": True,
+                    },
+                    {
+                        "ma_lop": "VT-WED02",
+                        "buoi_so": "2",
+                        "ngay_hoc": "18/11/2026",
+                        "ngay_hoc_iso": "2026-11-18",
+                        "giao_vien": "GV Wed",
+                        "khoi": "Coding",
+                        "bcnb_session_id": "sess-47-wed",
+                        "nx_zalo_checked": True,
+                        "nx_lms_checked": False,
+                    },
+                    {
+                        "ma_lop": "VT-SAT03",
+                        "buoi_so": "3",
+                        "ngay_hoc": "21/11/2026",
+                        "ngay_hoc_iso": "2026-11-21",
+                        "giao_vien": "GV Sat",
+                        "khoi": "Robotics",
+                        "bcnb_session_id": "sess-47-sat",
+                        "nx_zalo_checked": False,
+                        "nx_lms_checked": False,
+                    },
+                    {
+                        "ma_lop": "VT-SUN04",
+                        "buoi_so": "4",
+                        "ngay_hoc": "22/11/2026",
+                        "ngay_hoc_iso": "2026-11-22",
+                        "giao_vien": "GV Sun",
+                        "khoi": "Coding",
+                        "bcnb_session_id": "sess-47-sun",
+                        "nx_zalo_checked": False,
+                        "nx_lms_checked": False,
+                    },
+                ],
+            },
+            "scan_targets": [
+                {
+                    "group_name": "MindX - VT-MON01 (18:00-20:00)",
+                    "person": "GV Mon",
+                    "class_code": "VT-MON01",
+                    "lesson": "1",
+                    "class_date": "16/11/2026",
+                    "class_date_iso": "2026-11-16",
+                    "week": 47,
+                    "year": 2026,
+                    "khoi": "Coding",
+                    "bcnb_session_id": "sess-47-mon",
+                    "nx_zalo_checked": True,
+                    "nx_lms_checked": True,
+                },
+                {
+                    "group_name": "MindX - VT-WED02 (18:00-20:00)",
+                    "person": "GV Wed",
+                    "class_code": "VT-WED02",
+                    "lesson": "2",
+                    "class_date": "18/11/2026",
+                    "class_date_iso": "2026-11-18",
+                    "week": 47,
+                    "year": 2026,
+                    "khoi": "Coding",
+                    "bcnb_session_id": "sess-47-wed",
+                    "nx_zalo_checked": True,
+                    "nx_lms_checked": False,
+                },
+            ],
+            "deferred_targets": [
+                {
+                    "group_name": "MindX - VT-SUN04 (18:00-20:00)",
+                    "person": "GV Sun",
+                    "class_code": "VT-SUN04",
+                    "lesson": "4",
+                    "class_date": "22/11/2026",
+                    "class_date_iso": "2026-11-22",
+                    "week": 47,
+                    "year": 2026,
+                    "khoi": "Coding",
+                    "bcnb_session_id": "sess-47-sun",
+                    "nx_zalo_checked": False,
+                    "nx_lms_checked": False,
+                }
+            ],
+            "exempt_targets": [],
+        }
+        await self.group_repo.apply_discovery_snapshot(snap)
+
+        week_job_id = await self.job_repo.create_job(
+            "TODAY_REALTIME_SYNC",
+            {
+                "scope": "current_week",
+                "target_date_iso": "2026-11-22",
+                "check_only": True,
+                "execution_mode": "dry-run",
+            },
+        )
+        await self.job_repo.update_job(week_job_id, status="RUNNING", progress=10)
+        await self.job_repo.update_job(
+            week_job_id,
+            status="SUCCESS",
+            progress=100,
+            results=json.dumps(
+                {
+                    "kind": "today_realtime_sync",
+                    "scope": "current_week",
+                    "scope_week": {"week": 47, "year": 2026},
+                    "check_only": True,
+                    "target_date_iso": "2026-11-22",
+                    "today_items": [
+                        {
+                            "group": "MindX - VT-MON01 (18:00-20:00)",
+                            "status": "✅ Đã báo cáo",
+                            "evidence_state": "SUBMITTED_VERIFIED",
+                            "nx_zalo_checked": True,
+                            "nx_lms_checked": True,
+                            "scan_target": {
+                                "week": 47,
+                                "year": 2026,
+                                "class_code": "VT-MON01",
+                                "lesson": "1",
+                                "class_date_iso": "2026-11-16",
+                                "bcnb_session_id": "sess-47-mon",
+                            },
+                            "evidence": {
+                                "images": {
+                                    "proof": {"path": f"/api/evidence/{week_job_id}/mon.png", "sha256": "MON"}
+                                }
+                            },
+                        },
+                        {
+                            "group": "MindX - VT-WED02 (18:00-20:00)",
+                            "skipped_already_completed": True,
+                            "evidence_state": "NOT_SCANNED",
+                            "scan_target": {
+                                "week": 47,
+                                "year": 2026,
+                                "class_code": "VT-WED02",
+                                "lesson": "2",
+                                "class_date_iso": "2026-11-18",
+                                "bcnb_session_id": "sess-47-wed",
+                            },
+                        },
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+        )
+
+        # A date-mode job should match date banner, while week_job_id matches current_week banner
+        date_job_id = await self.job_repo.create_job(
+            "TODAY_REALTIME_SYNC",
+            {"scope": "date", "target_date_iso": "2026-11-22", "check_only": True, "execution_mode": "dry-run"},
+        )
+        await self.job_repo.update_job(date_job_id, status="RUNNING", progress=10)
+        await self.job_repo.update_job(
+            date_job_id,
+            status="SUCCESS",
+            progress=100,
+            results=json.dumps(
+                {
+                    "kind": "today_realtime_sync",
+                    "scope": "date",
+                    "check_only": True,
+                    "target_date_iso": "2026-11-22",
+                    "today_items": [],
+                },
+                ensure_ascii=False,
+            ),
+        )
+
+        fake_container = MagicMock()
+        fake_container.settings.bcnb_dry_run = True
+        fake_container.settings.zalo_plan_max_age_minutes = 30
+        fake_container.group_repo = self.group_repo
+
+        now_sun = datetime(2026, 11, 22, 15, 0, tzinfo=BUSINESS_TIMEZONE)
+        week_overview = await build_today_overview(
+            fake_container,
+            target_date_iso="2026-11-22",
+            scope="current_week",
+            now=now_sun,
+        )
+        self.assertEqual(week_overview["scope"], "current_week")
+        self.assertEqual(week_overview["scope_week"], {"week": 47, "year": 2026})
+        self.assertEqual(week_overview["scope_label"], "Tuần thực tế W47/2026")
+        self.assertEqual(week_overview["latest_sync_job"]["job_id"], week_job_id)
+
+        items = week_overview["items"]
+        self.assertEqual(
+            [it["class_code"] for it in items],
+            ["VT-MON01", "VT-WED02", "VT-SAT03", "VT-SUN04"],
+        )
+        self.assertEqual(
+            [it["class_date_iso"] for it in items],
+            ["2026-11-16", "2026-11-18", "2026-11-21", "2026-11-22"],
+        )
+        self.assertTrue(items[0]["bcnb_completed_both"])
+        self.assertEqual(items[0]["screenshot_url"], f"/api/evidence/{week_job_id}/mon.png")
+        self.assertFalse(items[1]["bcnb_completed_both"])
+        self.assertEqual(items[1]["zalo_category"], "not_scanned")  # skipped_already_completed item ignored
+        self.assertTrue(items[2]["missing_zalo_group"])
+        self.assertEqual(items[3]["phase"], "UPCOMING")
+        self.assertEqual(week_overview["kpis"]["bcnb_pending"]["completed_both_count"], 1)
+
+        date_overview = await build_today_overview(
+            fake_container,
+            target_date_iso="2026-11-22",
+            scope="date",
+            now=now_sun,
+        )
+        self.assertEqual(date_overview["scope"], "date")
+        self.assertEqual(date_overview["scope_label"], "Ngày 2026-11-22")
+        self.assertEqual(date_overview["latest_sync_job"]["job_id"], date_job_id)
+        self.assertEqual({it["class_code"] for it in date_overview["items"]}, {"VT-OLD46", "VT-SUN04"})
+
+    async def test_run_today_realtime_sync_current_week_skip_completed_and_selected_override(
+        self,
+    ) -> None:
+        snap = {
+            "version": 4,
+            "reliable": True,
+            "discovered_groups": [
+                {"TenNhom": "MindX - VT-MON01 (18:00-20:00)", "MaLop": "VT-MON01", "CohortKey": "K1"},
+                {"TenNhom": "MindX - VT-WED02 (18:00-20:00)", "MaLop": "VT-WED02", "CohortKey": "K2"},
+                {"TenNhom": "MindX - VT-SUN04 (18:00-20:00)", "MaLop": "VT-SUN04", "CohortKey": "K4"},
+            ],
+            "source_group_names": [
+                "MindX - VT-MON01 (18:00-20:00)",
+                "MindX - VT-WED02 (18:00-20:00)",
+                "MindX - VT-SUN04 (18:00-20:00)",
+            ],
+            "expected_count": 3,
+            "bcnb_week_plan": {
+                "latest_week": {"week": 47, "year": 2026},
+                "required_week": {"week": 46, "year": 2026},
+                "selected_weeks": [{"week": 46, "year": 2026}, {"week": 47, "year": 2026}],
+                "required_data": [],
+                "latest_data": [
+                    {
+                        "ma_lop": "VT-MON01",
+                        "buoi_so": "1",
+                        "ngay_hoc": "16/11/2026",
+                        "ngay_hoc_iso": "2026-11-16",
+                        "giao_vien": "GV Mon",
+                        "khoi": "Coding",
+                        "bcnb_session_id": "sess-47-mon",
+                        "nx_zalo_checked": True,
+                        "nx_lms_checked": True,
+                    },
+                    {
+                        "ma_lop": "VT-WED02",
+                        "buoi_so": "2",
+                        "ngay_hoc": "18/11/2026",
+                        "ngay_hoc_iso": "2026-11-18",
+                        "giao_vien": "GV Wed",
+                        "khoi": "Coding",
+                        "bcnb_session_id": "sess-47-wed",
+                        "nx_zalo_checked": False,
+                        "nx_lms_checked": False,
+                    },
+                    {
+                        "ma_lop": "VT-SUN04",
+                        "buoi_so": "4",
+                        "ngay_hoc": "22/11/2026",
+                        "ngay_hoc_iso": "2026-11-22",
+                        "giao_vien": "GV Sun",
+                        "khoi": "Coding",
+                        "bcnb_session_id": "sess-47-sun",
+                        "nx_zalo_checked": False,
+                        "nx_lms_checked": False,
+                    },
+                ],
+            },
+            "scan_targets": [
+                {
+                    "group_name": "MindX - VT-MON01 (18:00-20:00)",
+                    "person": "GV Mon",
+                    "class_code": "VT-MON01",
+                    "lesson": "1",
+                    "class_date": "16/11/2026",
+                    "class_date_iso": "2026-11-16",
+                    "week": 47,
+                    "year": 2026,
+                    "khoi": "Coding",
+                    "bcnb_session_id": "sess-47-mon",
+                    "nx_zalo_checked": True,
+                    "nx_lms_checked": True,
+                },
+                {
+                    "group_name": "MindX - VT-WED02 (18:00-20:00)",
+                    "person": "GV Wed",
+                    "class_code": "VT-WED02",
+                    "lesson": "2",
+                    "class_date": "18/11/2026",
+                    "class_date_iso": "2026-11-18",
+                    "week": 47,
+                    "year": 2026,
+                    "khoi": "Coding",
+                    "bcnb_session_id": "sess-47-wed",
+                    "nx_zalo_checked": False,
+                    "nx_lms_checked": False,
+                },
+            ],
+            "deferred_targets": [
+                {
+                    "group_name": "MindX - VT-SUN04 (18:00-20:00)",
+                    "person": "GV Sun",
+                    "class_code": "VT-SUN04",
+                    "lesson": "4",
+                    "class_date": "22/11/2026",
+                    "class_date_iso": "2026-11-22",
+                    "week": 47,
+                    "year": 2026,
+                    "khoi": "Coding",
+                    "bcnb_session_id": "sess-47-sun",
+                    "nx_zalo_checked": False,
+                    "nx_lms_checked": False,
+                }
+            ],
+            "exempt_targets": [],
+        }
+        await self.group_repo.apply_discovery_snapshot(snap)
+
+        # Previous scan stored screenshot + LMS evidence for VT-MON01
+        prev_job_id = await self.job_repo.create_job(
+            "TODAY_REALTIME_SYNC",
+            {"scope": "current_week", "check_only": False, "execution_mode": "dry-run"},
+        )
+        await self.job_repo.update_job(prev_job_id, status="RUNNING", progress=10)
+        await self.job_repo.update_job(
+            prev_job_id,
+            status="SUCCESS",
+            progress=100,
+            results=json.dumps(
+                {
+                    "kind": "today_realtime_sync",
+                    "scope": "current_week",
+                    "scope_week": {"week": 47, "year": 2026},
+                    "check_only": False,
+                    "today_items": [
+                        {
+                            "group": "MindX - VT-MON01 (18:00-20:00)",
+                            "status": "✅ Đã báo cáo",
+                            "evidence_state": "SUBMITTED_VERIFIED",
+                            "nx_zalo_checked": True,
+                            "nx_lms_checked": True,
+                            "scan_target": {
+                                "week": 47,
+                                "year": 2026,
+                                "class_code": "VT-MON01",
+                                "lesson": "1",
+                                "class_date_iso": "2026-11-16",
+                                "bcnb_session_id": "sess-47-mon",
+                            },
+                            "evidence": {
+                                "images": {
+                                    "proof": {"path": f"/api/evidence/{prev_job_id}/mon_prev.png", "sha256": "PREV"}
+                                }
+                            },
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+        )
+
+        class _FakeSession:
+            landing_facts_provider = None
+
+        @asynccontextmanager
+        async def _persistent_session():
+            yield _FakeSession()
+
+        browser_gw = MagicMock()
+        browser_gw.persistent_session = _persistent_session
+        lms_gw = MagicMock()
+        lms_gw.fetch_class_slots = AsyncMock(
+            return_value={
+                "VT-WED02": [{"lessonNumber": 2, "startTime": "18:00", "endTime": "20:00", "comments": [], "students": []}],
+                "VT-SUN04": [{"lessonNumber": 4, "startTime": "18:00", "endTime": "20:00", "comments": [], "students": []}],
+                "VT-MON01": [{"lessonNumber": 1, "startTime": "18:00", "endTime": "20:00", "comments": [], "students": []}],
+            }
+        )
+        gateways = ExternalGateways(
+            browser=browser_gw,
+            lms_ocr=MagicMock(),
+            student_ocr_factory=MagicMock,
+            lms_quality=lms_gw,
+        )
+        runtime = WorkerRuntime(external=gateways, evidence_root=self.evidence_root)
+
+        scanned_targets: list[tuple[str, str, str]] = []
+
+        async def _fake_scan_one(_page, *, job_id: int, target: dict, screenshots_dir: str, today: datetime, **_kw):
+            scanned_targets.append((target["class_code"], target["class_date_iso"], today.date().isoformat()))
+            shot_file = Path(screenshots_dir) / f"{target['class_code']}.png"
+            shot_file.write_bytes(b"\x89PNG\r\n\x1a\nfake")
+            return {
+                "group": target["group_name"],
+                "person": target["person"],
+                "status": "✅ Đã báo cáo",
+                "evidence_state": "SUBMITTED_VERIFIED",
+                "submitted_for_bcnb": True,
+                "scan_target": dict(target),
+                "evidence": {
+                    "images": {
+                        "proof": {
+                            "path": f"/api/evidence/{job_id}/{target['class_code']}.png",
+                            "stored_path": str(shot_file),
+                            "sha256": "NEWSHA",
+                        }
+                    },
+                    "date_context": {
+                        "target_week": target["week"],
+                        "target_year": target["year"],
+                        "target_class_code": target["class_code"],
+                        "target_lesson": target["lesson"],
+                        "target_class_date": target["class_date_iso"],
+                    },
+                },
+            }
+
+        async def _fake_update_bcnb(page, **kwargs):
+            return {
+                "selected_weeks": kwargs["scan_plan"]["selected_weeks"],
+                "updated_count": 1,
+                "lms_updated_count": 0,
+                "failed_targets": [],
+                "lms_failed_targets": [],
+                "target_outcomes": [],
+                "lms_target_outcomes": [],
+            }
+
+        job_id = await self.job_repo.create_job(
+            "TODAY_REALTIME_SYNC",
+            {
+                "scope": "current_week",
+                "skip_completed_bcnb": True,
+                "target_date_iso": "2026-11-22",
+                "check_only": False,
+                "tick_lms": True,
+            },
+        )
+        fake_page = MagicMock()
+        fake_page.goto = AsyncMock()
+        now_sun = datetime(2026, 11, 22, 15, 0, tzinfo=BUSINESS_TIMEZONE)
+        with (
+            patch("services.today_ops_service._new_scan_page", AsyncMock(return_value=fake_page)),
+            patch("services.today_ops_service._close_scan_page", AsyncMock()),
+            patch("services.today_ops_service._setup_scan_page", AsyncMock(return_value={"decision": "SYNC_VERIFIED", "verified": True})),
+            patch("services.today_ops_service._scan_one_target", AsyncMock(side_effect=_fake_scan_one)),
+            patch("services.today_ops_service._login_bcnb_if_needed", AsyncMock()),
+            patch("services.today_ops_service.update_bcnb_reports", AsyncMock(side_effect=_fake_update_bcnb)),
+            patch("services.today_ops_service.Config.BCNB_URL", "https://bcnb.example.invalid"),
+        ):
+            await run_today_realtime_sync(
+                job_id,
+                {
+                    "scope": "current_week",
+                    "skip_completed_bcnb": True,
+                    "target_date_iso": "2026-11-22",
+                    "check_only": False,
+                    "tick_lms": True,
+                    "refresh_discovery_if_stale": False,
+                },
+                "dry-run",
+                runtime=runtime,
+                external=gateways,
+                job_repo=self.job_repo,
+                group_repo=self.group_repo,
+                audit_repo=self.audit_repo,
+                evidence_repo=self.evidence_repo,
+                batch_repo=self.batch_repo,
+                now_override=now_sun,
+            )
+
+        # VT-MON01 skipped, VT-WED02 scanned with its own Monday/Wed class_date_iso (today=Sun 22/11), VT-SUN04 deferred
+        self.assertEqual(scanned_targets, [("VT-WED02", "2026-11-18", "2026-11-22")])
+        job = await self.job_repo.get_job(job_id)
+        self.assertEqual(job["status"], "SUCCESS")
+        self.assertIn("Bỏ qua 1 lớp đã tick đủ BCNB", job["message"])
+        env = json.loads(job["results"])
+        self.assertEqual(env["scope"], "current_week")
+        self.assertEqual(env["skipped_completed_count"], 1)
+        self.assertEqual(env["skipped_completed_keys"], ["2026-W47|VT-MON01|1|2026-11-16"])
+        self.assertEqual([it["scan_target"]["class_code"] for it in env["items"]], ["VT-WED02"])
+        self.assertEqual(
+            {it["scan_target"]["class_code"] for it in env["today_items"]},
+            {"VT-WED02", "VT-SUN04"},
+        )
+
+        # Previous evidence for VT-MON01 is preserved in build_today_overview!
+        fake_container = MagicMock()
+        fake_container.settings.bcnb_dry_run = True
+        fake_container.settings.zalo_plan_max_age_minutes = 30
+        fake_container.group_repo = self.group_repo
+        ov = await build_today_overview(
+            fake_container, target_date_iso="2026-11-22", scope="current_week", now=now_sun
+        )
+        by_code = {it["class_code"]: it for it in ov["items"]}
+        self.assertEqual(
+            by_code["VT-MON01"]["screenshot_url"],
+            f"/api/evidence/{prev_job_id}/mon_prev.png",
+        )
+        self.assertEqual(
+            by_code["VT-WED02"]["screenshot_url"],
+            f"/api/evidence/{job_id}/VT-WED02.png",
+        )
+
+        # Selected target keys override skip_completed_bcnb=True
+        scanned_targets.clear()
+        sel_job_id = await self.job_repo.create_job(
+            "TODAY_REALTIME_SYNC",
+            {
+                "scope": "current_week",
+                "skip_completed_bcnb": True,
+                "selected_target_keys": ["2026-W47|VT-MON01|1|2026-11-16"],
+            },
+        )
+        with (
+            patch("services.today_ops_service._new_scan_page", AsyncMock(return_value=fake_page)),
+            patch("services.today_ops_service._close_scan_page", AsyncMock()),
+            patch("services.today_ops_service._setup_scan_page", AsyncMock(return_value={"decision": "SYNC_VERIFIED", "verified": True})),
+            patch("services.today_ops_service._scan_one_target", AsyncMock(side_effect=_fake_scan_one)),
+            patch("services.today_ops_service._login_bcnb_if_needed", AsyncMock()),
+            patch("services.today_ops_service.update_bcnb_reports", AsyncMock(side_effect=_fake_update_bcnb)),
+            patch("services.today_ops_service.Config.BCNB_URL", "https://bcnb.example.invalid"),
+        ):
+            await run_today_realtime_sync(
+                sel_job_id,
+                {
+                    "scope": "current_week",
+                    "skip_completed_bcnb": True,
+                    "selected_target_keys": ["2026-W47|VT-MON01|1|2026-11-16"],
+                    "check_only": False,
+                    "tick_lms": True,
+                    "refresh_discovery_if_stale": False,
+                },
+                "dry-run",
+                runtime=runtime,
+                external=gateways,
+                job_repo=self.job_repo,
+                group_repo=self.group_repo,
+                audit_repo=self.audit_repo,
+                evidence_repo=self.evidence_repo,
+                batch_repo=self.batch_repo,
+                now_override=now_sun,
+            )
+        self.assertEqual(scanned_targets, [("VT-MON01", "2026-11-16", "2026-11-22")])
+
+    async def test_run_today_realtime_sync_all_completed_skips_cleanly_without_opening_browser(
+        self,
+    ) -> None:
+        snap = {
+            "version": 4,
+            "reliable": True,
+            "discovered_groups": [
+                {"TenNhom": "MindX - VT-MON01 (18:00-20:00)", "MaLop": "VT-MON01", "CohortKey": "K1"},
+                {"TenNhom": "MindX - VT-TUE02 (18:00-20:00)", "MaLop": "VT-TUE02", "CohortKey": "K2"},
+            ],
+            "source_group_names": [
+                "MindX - VT-MON01 (18:00-20:00)",
+                "MindX - VT-TUE02 (18:00-20:00)",
+            ],
+            "expected_count": 2,
+            "bcnb_week_plan": {
+                "latest_week": {"week": 47, "year": 2026},
+                "required_week": {"week": 46, "year": 2026},
+                "selected_weeks": [{"week": 46, "year": 2026}, {"week": 47, "year": 2026}],
+                "required_data": [],
+                "latest_data": [
+                    {
+                        "ma_lop": "VT-MON01",
+                        "buoi_so": "1",
+                        "ngay_hoc": "16/11/2026",
+                        "ngay_hoc_iso": "2026-11-16",
+                        "giao_vien": "GV Mon",
+                        "khoi": "Coding",
+                        "bcnb_session_id": "sess-47-mon",
+                        "nx_zalo_checked": True,
+                        "nx_lms_checked": True,
+                    },
+                    {
+                        "ma_lop": "VT-TUE02",
+                        "buoi_so": "2",
+                        "ngay_hoc": "17/11/2026",
+                        "ngay_hoc_iso": "2026-11-17",
+                        "giao_vien": "GV Tue",
+                        "khoi": "Coding",
+                        "bcnb_session_id": "sess-47-tue",
+                        "nx_zalo_checked": True,
+                        "nx_lms_checked": True,
+                    },
+                ],
+            },
+            "scan_targets": [
+                {
+                    "group_name": "MindX - VT-MON01 (18:00-20:00)",
+                    "person": "GV Mon",
+                    "class_code": "VT-MON01",
+                    "lesson": "1",
+                    "class_date": "16/11/2026",
+                    "class_date_iso": "2026-11-16",
+                    "week": 47,
+                    "year": 2026,
+                    "khoi": "Coding",
+                    "bcnb_session_id": "sess-47-mon",
+                    "nx_zalo_checked": True,
+                    "nx_lms_checked": True,
+                },
+                {
+                    "group_name": "MindX - VT-TUE02 (18:00-20:00)",
+                    "person": "GV Tue",
+                    "class_code": "VT-TUE02",
+                    "lesson": "2",
+                    "class_date": "17/11/2026",
+                    "class_date_iso": "2026-11-17",
+                    "week": 47,
+                    "year": 2026,
+                    "khoi": "Coding",
+                    "bcnb_session_id": "sess-47-tue",
+                    "nx_zalo_checked": True,
+                    "nx_lms_checked": True,
+                },
+            ],
+            "deferred_targets": [],
+            "exempt_targets": [],
+        }
+        await self.group_repo.apply_discovery_snapshot(snap)
+        job_id = await self.job_repo.create_job(
+            "TODAY_REALTIME_SYNC",
+            {"scope": "current_week", "skip_completed_bcnb": True, "check_only": False},
+        )
+        browser_gw = MagicMock()
+        browser_gw.persistent_session.side_effect = AssertionError("must not open browser")
+        gateways = ExternalGateways(
+            browser=browser_gw,
+            lms_ocr=MagicMock(),
+            student_ocr_factory=MagicMock,
+            lms_quality=MagicMock(),
+        )
+        runtime = WorkerRuntime(external=gateways, evidence_root=self.evidence_root)
+        await run_today_realtime_sync(
+            job_id,
+            {
+                "scope": "current_week",
+                "skip_completed_bcnb": True,
+                "check_only": False,
+                "refresh_discovery_if_stale": False,
+            },
+            "dry-run",
+            runtime=runtime,
+            external=gateways,
+            job_repo=self.job_repo,
+            group_repo=self.group_repo,
+            audit_repo=self.audit_repo,
+            evidence_repo=self.evidence_repo,
+            batch_repo=self.batch_repo,
+            now_override=datetime(2026, 11, 22, 15, 0, tzinfo=BUSINESS_TIMEZONE),
+        )
+        job = await self.job_repo.get_job(job_id)
+        self.assertEqual(job["status"], "SUCCESS")
+        self.assertEqual(
+            job["message"],
+            "Tất cả 2 lớp đều đã tick đủ NX Zalo & NX LMS trên BCNB (bỏ qua quét lại).",
+        )
+        env = json.loads(job["results"])
+        self.assertEqual(env["items"], [])
+        self.assertEqual(env["today_items"], [])
+        self.assertEqual(env["skipped_completed_count"], 2)
+        self.assertEqual(len(env["skipped_completed_keys"]), 2)
+        browser_gw.persistent_session.assert_not_called()
+
+    async def test_build_today_overview_preserves_newer_snapshot_bcnb_flags_and_notes_over_older_overlay(
+        self,
+    ) -> None:
+        now_sun = datetime(2026, 11, 22, 12, 0, tzinfo=BUSINESS_TIMEZONE)
+        # Job #10 at 10:05 recorded nx_zalo_checked=True, nx_lms_checked=False, old notes + screenshot
+        old_job_id = await self.job_repo.create_job(
+            "TODAY_REALTIME_SYNC",
+            {"scope": "current_week", "check_only": False, "execution_mode": "dry-run"},
+        )
+        await self.job_repo.update_job(old_job_id, status="RUNNING", progress=10)
+        await self.job_repo.update_job(
+            old_job_id,
+            status="SUCCESS",
+            progress=100,
+            results=json.dumps(
+                {
+                    "kind": "today_realtime_sync",
+                    "scope": "current_week",
+                    "scope_week": {"week": 47, "year": 2026},
+                    "check_only": False,
+                    "today_items": [
+                        {
+                            "group": "MindX - VT-MON01 (18:00-20:00)",
+                            "status": "✅ Đã báo cáo",
+                            "evidence_state": "SUBMITTED_VERIFIED",
+                            "nx_zalo_checked": True,
+                            "nx_lms_checked": False,
+                            "qc_issue_note": "[LMS] Chưa NX (3/5)",
+                            "instructor_note": "GV ghi chú cũ",
+                            "lms_comments": {"status": "MISSING", "text": "Chưa NX 3/5"},
+                            "scan_target": {
+                                "week": 47,
+                                "year": 2026,
+                                "class_code": "VT-MON01",
+                                "lesson": "1",
+                                "class_date_iso": "2026-11-16",
+                                "bcnb_session_id": "sess-47-mon",
+                                "nx_zalo_checked": True,
+                                "nx_lms_checked": False,
+                                "qc_issue_note": "[LMS] Chưa NX (3/5)",
+                                "instructor_note": "GV ghi chú cũ",
+                            },
+                            "evidence": {
+                                "images": {
+                                    "proof": {"path": f"/api/evidence/{old_job_id}/mon_old.png", "sha256": "OLD"}
+                                }
+                            },
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+        )
+        # Snapshot #2 at 11:00 observed nx_lms_checked=True and cleared qc_issue_note/instructor_note
+        snap = {
+            "version": 4,
+            "reliable": True,
+            "discovered_groups": [
+                {"TenNhom": "MindX - VT-MON01 (18:00-20:00)", "MaLop": "VT-MON01", "CohortKey": "VT-MON01|K1"},
+            ],
+            "source_group_names": ["MindX - VT-MON01 (18:00-20:00)"],
+            "expected_count": 1,
+            "bcnb_week_plan": {
+                "latest_week": {"week": 47, "year": 2026},
+                "required_week": {"week": 46, "year": 2026},
+                "selected_weeks": [{"week": 46, "year": 2026}, {"week": 47, "year": 2026}],
+                "required_data": [],
+                "latest_data": [
+                    {
+                        "ma_lop": "VT-MON01",
+                        "buoi_so": "1",
+                        "ngay_hoc": "16/11/2026",
+                        "ngay_hoc_iso": "2026-11-16",
+                        "giao_vien": "GV Mon",
+                        "khoi": "Coding",
+                        "bcnb_session_id": "sess-47-mon",
+                        "nx_zalo_checked": True,
+                        "nx_lms_checked": True,
+                        "qc_issue_note": "",
+                        "instructor_note": "",
+                    }
+                ],
+            },
+            "scan_targets": [
+                {
+                    "group_name": "MindX - VT-MON01 (18:00-20:00)",
+                    "person": "GV Mon",
+                    "class_code": "VT-MON01",
+                    "lesson": "1",
+                    "class_date": "16/11/2026",
+                    "class_date_iso": "2026-11-16",
+                    "week": 47,
+                    "year": 2026,
+                    "khoi": "Coding",
+                    "bcnb_session_id": "sess-47-mon",
+                    "nx_zalo_checked": True,
+                    "nx_lms_checked": True,
+                    "qc_issue_note": "",
+                    "instructor_note": "",
+                }
+            ],
+            "deferred_targets": [],
+            "exempt_targets": [],
+        }
+        await self.group_repo.apply_discovery_snapshot(snap)
+        async with get_db_connection() as db:
+            await db.execute(
+                "UPDATE scan_jobs SET created_at = ?, started_at = ?, finished_at = ? WHERE id = ?",
+                ("2026-11-22T03:05:00Z", "2026-11-22T03:05:00Z", "2026-11-22T03:05:00Z", old_job_id),
+            )
+            await db.execute(
+                "UPDATE discovery_snapshots SET observed_at = ?",
+                ("2026-11-22T04:00:00Z",),
+            )
+            await db.commit()
+
+        fake_container = MagicMock()
+        fake_container.settings.bcnb_dry_run = True
+        fake_container.settings.zalo_plan_max_age_minutes = 60
+        fake_container.group_repo = self.group_repo
+
+        ov = await build_today_overview(
+            fake_container,
+            target_date_iso="2026-11-22",
+            scope="current_week",
+            now=now_sun,
+        )
+        self.assertEqual(len(ov["items"]), 1)
+        item = ov["items"][0]
+        self.assertIs(item["nx_zalo_checked"], True)
+        self.assertIs(item["nx_lms_checked"], True)
+        self.assertIs(item["bcnb_completed_both"], True)
+        self.assertEqual(item["qc_issue_note"], "")
+        self.assertEqual(item["instructor_note"], "")
+        self.assertEqual(item["screenshot_url"], f"/api/evidence/{old_job_id}/mon_old.png")
+        self.assertEqual(ov["kpis"]["bcnb_pending"]["completed_both_count"], 1)
+        self.assertEqual(ov["kpis"]["bcnb_pending"]["total_pending_rows"], 0)
+
+        # Direct unit check of _merge_entry_with_overlay on both merged & scan_target
+        snap_dt = datetime(2026, 11, 22, 11, 0, tzinfo=BUSINESS_TIMEZONE)
+        base_entry = {
+            "week": 47,
+            "year": 2026,
+            "class_code": "VT-MON01",
+            "lesson": "1",
+            "class_date_iso": "2026-11-16",
+            "bcnb_session_id": "sess-47-mon",
+            "nx_zalo_checked": True,
+            "nx_lms_checked": True,
+            "qc_issue_note": "",
+            "instructor_note": "",
+        }
+        older_overlay = {
+            "_overlay_observed_at": "2026-11-22T10:05:00+07:00",
+            "nx_zalo_checked": True,
+            "nx_lms_checked": False,
+            "qc_issue_note": "[LMS] Chưa NX (3/5)",
+            "instructor_note": "Cũ",
+            "screenshot_path": "/api/evidence/10/mon.png",
+            "scan_target": {
+                "week": 47,
+                "year": 2026,
+                "class_code": "VT-MON01",
+                "lesson": "1",
+                "class_date_iso": "2026-11-16",
+                "bcnb_session_id": "sess-47-mon",
+                "nx_zalo_checked": True,
+                "nx_lms_checked": False,
+                "qc_issue_note": "[LMS] Chưa NX (3/5)",
+                "instructor_note": "Cũ",
+            },
+        }
+        merged_older = _merge_entry_with_overlay(
+            base_entry, older_overlay, snapshot_observed_at=snap_dt
+        )
+        self.assertIs(merged_older["nx_lms_checked"], True)
+        self.assertIs(merged_older["scan_target"]["nx_lms_checked"], True)
+        self.assertEqual(merged_older["qc_issue_note"], "")
+        self.assertEqual(merged_older["scan_target"]["qc_issue_note"], "")
+        self.assertEqual(merged_older["screenshot_path"], "/api/evidence/10/mon.png")
+
+    async def test_defer_all_new_checker_notes_preserves_changed_count_and_composite_family_without_erasing(
+        self,
+    ) -> None:
+        now_dt = datetime(2026, 11, 22, 18, 0, tzinfo=BUSINESS_TIMEZONE)
+        today = now_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+        page = MagicMock()
+
+        def _make_overdue_row(code: str, lesson: str, sid: str, note: str) -> dict:
+            row = _make_fake_bcnb_row(
+                class_code=code,
+                lesson=lesson,
+                date_str="16/11/2026",
+                date_iso="2026-11-16",
+                session_id=sid,
+                zalo_deadline="20:00 17/11/2026\nhết hạn",
+                lms_deadline="20:00 17/11/2026\nhết hạn",
+            )
+            row["qc_issue_note"] = note
+            return row
+
+        def _make_res(code: str, lesson: str, sid: str, live_issues: list[str]) -> dict:
+            return {
+                "group": f"MindX - {code} (18:00-20:00)",
+                "status": "✅ Đã báo cáo",
+                "evidence_state": "SUBMITTED_VERIFIED",
+                "submitted_for_bcnb": True,
+                "delay_days": 0,
+                "lms_attendance": {"status": "VERIFIED", "unverified_count": 0, "attended_count": 5},
+                "lms_comments": {"status": "MISSING" if live_issues else "COMPLETE", "submitted_count": 5},
+                "lms_spck": {"status": "COMPLETE", "submitted_count": 5, "missing_comment_count": 0},
+                "lms_quality_issues": list(live_issues),
+                "zalo_content_issues": [],
+                "quality_issues": list(live_issues),
+                "scan_target": {
+                    "week": 47,
+                    "year": 2026,
+                    "class_code": code,
+                    "lesson": lesson,
+                    "class_date": "16/11/2026",
+                    "class_date_iso": "2026-11-16",
+                    "bcnb_session_id": sid,
+                    "lms_attendance": {"status": "VERIFIED", "unverified_count": 0, "attended_count": 5},
+                    "lms_comments": {"status": "MISSING" if live_issues else "COMPLETE", "submitted_count": 5},
+                    "lms_spck": {"status": "COMPLETE", "submitted_count": 5, "missing_comment_count": 0},
+                },
+            }
+
+        # 1) (3/5) -> (2/5) with manual note; 2) SPCK counts; 3) composite; 4) legacy summary; 5) fixed; 6) distinct issue
+        res_lms_cnt = _make_res("VT-LMSCNT", "1", "sess-fam-1", ["[LMS] Chưa NX (2/5)"])
+        res_spck_cnt = _make_res(
+            "VT-SPCKCNT",
+            "12",
+            "sess-fam-2",
+            ["[SPCK] Chưa NX (1/5)", "[SPCK] Chưa nộp (0/4)"],
+        )
+        res_comp = _make_res(
+            "VT-LMSCOMP",
+            "2",
+            "sess-fam-3",
+            ["[LMS] Điền tóm tắt bài, viết kỹ NX"],
+        )
+        res_legacy = _make_res("VT-LEGACY1", "3", "sess-fam-4", ["[LMS] Điền tóm tắt bài"])
+        res_fixed = _make_res("VT-FIXED2", "4", "sess-fam-5", [])
+        res_distinct = _make_res(
+            "VT-DIST1",
+            "5",
+            "sess-fam-6",
+            ["[LMS] Chưa điểm danh"],
+        )
+
+        specs = [
+            ("VT-LMSCNT", "1", "sess-fam-1", ["[LMS] Chưa NX (3/5)"], "QC tay | [LMS] Chưa NX (3/5)"),
+            (
+                "VT-SPCKCNT",
+                "12",
+                "sess-fam-2",
+                ["[SPCK] Chưa NX (3/5)", "[SPCK] Chưa nộp (0/5)"],
+                "[SPCK] Chưa NX (3/5); [SPCK] Chưa nộp (0/5)",
+            ),
+            ("VT-LMSCOMP", "2", "sess-fam-3", ["[LMS] Điền tóm tắt bài"], "[LMS] Điền tóm tắt bài"),
+            (
+                "VT-LEGACY1",
+                "3",
+                "sess-fam-4",
+                ["[LMS] Chưa ghi nội dung bài học"],
+                "[LMS] Chưa ghi nội dung bài học",
+            ),
+            ("VT-FIXED2", "4", "sess-fam-5", ["[LMS] Chưa NX (3/5)"], "[LMS] Chưa NX (3/5)"),
+            ("VT-DIST1", "5", "sess-fam-6", ["[LMS] Chưa NX (3/5)"], "[LMS] Chưa NX (3/5)"),
+        ]
+        seed_job_id = await self.job_repo.create_job("ZALO_SCAN", {"execution_mode": "production"})
+        rows_w47 = []
+        for code, lesson, sid, proven_list, existing_cell in specs:
+            rows_w47.append(_make_overdue_row(code, lesson, sid, existing_cell))
+            arow, _ = await self.audit_repo.record_intent(
+                action_key=f"seed-fam-{code}",
+                job_id=seed_job_id,
+                action_type="BCNB_UPDATE_CHECKER_NOTE",
+                target_type="CLASS",
+                target_id=code,
+                mode="production",
+                before_state={"qc_issue_note": ""},
+                intended_state={"qc_issue_note": existing_cell},
+                reason={
+                    "week": 47,
+                    "year": 2026,
+                    "lesson": lesson,
+                    "class_date": "2026-11-16",
+                    "bcnb_session_id": sid,
+                    "auto_issues": proven_list,
+                    "merged_note": existing_cell,
+                },
+            )
+            await self.audit_repo.complete_action(
+                arow["id"],
+                outcome="VERIFIED",
+                after_state={"qc_issue_note": existing_cell, "post_verified": True},
+            )
+
+        note_mock = AsyncMock(return_value="VERIFIED")
+        tick_mock = AsyncMock(return_value="VERIFIED")
+        all_results = [res_lms_cnt, res_spck_cnt, res_comp, res_legacy, res_fixed, res_distinct]
+        scan_plan = {
+            "latest_week": {"week": 47, "year": 2026},
+            "required_week": {"week": 46, "year": 2026},
+            "selected_weeks": [{"week": 46, "year": 2026}, {"week": 47, "year": 2026}],
+            "targets": [r["scan_target"] for r in all_results],
+        }
+        lms_slots = {code: [{}] for code, *_ in specs}
+        with (
+            patch(
+                "services.zalo_bcnb_service._read_bcnb_schedule_rows",
+                AsyncMock(side_effect=lambda _p, *, week, **_kw: rows_w47 if int(week) == 47 else []),
+            ),
+            patch("services.zalo_bcnb_service.resolve_report_columns", AsyncMock(return_value=(3, 4, 5))),
+            patch("services.zalo_bcnb_service.resolve_lms_columns", AsyncMock(return_value=(0, 6))),
+            patch("services.zalo_bcnb_service.execute_verified_checkbox_action", tick_mock),
+            patch("services.zalo_bcnb_service.execute_verified_checker_note_action", note_mock),
+            patch(
+                "services.zalo_bcnb_service.fetch_and_evaluate_lms_quality",
+                AsyncMock(return_value=lms_slots),
+            ),
+            patch("services.zalo_bcnb_service.inspect_and_attach_quality_issues_async", AsyncMock()),
+        ):
+            await update_bcnb_reports(
+                page,
+                job_id=958,
+                execution_mode="production",
+                scan_results=all_results,
+                today=today,
+                now=now_dt,
+                scan_plan=scan_plan,
+                job_repo=self.job_repo,
+                audit_repo=self.audit_repo,
+                tick_lms=False,
+                check_only=False,
+                defer_unexpired_checker_notes=True,
+                defer_all_new_checker_notes=True,
+            )
+
+        note_calls = {c.kwargs["class_code"]: c.kwargs for c in note_mock.await_args_list}
+        for preserved_code, preserved_res in (
+            ("VT-LMSCNT", res_lms_cnt),
+            ("VT-SPCKCNT", res_spck_cnt),
+            ("VT-LMSCOMP", res_comp),
+            ("VT-LEGACY1", res_legacy),
+        ):
+            self.assertNotIn(preserved_code, note_calls)
+            self.assertEqual(preserved_res.get("checker_note_outcome"), "DEFERRED_FOR_FULL_SCAN")
+        # Fixed (3/5) -> [] and fixed (3/5) -> distinct [LMS] Chưa điểm danh both clear obsolete (3/5)
+        self.assertEqual(note_calls["VT-FIXED2"]["auto_issues"], [])
+        self.assertEqual(note_calls["VT-FIXED2"]["reason"]["merged_note"], "")
+        self.assertEqual(note_calls["VT-DIST1"]["auto_issues"], [])
+        self.assertEqual(note_calls["VT-DIST1"]["reason"]["merged_note"], "")
+
+    async def test_persist_batch_write_outcomes_never_passes_invalid_skipped_to_complete_write(
+        self,
+    ) -> None:
+        job_id = await self.job_repo.create_job("TODAY_REALTIME_SYNC", {"scope": "current_week"})
+        t1 = {
+            "week": 47,
+            "year": 2026,
+            "class_code": "VT-NFV01",
+            "lesson": "1",
+            "class_date_iso": "2026-11-16",
+            "group_name": "MindX - VT-NFV01",
+        }
+        t2 = {
+            "week": 47,
+            "year": 2026,
+            "class_code": "VT-SKP02",
+            "lesson": "2",
+            "class_date_iso": "2026-11-17",
+            "group_name": "MindX - VT-SKP02",
+        }
+        await self.batch_repo.seed_targets(job_id, [t1, t2])
+        s1 = await self.batch_repo.claim_scan(job_id, "worker-1")
+        s2 = await self.batch_repo.claim_scan(job_id, "worker-1")
+        self.assertIsNotNone(s1)
+        self.assertIsNotNone(s2)
+        await self.batch_repo.complete_scan(
+            s1["id"],
+            status="VERIFIED",
+            result={"scan_target": t1, "evidence_state": "NOT_FOUND_VERIFIED"},
+            write_ready=True,
+        )
+        await self.batch_repo.complete_scan(
+            s2["id"],
+            status="VERIFIED",
+            result={"scan_target": t2, "evidence_state": "SUBMITTED_VERIFIED"},
+            write_ready=True,
+        )
+        c1 = await self.batch_repo.claim_write(job_id, "worker-1")
+        c2 = await self.batch_repo.claim_write(job_id, "worker-1")
+        self.assertIsNotNone(c1)
+        self.assertIsNotNone(c2)
+
+        await _persist_batch_write_outcomes(
+            job_id=job_id,
+            execution_mode="dry-run",
+            batch_repo=self.batch_repo,
+            results=[
+                {"scan_target": t1, "evidence_state": "NOT_FOUND_VERIFIED"},
+                {"scan_target": t2, "evidence_state": "SUBMITTED_VERIFIED"},
+            ],
+            bcnb_summary={
+                "target_outcomes": [
+                    {**t2, "status": "SKIPPED", "error": "Skipped"},
+                ]
+            },
+            claimed_rows=[c1, c2],
+        )
+        rows = await self.batch_repo.list_for_job(job_id)
+        by_code = {r["class_code"]: r for r in rows}
+        self.assertEqual(by_code["VT-NFV01"]["write_status"], "FAILED_BEFORE_WRITE")
+        self.assertEqual(by_code["VT-NFV01"]["error_code"], "TARGET_NOT_UPDATED")
+        self.assertEqual(by_code["VT-SKP02"]["write_status"], "FAILED_BEFORE_WRITE")
+
+    def test_collect_today_entries_bcnb_row_key_uses_session_id_and_blocks_duplicate_key_leak(
+        self,
+    ) -> None:
+        base_week_plan = {
+            "latest_week": {"week": 47, "year": 2026},
+            "required_week": {"week": 46, "year": 2026},
+            "selected_weeks": [{"week": 46, "year": 2026}, {"week": 47, "year": 2026}],
+            "required_data": [],
+            "latest_data": [
+                {
+                    "ma_lop": "VT-DUP01",
+                    "buoi_so": "1",
+                    "ngay_hoc": "16/11/2026",
+                    "ngay_hoc_iso": "2026-11-16",
+                    "giao_vien": "GV Dup",
+                    "bcnb_session_id": "sess-dup-a",
+                    "nx_zalo_checked": True,
+                    "nx_lms_checked": True,
+                },
+                {
+                    "ma_lop": "VT-DUP01",
+                    "buoi_so": "1",
+                    "ngay_hoc": "16/11/2026",
+                    "ngay_hoc_iso": "2026-11-16",
+                    "giao_vien": "GV Dup",
+                    "bcnb_session_id": "sess-dup-b",
+                    "nx_zalo_checked": False,
+                    "nx_lms_checked": False,
+                },
+            ],
+        }
+        snap_matching_b = {
+            "plan": {
+                **base_week_plan,
+                "bcnb_week_plan": base_week_plan,
+                "scan_targets": [
+                    {
+                        "group_name": "MindX - VT-DUP01 (18:00-20:00)",
+                        "class_code": "VT-DUP01",
+                        "lesson": "1",
+                        "class_date_iso": "2026-11-16",
+                        "week": 47,
+                        "year": 2026,
+                        "bcnb_session_id": "sess-dup-b",
+                    }
+                ],
+            }
+        }
+        entries_b, _ = _collect_today_entries_from_snapshot(
+            snap_matching_b, target_date_iso="2026-11-16", scope="current_week"
+        )
+        self.assertEqual(len(entries_b), 1)
+        self.assertIs(entries_b[0]["nx_zalo_checked"], False)
+        self.assertIs(entries_b[0]["nx_lms_checked"], False)
+
+        # Duplicate kt with missing bcnb_session_id on target must NOT inherit True flags from sess-dup-a
+        snap_no_sid = {
+            "plan": {
+                **base_week_plan,
+                "bcnb_week_plan": base_week_plan,
+                "scan_targets": [
+                    {
+                        "group_name": "MindX - VT-DUP01 (18:00-20:00)",
+                        "class_code": "VT-DUP01",
+                        "lesson": "1",
+                        "class_date_iso": "2026-11-16",
+                        "week": 47,
+                        "year": 2026,
+                        "bcnb_session_id": "",
+                    }
+                ],
+            }
+        }
+        entries_no_sid, _ = _collect_today_entries_from_snapshot(
+            snap_no_sid, target_date_iso="2026-11-16", scope="current_week"
+        )
+        self.assertEqual(len(entries_no_sid), 1)
+        self.assertNotIn("nx_zalo_checked", entries_no_sid[0])
+        self.assertNotIn("nx_lms_checked", entries_no_sid[0])
+
+        # Unique kt without target bcnb_session_id STILL enriches when neither side conflicts
+        snap_unique = {
+            "plan": {
+                "bcnb_week_plan": {
+                    **base_week_plan,
+                    "latest_data": [base_week_plan["latest_data"][0]],
+                },
+                "scan_targets": [
+                    {
+                        "group_name": "MindX - VT-DUP01 (18:00-20:00)",
+                        "class_code": "VT-DUP01",
+                        "lesson": "1",
+                        "class_date_iso": "2026-11-16",
+                        "week": 47,
+                        "year": 2026,
+                        "bcnb_session_id": "",
+                    }
+                ],
+            }
+        }
+        entries_uniq, _ = _collect_today_entries_from_snapshot(
+            snap_unique, target_date_iso="2026-11-16", scope="current_week"
+        )
+        self.assertIs(entries_uniq[0]["nx_zalo_checked"], True)
+        self.assertIs(entries_uniq[0]["nx_lms_checked"], True)

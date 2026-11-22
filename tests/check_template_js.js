@@ -63,12 +63,13 @@ const requiredIds = [
   'dashboard-plan-strip-text', 'dashboard-progress-strip-text',
   'dashboard-preflight-drawer', 'dashboard-preflight-drawer-checks',
   'btn-today', 'tab-today',
-  'today-kpi-total', 'today-kpi-zalo', 'today-kpi-lms', 'today-kpi-spck', 'today-kpi-bcnb',
+  'today-kpi-total', 'today-kpi-total-label', 'today-kpi-zalo', 'today-kpi-lms', 'today-kpi-spck', 'today-kpi-bcnb',
+  'today-scope-week-btn', 'today-scope-date-btn', 'today-date-controls',
   'today-date-input', 'today-reset-date-btn', 'today-refresh-overview-btn',
-  'today-mode-badge', 'today-snapshot-badge', 'today-sync-banner',
+  'today-mode-badge', 'today-snapshot-badge', 'today-sync-banner', 'today-skip-completed-checkbox',
   'today-check-live-btn', 'today-sync-bcnb-btn', 'today-sync-selected-btn', 'today-copy-reminders-btn',
   'today-search-input', 'today-spck-panel', 'today-spck-cards',
-  'today-results-table', 'today-results-tbody', 'today-select-all',
+  'today-table-title', 'today-results-table', 'today-results-tbody', 'today-select-all',
 ];
 for (const id of requiredIds) {
   if (!new RegExp(`id=["']${id}["']`).test(templates)) {
@@ -3237,12 +3238,17 @@ async function checkPhase57FrontendHardening() {
 async function checkTodayLivePageWorkflow() {
   const syncPayloads = [];
   const confirmPrompts = [];
+  const overviewUrls = [];
   let overviewCallCount = 0;
+  let nextTodayJobId = 777;
 
   const sampleOverview = {
     target_date_iso: '2026-11-14',
     today_iso: '2026-11-14',
     is_today: true,
+    scope: 'current_week',
+    scope_week: { week: 46, year: 2026 },
+    scope_label: 'Tuần thực tế W46/2026',
     execution_mode: 'production',
     snapshot: {
       snapshot_id: 55,
@@ -3263,7 +3269,7 @@ async function checkTodayLivePageWorkflow() {
       zalo: { submitted_or_exempt: 2, done: 1, late: 0, exempt: 1, failed: 1, missing: 1, review: 0, deferred: 0, not_scanned: 0, nx_zalo_checked: 1 },
       lms: { evaluated: 2, ready_for_tick: 1, nx_lms_checked: 0, comment_issue_count: 1, attendance_unverified: 1 },
       spck_b12_14: { total: 2, coding_total: 1, coding_complete: 0, coding_incomplete: 1, robotics_total: 0, robotics_complete: 0, robotics_incomplete: 0, exempt_course_total: 1 },
-      bcnb_pending: { need_nx_zalo: 1, need_nx_lms: 1, total_pending_rows: 2 },
+      bcnb_pending: { need_nx_zalo: 1, need_nx_lms: 1, total_pending_rows: 2, completed_both_count: 1 },
     },
     items: [
       {
@@ -3319,6 +3325,7 @@ async function checkTodayLivePageWorkflow() {
         issues: [{ code: 'LMS_SPCK_MISSING', severity: 'FAIL', text: '[LMS] Chưa nộp SPCK (4/4 HS)' }],
         fail_count: 1,
         note_count: 0,
+        bcnb_completed_both: false,
       },
       {
         target_key: '2026:45:VT-PTB02:14:2026-11-14',
@@ -3368,6 +3375,7 @@ async function checkTodayLivePageWorkflow() {
         issues: [],
         fail_count: 0,
         note_count: 0,
+        bcnb_completed_both: false,
       },
       {
         target_key: '2026:46:VT-C4K09:05:2026-11-14',
@@ -3407,6 +3415,155 @@ async function checkTodayLivePageWorkflow() {
         issues: [],
         fail_count: 0,
         note_count: 0,
+        bcnb_completed_both: false,
+      },
+    ],
+  };
+
+  const dateScopeOverview = {
+    target_date_iso: '2026-11-15',
+    today_iso: '2026-11-14',
+    is_today: false,
+    scope: 'date',
+    scope_week: { week: 46, year: 2026 },
+    scope_label: 'Ngày 2026-11-15',
+    execution_mode: 'production',
+    snapshot: sampleOverview.snapshot,
+    latest_sync_job: sampleOverview.latest_sync_job,
+    kpis: {
+      total: { count: 2, upcoming: 0, ongoing: 0, ended: 2, time_unknown: 0, missing_zalo_group: 0 },
+      zalo: { submitted_or_exempt: 1, done: 1, late: 0, exempt: 0, failed: 1, missing: 1, review: 0, deferred: 0, not_scanned: 0, nx_zalo_checked: 1 },
+      lms: { evaluated: 2, ready_for_tick: 1, nx_lms_checked: 1, comment_issue_count: 0, attendance_unverified: 0 },
+      spck_b12_14: { total: 0, coding_total: 0, coding_complete: 0, coding_incomplete: 0, robotics_total: 0, robotics_complete: 0, robotics_incomplete: 0, exempt_course_total: 0 },
+      bcnb_pending: { need_nx_zalo: 1, need_nx_lms: 0, total_pending_rows: 1, completed_both_count: 1 },
+    },
+    items: [
+      {
+        target_key: '2026:46:VT-DONE01:06:2026-11-15',
+        week: 46,
+        year: 2026,
+        week_label: 'W46/2026',
+        is_current_week: true,
+        class_code: 'VT-DONE01',
+        lesson: '6',
+        lesson_num: 6,
+        class_date: '15/11/2026',
+        class_date_iso: '2026-11-15',
+        group_name: '[VT]-DONE01-09h00',
+        person: 'GV Đủ Tick',
+        missing_zalo_group: false,
+        phase: 'ENDED',
+        phase_label: 'Đã tan ca',
+        eligible_for_sync: true,
+        start_hm: '09:00',
+        end_hm: '11:00',
+        time_range_display: '09:00 – 11:00',
+        time_source: 'LMS_SLOT',
+        is_coding: true,
+        is_robotics: false,
+        spck_exempt_course: false,
+        is_spck_session: false,
+        requires_spck: false,
+        zalo_category: 'DONE',
+        zalo_status_label: '✅ Đã báo cáo',
+        nx_zalo_checked: true,
+        lms_checked: true,
+        lms_fetch_unavailable: false,
+        lms_status_text: '✅ Đủ ĐD & NX LMS',
+        lms_attendance: { status: 'VERIFIED', attended_count: 6, absent_count: 0 },
+        lms_comments: { status: 'COMPLETE', submitted_count: 6, exempt_count: 0 },
+        lms_spck: { status: 'NOT_APPLICABLE', is_spck_session: false, requires_spck: false, spck_exempt_course: false, summary_text: '—' },
+        nx_lms_checked: true,
+        lms_ready_for_tick: true,
+        bcnb_completed_both: true,
+        issues: [],
+        fail_count: 0,
+        note_count: 0,
+      },
+      {
+        target_key: '2026:46:VT-MISS02:07:2026-11-15',
+        week: 46,
+        year: 2026,
+        week_label: 'W46/2026',
+        is_current_week: true,
+        class_code: 'VT-MISS02',
+        lesson: '7',
+        lesson_num: 7,
+        class_date: '15/11/2026',
+        class_date_iso: '2026-11-15',
+        group_name: '[VT]-MISS02-14h00',
+        person: 'GV Chủ Nhật',
+        missing_zalo_group: false,
+        phase: 'ENDED',
+        phase_label: 'Đã tan ca',
+        eligible_for_sync: true,
+        start_hm: '14:00',
+        end_hm: '16:00',
+        time_range_display: '14:00 – 16:00',
+        time_source: 'LMS_SLOT',
+        is_coding: true,
+        is_robotics: false,
+        spck_exempt_course: false,
+        is_spck_session: false,
+        requires_spck: false,
+        zalo_category: 'MISSING',
+        zalo_status_label: '❌ Chưa nộp',
+        nx_zalo_checked: false,
+        lms_checked: true,
+        lms_fetch_unavailable: false,
+        lms_status_text: '✅ Đủ ĐD & NX LMS',
+        lms_attendance: { status: 'VERIFIED', attended_count: 5, absent_count: 0 },
+        lms_comments: { status: 'COMPLETE', submitted_count: 5, exempt_count: 0 },
+        lms_spck: { status: 'NOT_APPLICABLE', is_spck_session: false, requires_spck: false, spck_exempt_course: false, summary_text: '—' },
+        nx_lms_checked: true,
+        lms_ready_for_tick: true,
+        bcnb_completed_both: false,
+        issues: [],
+        fail_count: 1,
+        note_count: 0,
+      },
+    ],
+  };
+
+  const multiDayWeekOverview = {
+    target_date_iso: '2026-11-22',
+    today_iso: '2026-11-22',
+    is_today: true,
+    scope: 'current_week',
+    scope_week: { week: 47, year: 2026 },
+    scope_label: 'Tuần thực tế W47/2026',
+    execution_mode: 'production',
+    snapshot: {
+      ...sampleOverview.snapshot,
+      required_week: { week: 46, year: 2026 },
+      latest_week: { week: 47, year: 2026 },
+    },
+    latest_sync_job: sampleOverview.latest_sync_job,
+    kpis: dateScopeOverview.kpis,
+    items: [
+      {
+        ...dateScopeOverview.items[0],
+        target_key: '2026:47:VT-SAT01:08:2026-11-21',
+        week: 47,
+        week_label: 'W47/2026',
+        class_code: 'VT-SAT01',
+        lesson: '8',
+        lesson_num: 8,
+        class_date: '21/11/2026',
+        class_date_iso: '2026-11-21',
+        bcnb_completed_both: true,
+      },
+      {
+        ...dateScopeOverview.items[1],
+        target_key: '2026:47:VT-SUN02:09:2026-11-22',
+        week: 47,
+        week_label: 'W47/2026',
+        class_code: 'VT-SUN02',
+        lesson: '9',
+        lesson_num: 9,
+        class_date: '22/11/2026',
+        class_date_iso: '2026-11-22',
+        bcnb_completed_both: false,
       },
     ],
   };
@@ -3415,6 +3572,7 @@ async function checkTodayLivePageWorkflow() {
   const harness = createFrontendHarness(async (url, options = {}) => {
     const cleanUrl = String(url || '');
     if (cleanUrl.startsWith('/api/today/overview')) {
+      overviewUrls.push(cleanUrl);
       overviewCallCount += 1;
       if (overviewCallCount === 1) {
         return await new Promise(resolve => {
@@ -3425,6 +3583,8 @@ async function checkTodayLivePageWorkflow() {
               json: async () => ({
                 ...sampleOverview,
                 target_date_iso: '2026-11-01',
+                scope: 'date',
+                scope_label: 'Ngày 2026-11-01',
                 kpis: {
                   ...sampleOverview.kpis,
                   total: { count: 99, upcoming: 0, ongoing: 0, ended: 99, time_unknown: 0, missing_zalo_group: 0 },
@@ -3434,7 +3594,23 @@ async function checkTodayLivePageWorkflow() {
             });
         });
       }
-      return { ok: true, status: 200, json: async () => sampleOverview };
+      if (overviewCallCount === 2) {
+        return { ok: true, status: 200, json: async () => sampleOverview };
+      }
+      if (cleanUrl.includes('scope=date')) {
+        const dateMatch = cleanUrl.match(/[?&]date=([^&]+)/);
+        const requestedIso = dateMatch ? decodeURIComponent(dateMatch[1]) : '2026-11-15';
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            ...dateScopeOverview,
+            target_date_iso: requestedIso,
+            scope_label: `Ngày ${requestedIso}`,
+          }),
+        };
+      }
+      return { ok: true, status: 200, json: async () => multiDayWeekOverview };
     }
     if (cleanUrl === '/api/today/sync') {
       const parsedBody = JSON.parse(String(options.body || '{}'));
@@ -3451,24 +3627,27 @@ async function checkTodayLivePageWorkflow() {
           }),
         };
       }
+      const jobId = nextTodayJobId++;
       return {
         ok: true,
         status: 200,
         json: async () => ({
-          job_id: 777,
-          message: 'Đã khởi tạo job #777 cho Lớp Hôm Nay.',
+          job_id: jobId,
+          message: `Đã khởi tạo job #${jobId} cho Lớp Hôm Nay.`,
         }),
       };
     }
     if (cleanUrl === '/api/jobs/latest') {
       return { ok: true, status: 200, json: async () => null };
     }
-    if (cleanUrl.startsWith('/api/jobs/777')) {
+    if (/^\/api\/jobs\/\d+/.test(cleanUrl)) {
+      const jobIdMatch = cleanUrl.match(/^\/api\/jobs\/(\d+)/);
+      const jobIdNum = jobIdMatch ? Number(jobIdMatch[1]) : 777;
       return {
         ok: true,
         status: 200,
         json: async () => ({
-          id: 777,
+          id: jobIdNum,
           job_type: 'TODAY_REALTIME_SYNC',
           status: 'SUCCESS',
           message: 'Hoàn tất Lớp Hôm Nay',
@@ -3510,6 +3689,20 @@ async function checkTodayLivePageWorkflow() {
     'switchTab("today") must set header-title to Lớp Hôm Nay (Live)',
   );
   assertFrontend(
+    overviewUrls.length >= 2 &&
+      overviewUrls[0].includes('scope=date') &&
+      overviewUrls[0].includes('date=2026-11-01') &&
+      overviewUrls[1] === '/api/today/overview?scope=current_week' &&
+      vm.runInContext('todayActiveScope', harness.context) === 'current_week' &&
+      vm.runInContext('todaySkipCompletedBcnb', harness.context) === true &&
+      harness.elements.get('today-skip-completed-checkbox').checked === true &&
+      harness.elements.get('today-scope-week-btn').textContent === 'Tuần thực tế (W46)' &&
+      harness.elements.get('today-kpi-total-label').textContent === 'Tổng lớp tuần thực tế' &&
+      harness.elements.get('today-table-title').textContent.includes('tuần thực tế') &&
+      harness.elements.get('today-sync-banner').textContent.includes('Tuần thực tế W46/2026'),
+    'Wave 8 default current_week scope, backward-compatible dateIso query, and scope UI labels failed',
+  );
+  assertFrontend(
     harness.elements.get('today-kpi-total').textContent === '3' &&
       harness.elements.get('today-kpi-zalo').textContent === '2' &&
       harness.elements.get('today-kpi-lms').textContent === '1' &&
@@ -3525,6 +3718,7 @@ async function checkTodayLivePageWorkflow() {
   assertFrontend(
     !spckPanel.classList.contains('hidden') &&
       spckCards.children.length === 2 &&
+      JSON.stringify(spckCards.children[0]).includes('T7 · 14/11') &&
       ptbCardText.includes('MIỄN SPCK (PTB/CSB)') &&
       ptbCardText.includes('⚪ Miễn SPCK (PTB/CSB)') &&
       !ptbCardText.includes('CODING (bắt buộc SPCK)') &&
@@ -3534,14 +3728,15 @@ async function checkTodayLivePageWorkflow() {
     'SPCK B12-14 spotlight panel and filter chips must reflect Today items and PTB/CSB exemption',
   );
 
-  // XSS safety check + chronological 7-column row selection + PTB/CSB table badge
+  // XSS safety check + chronological 7-column row selection + PTB/CSB table badge + weekday/date in Col 2
   const tbody = harness.elements.get('today-results-tbody');
   assertFrontend(
     tbody.children.length === 3 &&
       tbody.children[0].children.length === 7 &&
       !String(tbody.children[0].innerHTML || '').includes('<script>') &&
+      JSON.stringify(tbody.children[0].children[1]).includes('T7 · 14/11') &&
       JSON.stringify(tbody.children[1].children[2]).includes('Miễn SPCK'),
-    'Today table must render 3 rows x 7 cols using safe textContent and show Miễn SPCK for PTB/CSB',
+    'Today table must render 3 rows x 7 cols using safe textContent and show weekday/date + Miễn SPCK',
   );
 
   // Verify only eligible_for_sync rows get selected by toggleSelectAllTodayRows(true)
@@ -3566,20 +3761,120 @@ async function checkTodayLivePageWorkflow() {
     syncPayloads.length === 2 &&
       syncPayloads[0].confirm_yellow === false &&
       syncPayloads[1].confirm_yellow === true &&
+      syncPayloads[1].scope === 'current_week' &&
+      syncPayloads[1].skip_completed_bcnb === false &&
       Array.isArray(syncPayloads[1].selected_target_keys) &&
       syncPayloads[1].selected_target_keys.length === 2 &&
-      confirmPrompts.length === 2,
-    'Production selected sync must ask production confirm + retry with confirm_yellow=true after 409',
+      confirmPrompts.length === 2 &&
+      confirmPrompts[0].includes('Tuần thực tế') &&
+      confirmPrompts[0].includes('NX Zalo / NX LMS'),
+    'Production selected sync must ask production confirm with scope + tick-only note, force skip_completed_bcnb=false, and retry with confirm_yellow=true after 409',
   );
 
-  // Copy reminders grouped by teacher
+  // Copy reminders grouped by teacher (including current_week header and session date)
   await vm.runInContext(`copyTodayReminders()`, harness.context);
   assertFrontend(
     harness.clipboardWrites.length === 1 &&
+      harness.clipboardWrites[0].includes('Nhắc bổ sung Tuần thực tế (W46/2026):') &&
+      harness.clipboardWrites[0].includes('14/11') &&
       harness.clipboardWrites[0].includes('GV Coding:') &&
       harness.clipboardWrites[0].includes('VT-JSB15 B13') &&
       !harness.clipboardWrites[0].includes('VT-PTB02'),
-    'copyTodayReminders must copy only incomplete teachers/classes to clipboard',
+    'copyTodayReminders must copy only incomplete teachers/classes with current_week header and session date',
+  );
+
+  async function finishActiveTodayJob() {
+    const activePoll = [...harness.timers.entries()][0];
+    if (activePoll) {
+      harness.timers.delete(activePoll[0]);
+      await activePoll[1].callback();
+      await flushAsyncWork();
+    }
+  }
+  await finishActiveTodayJob();
+
+  // Wave 8: Switch scope to 'date', verify UI labels + completed_both badge + date-scoped reminders
+  harness.elements.get('today-search-input').value = '';
+  vm.runInContext(`setTodayFilter('all')`, harness.context);
+  await vm.runInContext(`setTodayScope('date')`, harness.context);
+  await flushAsyncWork();
+  assertFrontend(
+    overviewUrls.at(-1) === '/api/today/overview?scope=date' &&
+      vm.runInContext('todayActiveScope', harness.context) === 'date' &&
+      harness.elements.get('today-scope-date-btn').className.includes('bg-blue-600') &&
+      !harness.elements.get('today-scope-week-btn').className.includes('bg-blue-600') &&
+      harness.elements.get('today-kpi-total-label').textContent === 'Tổng lớp theo ngày' &&
+      harness.elements.get('today-table-title').textContent.includes('trong ngày') &&
+      tbody.children.length === 2 &&
+      JSON.stringify(tbody.children[0].children[6]).includes('✅ Đã tick đủ BCNB') &&
+      !JSON.stringify(tbody.children[1].children[6]).includes('✅ Đã tick đủ BCNB'),
+    'setTodayScope("date") must query scope=date, update scope UI labels, and show ✅ Đã tick đủ BCNB only on bcnb_completed_both rows',
+  );
+  await vm.runInContext(`copyTodayReminders()`, harness.context);
+  assertFrontend(
+    harness.clipboardWrites.length === 2 &&
+      harness.clipboardWrites[1].includes('Nhắc bổ sung Lớp Hôm Nay (2026-11-15):') &&
+      harness.clipboardWrites[1].includes('15/11') &&
+      harness.clipboardWrites[1].includes('VT-MISS02 B7'),
+    'copyTodayReminders in date scope must include date header and session date',
+  );
+
+  // Wave 8: Switch back to 'current_week' with multi-day rows + toggle skip_completed_bcnb + onTodayDateChange / resetTodayDate
+  await vm.runInContext(`setTodayScope('current_week')`, harness.context);
+  await flushAsyncWork();
+  assertFrontend(
+    overviewUrls.at(-1) === '/api/today/overview?scope=current_week' &&
+      vm.runInContext('todayActiveScope', harness.context) === 'current_week' &&
+      harness.elements.get('today-scope-week-btn').textContent === 'Tuần thực tế (W47)' &&
+      tbody.children.length === 2 &&
+      JSON.stringify(tbody.children[0].children[1]).includes('T7 · 21/11') &&
+      JSON.stringify(tbody.children[1].children[1]).includes('CN · 22/11') &&
+      JSON.stringify(tbody.children[0].children[6]).includes('✅ Đã tick đủ BCNB') &&
+      harness.elements.get('today-sync-banner').textContent.includes('Đã tick đủ 1 lớp'),
+    'setTodayScope("current_week") must query scope=current_week and render distinct Vietnamese weekday + dd/mm per day',
+  );
+
+  // Bulk sync with default skip_completed_bcnb=true, then toggle to false and re-sync
+  await vm.runInContext(`triggerTodayLiveSync(false)`, harness.context);
+  await flushAsyncWork();
+  await finishActiveTodayJob();
+  assertFrontend(
+    syncPayloads.at(-1).scope === 'current_week' &&
+      syncPayloads.at(-1).skip_completed_bcnb === true,
+    'Bulk sync must send scope=current_week and skip_completed_bcnb=true by default',
+  );
+
+  vm.runInContext(`toggleTodaySkipCompleted(false)`, harness.context);
+  assertFrontend(
+    vm.runInContext('todaySkipCompletedBcnb', harness.context) === false &&
+      harness.elements.get('today-skip-completed-checkbox').checked === false,
+    'toggleTodaySkipCompleted(false) must update state and checkbox',
+  );
+  await vm.runInContext(`triggerTodayLiveSync(false)`, harness.context);
+  await flushAsyncWork();
+  await finishActiveTodayJob();
+  assertFrontend(
+    syncPayloads.at(-1).scope === 'current_week' &&
+      syncPayloads.at(-1).skip_completed_bcnb === false,
+    'Bulk sync after toggleTodaySkipCompleted(false) must send skip_completed_bcnb=false',
+  );
+
+  harness.elements.get('today-date-input').value = '2026-11-20';
+  await vm.runInContext(`onTodayDateChange()`, harness.context);
+  await flushAsyncWork();
+  assertFrontend(
+    vm.runInContext('todayActiveScope', harness.context) === 'date' &&
+      overviewUrls.at(-1) === '/api/today/overview?scope=date&date=2026-11-20',
+    'onTodayDateChange() must switch to date scope and request chosen date',
+  );
+
+  await vm.runInContext(`resetTodayDate()`, harness.context);
+  await flushAsyncWork();
+  assertFrontend(
+    vm.runInContext('todayActiveScope', harness.context) === 'date' &&
+      vm.runInContext('todaySelectedDateIso', harness.context) === '' &&
+      overviewUrls.at(-1) === '/api/today/overview?scope=date',
+    'resetTodayDate() must switch to date scope for today',
   );
 
   // Verify edge cases: ONGOING B12-14, all-absent EXEMPT SPCK, COMPLETE with missing_comment_count>0, and single alert when busy

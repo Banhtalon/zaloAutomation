@@ -8,7 +8,11 @@ from api.dependencies import enqueue_job, get_container, require_operator, requi
 from api.errors import public_error
 from core.container import AppContainer
 from repositories.job_repository import JobStateError
-from services.today_ops_service import build_today_overview, parse_target_date_iso
+from services.today_ops_service import (
+    build_today_overview,
+    parse_target_date_iso,
+    parse_today_scope,
+)
 from services.zalo_preflight import assess_zalo_scan_preflight
 
 
@@ -77,8 +81,10 @@ def _enforce_today_sync_preflight(
 async def get_today_overview(
     container: AppContainer = Depends(get_container),
     date: str | None = Query(default=None),
+    scope: str | None = Query(default=None),
 ):
     raw_date = None if (date is None or hasattr(date, "default")) else str(date)
+    raw_scope = None if (scope is None or hasattr(scope, "default")) else str(scope)
     try:
         resolved_date = parse_target_date_iso(raw_date)
     except ValueError as exc:
@@ -87,13 +93,29 @@ async def get_today_overview(
             "INVALID_TARGET_DATE",
             "Ngày tra cứu không hợp lệ (định dạng YYYY-MM-DD).",
         ) from exc
-    return await build_today_overview(container, target_date_iso=resolved_date)
+    try:
+        resolved_scope = parse_today_scope(raw_scope)
+    except ValueError as exc:
+        raise public_error(
+            400,
+            "INVALID_TODAY_SCOPE",
+            "Phạm vi Lớp Hôm Nay không hợp lệ (chỉ hỗ trợ 'date' hoặc 'current_week').",
+        ) from exc
+    if raw_scope is None:
+        return await build_today_overview(container, target_date_iso=resolved_date)
+    return await build_today_overview(
+        container,
+        target_date_iso=resolved_date,
+        scope=resolved_scope,
+    )
 
 
 @router.post("/api/today/sync", dependencies=[Depends(require_operator)])
 async def sync_today_sessions(
     container: AppContainer = Depends(get_container),
     target_date_iso: str | None = Body(default=None, embed=True),
+    scope: str | None = Body(default=None, embed=True),
+    skip_completed_bcnb: bool = Body(default=False, embed=True),
     check_only: bool = Body(default=False, embed=True),
     tick_lms: bool = Body(default=True, embed=True),
     refresh_discovery_if_stale: bool = Body(default=True, embed=True),
@@ -105,6 +127,11 @@ async def sync_today_sessions(
         if (target_date_iso is None or hasattr(target_date_iso, "default"))
         else str(target_date_iso)
     )
+    raw_scope = (
+        None
+        if (scope is None or hasattr(scope, "default"))
+        else str(scope)
+    )
     try:
         resolved_date = parse_target_date_iso(raw_date)
     except ValueError as exc:
@@ -113,7 +140,17 @@ async def sync_today_sessions(
             "INVALID_TARGET_DATE",
             "Ngày tra cứu không hợp lệ (định dạng YYYY-MM-DD).",
         ) from exc
+    try:
+        resolved_scope = parse_today_scope(raw_scope)
+    except ValueError as exc:
+        raise public_error(
+            400,
+            "INVALID_TODAY_SCOPE",
+            "Phạm vi Lớp Hôm Nay không hợp lệ (chỉ hỗ trợ 'date' hoặc 'current_week').",
+        ) from exc
 
+    if not isinstance(skip_completed_bcnb, bool):
+        skip_completed_bcnb = False
     if not isinstance(check_only, bool):
         check_only = False
     if not isinstance(tick_lms, bool):
@@ -170,6 +207,8 @@ async def sync_today_sessions(
     payload = {
         "version": 1,
         "target_date_iso": resolved_date,
+        "scope": resolved_scope,
+        "skip_completed_bcnb": skip_completed_bcnb,
         "check_only": check_only,
         "tick_lms": effective_tick_lms,
         "refresh_discovery_if_stale": refresh_discovery_if_stale,
@@ -178,11 +217,18 @@ async def sync_today_sessions(
         "execution_mode": execution_mode,
     }
     mutates_external = execution_mode == "production" and not check_only
-    start_msg = (
-        f"Đang kiểm tra Live LMS & Zalo ngày {resolved_date}..."
-        if check_only
-        else f"Đang quét Live & tick BCNB đúng tuần ngày {resolved_date}..."
-    )
+    if resolved_scope == "current_week":
+        start_msg = (
+            "Đang kiểm tra Live LMS & Zalo tuần thực tế..."
+            if check_only
+            else "Đang quét Live & tick BCNB tuần thực tế..."
+        )
+    else:
+        start_msg = (
+            f"Đang kiểm tra Live LMS & Zalo ngày {resolved_date}..."
+            if check_only
+            else f"Đang quét Live & tick BCNB đúng tuần ngày {resolved_date}..."
+        )
     try:
         job_id = await container.job_repo.create_job(
             "TODAY_REALTIME_SYNC",
@@ -205,6 +251,8 @@ async def sync_today_sessions(
         "message": start_msg,
         "job_id": job_id,
         "target_date_iso": resolved_date,
+        "scope": resolved_scope,
+        "skip_completed_bcnb": skip_completed_bcnb,
         "check_only": check_only,
         "tick_lms": effective_tick_lms,
         "dry_run": (check_only or dry_run),
