@@ -167,7 +167,7 @@ _LMS_SPCK_NOTE_RE = re.compile(
     flags=re.IGNORECASE,
 )
 _LMS_SUMMARY_NOTE_RE = re.compile(
-    r"^\[LMS\]\s*(?:Chưa\s+ghi\s+nội\s+dung\s+bài\s+học\b|Điền\s+tóm\s+tắt\s+bài(?:\s*\.?$))",
+    r"^\[LMS\]\s*(?:Chưa\s+ghi\s+nội\s+dung\s+bài\s+học\b|Điền\s+tóm\s+tắt\s+bài(?:\s*\.?$)|Chưa\s+có\s+nội\s+dung\s+bài(?:\s*\.?$))",
     flags=re.IGNORECASE,
 )
 _LMS_MISSING_ATTENDANCE_RE = re.compile(
@@ -175,13 +175,13 @@ _LMS_MISSING_ATTENDANCE_RE = re.compile(
     flags=re.IGNORECASE,
 )
 _LMS_ATTENDANCE_CONFLICT_NOTE_RE = re.compile(
-    r"^\[LMS\]\s*(?:Lỗi\s+điểm\s+danh\b|(?:Điền\s+tóm\s+tắt\s+bài\s*,\s*)?Kiểm\s+tra\s+điểm\s+danh-NX\b)",
+    r"^\[LMS\]\s*(?:Lỗi\s+điểm\s+danh\b|(?:(?:Điền\s+tóm\s+tắt\s+bài|Chưa\s+có\s+nội\s+dung\s+bài)\s*,\s*)?Kiểm\s+tra\s+điểm\s+danh-NX\b)",
     flags=re.IGNORECASE,
 )
 _LMS_COMMENT_NOTE_RE = re.compile(
     r"^\[LMS\]\s*(?:"
     r"Nhận\s+xét\s+(?:sơ\s+sài|học\s+viên\s+trùng\s+lặp|Checkpoint\s+thiếu|Checkpoint\s+chưa\s+đủ|buổi\s+học\s+cần\s+xem\s+lại|cần\s+xem\s+lại)\b"
-    r"|(?:(?:Điền\s+tóm\s+tắt\s+bài|Kiểm\s+tra\s+điểm\s+danh-NX)\s*,\s*)*(?:Viết\s+kỹ\s+NX|Đủ\s+khung\s+Checkpoint)\b"
+    r"|(?:(?:Điền\s+tóm\s+tắt\s+bài|Chưa\s+có\s+nội\s+dung\s+bài|Kiểm\s+tra\s+điểm\s+danh-NX)\s*,\s*)*(?:Viết\s+kỹ\s+NX|Đủ\s+khung\s+Checkpoint)\b"
     r")",
     flags=re.IGNORECASE,
 )
@@ -761,9 +761,17 @@ def has_spck_missing_fail(row: Any) -> bool:
         return False
     raw_st = row.get("scan_target")
     st: Mapping[str, Any] = raw_st if isinstance(raw_st, Mapping) else {}
+    att = row.get("lms_attendance", st.get("lms_attendance"))
+    att_st = str(att.get("status") or "").strip().upper() if isinstance(att, Mapping) else ""
+    if att_st in {"UNVERIFIED", "EXEMPT", "MISSING_ATTENDANCE"}:
+        return False
     spck = row.get("lms_spck", st.get("lms_spck"))
     if isinstance(spck, Mapping) and spck.get("status"):
-        return spck.get("status") == "MISSING"
+        spck_st = str(spck.get("status") or "").strip().upper()
+        if spck_st == "MISSING":
+            return True
+        if spck_st in {"NOT_REQUIRED", "EXEMPT", "COMPLETE", "PARTIAL", "MISSING_ATTENDANCE"}:
+            return False
     for source in (row, st):
         for list_key in ("lms_quality_issues", "quality_issues"):
             items = source.get(list_key)
@@ -786,17 +794,21 @@ def has_spck_comment_missing_fail(row: Any) -> bool:
         return False
     raw_st = row.get("scan_target")
     st: Mapping[str, Any] = raw_st if isinstance(raw_st, Mapping) else {}
+    att = row.get("lms_attendance", st.get("lms_attendance"))
+    att_st = str(att.get("status") or "").strip().upper() if isinstance(att, Mapping) else ""
+    if att_st in {"UNVERIFIED", "EXEMPT", "MISSING_ATTENDANCE"}:
+        return False
     spck = row.get("lms_spck", st.get("lms_spck"))
     if isinstance(spck, Mapping):
-        if spck.get("status") in {
+        spck_st = str(spck.get("status") or "").strip().upper()
+        if spck_st in {
             "NOT_REQUIRED",
             "EXEMPT",
-            "UNVERIFIED",
             "MISSING",
             "MISSING_ATTENDANCE",
         }:
             return False
-        if "missing_comment_count" in spck:
+        if spck_st != "UNVERIFIED" and "missing_comment_count" in spck:
             mc = spck.get("missing_comment_count")
             if isinstance(mc, int) and not isinstance(mc, bool):
                 return mc > 0
@@ -829,6 +841,10 @@ def is_session_deferred(row: Any) -> bool:
             if reason_val.startswith("DEFERRED_"):
                 return True
     return False
+
+
+def _is_non_negative_int(value: Any) -> TypeGuard[int]:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
 def resolve_lms_status(row: Mapping[str, Any], fallback: str = "") -> str:
@@ -867,10 +883,20 @@ def resolve_lms_status(row: Mapping[str, Any], fallback: str = "") -> str:
     submitted = comments.get("submitted_count")
     attended = attendance.get("attended_count")
     absent = attendance.get("absent_count")
-    if not all(isinstance(n, int) and not isinstance(n, bool) and n >= 0 for n in (submitted, attended, absent)):
+    if not (
+        _is_non_negative_int(submitted)
+        and _is_non_negative_int(attended)
+        and _is_non_negative_int(absent)
+    ):
         return "⏳ Chờ xác minh điểm danh/nhận xét LMS"
-    prefix = "❌" if status == "MISSING" else "✅"
-    result = f"{prefix} Đã nhận xét {submitted}/{attended} HS đi học"
+    if status == "MISSING":
+        if submitted == 0:
+            result = "❌ Chưa nhận xét"
+        else:
+            missing_n = max(1, attended - submitted)
+            result = f"❌ Chưa nhận xét (thiếu {missing_n}/{attended} HS)"
+    else:
+        result = f"✅ Đã nhận xét {submitted}/{attended} HS đi học"
     if absent:
         result += f" · {absent} HS nghỉ miễn"
     if status == "REVIEW":
@@ -959,10 +985,6 @@ def classify_course_track(
         "is_spck_session": is_spck_session,
         "requires_spck": requires_spck,
     }
-
-
-def _is_non_negative_int(value: Any) -> TypeGuard[int]:
-    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
 def is_lms_ready_for_bcnb_tick(row: Mapping[str, Any]) -> tuple[bool, str]:
@@ -1107,6 +1129,45 @@ def is_failed(row: Any) -> bool:
     lms_failed = lms_status.startswith(("❌", "⚠️"))
     spck_failed = has_spck_missing_fail(row) or has_spck_comment_missing_fail(row)
     return zalo_failed or lms_failed or spck_failed
+
+
+def is_spck_only_warning_row(row: Any) -> bool:
+    """Return True when Zalo and LMS comments are complete and the row only has SPCK missing/uncommented warning."""
+    if not isinstance(row, Mapping) or is_session_deferred(row):
+        return False
+
+    category = categorize_row(row)
+    if category in {CATEGORY_MISSING, CATEGORY_REVIEW}:
+        return False
+
+    raw_st = row.get("scan_target")
+    st: Mapping[str, Any] = raw_st if isinstance(raw_st, Mapping) else {}
+    lms_status = str(row.get("lms_status") or st.get("lms_status") or "").strip()
+    nx_lms = row.get("nx_lms_checked")
+    if not isinstance(nx_lms, bool):
+        nx_lms = st.get("nx_lms_checked")
+    if lms_status in {"", "Chưa quét LMS"} and nx_lms is False:
+        lms_status = "❌ Chưa nộp LMS"
+    lms_status = resolve_lms_status(row, lms_status)
+    if lms_status.startswith(("❌", "⚠️", "⏳")):
+        return False
+
+    comments = row.get("lms_comments", st.get("lms_comments"))
+    attendance = row.get("lms_attendance", st.get("lms_attendance"))
+    comm_status = (
+        str(comments.get("status") or "").strip().upper()
+        if isinstance(comments, Mapping)
+        else ""
+    )
+    att_status = (
+        str(attendance.get("status") or "").strip().upper()
+        if isinstance(attendance, Mapping)
+        else ""
+    )
+    if comm_status in {"MISSING", "MISSING_ATTENDANCE", "UNVERIFIED"} or att_status == "MISSING_ATTENDANCE":
+        return False
+
+    return bool(has_spck_missing_fail(row) or has_spck_comment_missing_fail(row))
 
 
 def validate_two_week_plan(
@@ -1507,6 +1568,7 @@ __all__ = [
     "is_lesson_14",
     "is_lms_ready_for_bcnb_tick",
     "is_session_deferred",
+    "is_spck_only_warning_row",
     "issue_code",
     "issue_severity",
     "issue_text",

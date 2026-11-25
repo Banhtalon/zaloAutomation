@@ -4434,9 +4434,9 @@ class TodayOpsServiceTests(unittest.IsolatedAsyncioTestCase):
             "VT-LMSCOMP",
             "2",
             "sess-fam-3",
-            ["[LMS] Điền tóm tắt bài, viết kỹ NX"],
+            ["[LMS] Chưa có nội dung bài, viết kỹ NX"],
         )
-        res_legacy = _make_res("VT-LEGACY1", "3", "sess-fam-4", ["[LMS] Điền tóm tắt bài"])
+        res_legacy = _make_res("VT-LEGACY1", "3", "sess-fam-4", ["[LMS] Chưa có nội dung bài"])
         res_fixed = _make_res("VT-FIXED2", "4", "sess-fam-5", [])
         res_distinct = _make_res(
             "VT-DIST1",

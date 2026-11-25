@@ -40,6 +40,7 @@ from services.report_status import (
     categorize_row,
     has_spck_comment_missing_fail,
     has_spck_missing_fail,
+    is_spck_only_warning_row,
     issue_code,
     resolve_lms_status,
 )
@@ -54,7 +55,6 @@ EMAIL_TABLE_HEADERS: tuple[str, ...] = (
     "Giảng viên",
     "NX Zalo",
     "NX LMS",
-    "Tình trạng đánh giá",
     "Mô tả vấn đề (TE/TF/QC)",
 )
 
@@ -285,6 +285,7 @@ def _short_url_issue(value: str) -> str:
     )
     s = s.replace("Chưa điểm danh", "Chưa ĐD LMS")
     s = s.replace("Chưa ghi nội dung bài học", "Thiếu ND")
+    s = s.replace("Chưa có nội dung bài", "Thiếu ND")
     s = s.replace("Điền tóm tắt bài", "Thiếu ND")
     s = s.replace("Nhận xét HS sơ sài, thiếu đủ 3 ý", "NX thiếu ý")
     s = s.replace("Nhận xét thiếu ý", "NX thiếu ý")
@@ -382,6 +383,7 @@ def _prepare_email_row_fields(idx: int, row: dict[str, Any]) -> dict[str, str]:
         "issue_description": issue_description,
         "verified_at": verified_at,
         "is_zalo_missing": "1" if row_category == CATEGORY_MISSING else "",
+        "is_lms_failed": "1" if lms_status.startswith("❌") else "",
     }
 
 
@@ -393,8 +395,7 @@ def _build_unicode_table(prepared_rows: list[dict[str, str]]) -> str:
         ("class_date", "Ngày học", 10),
         ("teacher", "Giảng viên", 22),
         ("zalo_status", "NX Zalo", 22),
-        ("lms_status", "NX LMS", 18),
-        ("evaluation_status", "Tình trạng đánh giá", 28),
+        ("lms_status", "NX LMS", 24),
         ("issue_description", "Mô tả vấn đề", 36),
     )
     matrix: list[list[str]] = []
@@ -469,6 +470,83 @@ def _parse_iso_utc(raw_value: Any) -> datetime | None:
     return dt.astimezone(timezone.utc)
 
 
+def _build_html_rows_table(
+    prepared_rows: list[dict[str, str]],
+    *,
+    header_bg: str = "#0f172a",
+) -> str:
+    html_rows: list[str] = []
+    for row_idx, item in enumerate(prepared_rows):
+        row_bg = "#ffffff" if row_idx % 2 == 0 else "#f8fafc"
+        cells = [
+            item["stt"],
+            sanitize_csv_cell(item["class_code"]) or "—",
+            sanitize_csv_cell(item["lesson"]) or "—",
+            sanitize_csv_cell(item["class_date"]) or "—",
+            sanitize_csv_cell(item["teacher"]) or "—",
+            sanitize_csv_cell(item["zalo_status"]) or "—",
+            sanitize_csv_cell(item["lms_status"]) or "—",
+            sanitize_csv_cell(item["issue_description"]) or "—",
+        ]
+        is_zalo_missing = item.get("is_zalo_missing") == "1"
+        is_lms_failed = item.get("is_lms_failed") == "1"
+        td_parts: list[str] = []
+        for col_i, cell in enumerate(cells):
+            extra_style = ""
+            cell_html = html.escape(cell)
+            if col_i == 0:
+                extra_style = "text-align:center;font-weight:600;color:#475569;"
+            elif col_i == 1:
+                extra_style = "font-weight:700;color:#0f172a;white-space:nowrap;"
+            elif col_i in (2, 3):
+                extra_style = "text-align:center;white-space:nowrap;"
+            elif col_i == 5 and is_zalo_missing:
+                extra_style = "color:#dc2626;font-weight:700;"
+                cell_html = f'<span style="color:#dc2626;font-weight:700;">{cell_html}</span>'
+            elif col_i == 6 and is_lms_failed:
+                extra_style = "color:#dc2626;font-weight:700;"
+                cell_html = f'<span style="color:#dc2626;font-weight:700;">{cell_html}</span>'
+            elif col_i == 7 and cell != "—":
+                extra_style = "color:#334155;font-weight:400;line-height:1.6;"
+                issue_items: list[str] = []
+                for issue in _split_display_issues(cell):
+                    issue_style = "margin:0 0 6px;"
+                    code = issue_code(issue)
+                    if re.match(
+                        r"^\[Zalo\]\s*Chưa\s+(?:gửi|nhận\s+xét|báo\s+cáo)",
+                        issue,
+                        flags=re.IGNORECASE,
+                    ) or re.match(
+                        r"^\[LMS\]\s*(?:Chưa\s+(?:(?:có\s+)?(?:NX|nhận\s+xét)|điểm\s+danh)|Thiếu\s+nhận\s+xét)",
+                        issue,
+                        flags=re.IGNORECASE,
+                    ):
+                        issue_style += "color:#dc2626;font-weight:600;"
+                    elif code in {
+                        ISSUE_CODE_LMS_SPCK_MISSING,
+                        ISSUE_CODE_LMS_SPCK_COMMENT_MISSING,
+                    }:
+                        issue_style += "color:#b45309;font-weight:600;"
+                    issue_items.append(f'<li style="{issue_style}">{html.escape(issue)}</li>')
+                cell_html = '<ul style="margin:0;padding-left:18px;">' + "".join(issue_items) + "</ul>"
+            td_parts.append(
+                f'<td style="border:1px solid #cbd5e1;padding:7px 10px;font-size:13px;vertical-align:top;background:{row_bg};{extra_style}">'
+                f"{cell_html}</td>"
+            )
+        html_rows.append(f"<tr>{''.join(td_parts)}</tr>")
+
+    th_html = "".join(
+        f'<th style="border:1px solid {header_bg};background:{header_bg};color:#ffffff;padding:8px 10px;font-size:12px;text-align:left;">{html.escape(header)}</th>'
+        for header in EMAIL_TABLE_HEADERS
+    )
+    return (
+        '<table style="border-collapse:collapse;width:100%;max-width:1120px;margin-top:12px;font-family:Inter,Segoe UI,Arial,sans-serif;">'
+        f"<thead><tr>{th_html}</tr></thead>"
+        f"<tbody>{''.join(html_rows)}</tbody>"
+        "</table>"
+    )
+
+
 def build_failed_classes_email_package(
     *,
     week: int,
@@ -485,9 +563,18 @@ def build_failed_classes_email_package(
     """Build CSV attachment, subject, text/HTML bodies, and mailto/Gmail compose links."""
     safe_week = int(week)
     safe_year = int(year)
-    failed_count = len(failed_rows)
+    valid_failed_rows = [row for row in failed_rows if isinstance(row, dict)]
+    nx_failed_rows = [row for row in valid_failed_rows if not is_spck_only_warning_row(row)]
+    spck_only_rows = [row for row in valid_failed_rows if is_spck_only_warning_row(row)]
+    ordered_failed_rows = [*nx_failed_rows, *spck_only_rows]
+
+    failed_count = len(valid_failed_rows)
     total_count = max(failed_count, int(total_rows_count))
-    failed_classes_count = _count_unique_classes(failed_rows)
+    failed_classes_count = _count_unique_classes(valid_failed_rows)
+    nx_failed_count = len(nx_failed_rows)
+    nx_failed_classes_count = _count_unique_classes(nx_failed_rows)
+    spck_only_count = len(spck_only_rows)
+    spck_only_classes_count = _count_unique_classes(spck_only_rows)
     total_classes_count = max(
         failed_classes_count,
         _count_unique_classes(all_rows) if isinstance(all_rows, list) else failed_classes_count,
@@ -507,76 +594,128 @@ def build_failed_classes_email_package(
         else f"Bao_Cao_Lop_Loi_Tuan_W{safe_week:02d}_{safe_year}.csv"
     )
     csv_text = build_weekly_summary_csv(
-        failed_rows,
+        ordered_failed_rows,
         is_dry_run=resolved_is_dry_run,
         execution_mode_badge=resolved_badge,
     )
 
     job_suffix = f" (Job #{int(selected_job_id)})" if selected_job_id else ""
-    subject = (
-        f"{badge_prefix}[MindX BCNB] Báo cáo danh sách lớp lỗi Tuần W{safe_week:02d}/{safe_year}"
-        f"{job_suffix} - {failed_count}/{total_count} buổi học cần xử lý ({failed_classes_count} lớp)"
-    )
+    if nx_failed_count > 0 and spck_only_count > 0:
+        subject = (
+            f"{badge_prefix}[MindX BCNB] Báo cáo danh sách lớp lỗi Tuần W{safe_week:02d}/{safe_year}"
+            f"{job_suffix} - {nx_failed_count}/{total_count} buổi lỗi NX ({nx_failed_classes_count} lớp) · "
+            f"{spck_only_count} buổi lưu ý SPCK"
+        )
+    elif nx_failed_count == 0 and spck_only_count > 0:
+        subject = (
+            f"{badge_prefix}[MindX BCNB] Báo cáo lưu ý SPCK Tuần W{safe_week:02d}/{safe_year}"
+            f"{job_suffix} - 0/{total_count} buổi lỗi NX · {spck_only_count} buổi lưu ý SPCK ({spck_only_classes_count} lớp)"
+        )
+    else:
+        subject = (
+            f"{badge_prefix}[MindX BCNB] Báo cáo danh sách lớp lỗi Tuần W{safe_week:02d}/{safe_year}"
+            f"{job_suffix} - {nx_failed_count}/{total_count} buổi học cần xử lý ({nx_failed_classes_count} lớp)"
+        )
 
-    prepared_rows = [
+    prepared_nx_rows = [
         _prepare_email_row_fields(idx, row)
-        for idx, row in enumerate(failed_rows, start=1)
-        if isinstance(row, dict)
+        for idx, row in enumerate(nx_failed_rows, start=1)
     ]
-    text_table = _build_unicode_table(prepared_rows)
+    prepared_spck_rows = [
+        _prepare_email_row_fields(idx, row)
+        for idx, row in enumerate(spck_only_rows, start=1)
+    ]
+    text_table_parts: list[str] = []
+    if prepared_nx_rows:
+        text_table_parts.append(_build_unicode_table(prepared_nx_rows))
+    else:
+        text_table_parts.append("✅ Không có buổi học lỗi nhận xét Zalo / LMS.")
+    if prepared_spck_rows:
+        text_table_parts.append(
+            "⚠️ Lưu ý lớp chưa hoàn tất SPCK trên LMS (đã hoàn tất NX Zalo & LMS, không tính lỗi nhận xét):\n"
+            + _build_unicode_table(prepared_spck_rows)
+        )
+    text_table = "\n\n".join(text_table_parts)
 
-    detail_lines: list[str] = []
-    ultra_compact_lines: list[str] = []
-    url_compact_lines: list[str] = []
-    for item in prepared_rows:
-        issue_suffix = (
-            f" | Vấn đề: {item['issue_description']}"
-            if item["issue_description"] and item["issue_description"] != "—"
-            else ""
-        )
-        detail_lines.append(
-            f"{item['stt']}. [{item['class_code']}] GV: {item['teacher']} | Buổi {item['lesson']} ({item['class_date']}) "
-            f"| Zalo: {item['zalo_status']} | LMS: {item['lms_status']} "
-            f"| Đánh giá: {item['evaluation_status']}{issue_suffix}"
-        )
-        short_issue = (
-            f" | {_truncate_cell(item['issue_description'], 48)}"
-            if item["issue_description"] and item["issue_description"] != "—"
-            else ""
-        )
-        ultra_compact_lines.append(
-            f"{item['stt']}. [{item['class_code']}] B{item['lesson']} ({item['class_date']}) "
-            f"| {_truncate_cell(item['teacher'], 22)} "
-            f"| Zalo:{_truncate_cell(item['zalo_status'], 18)} "
-            f"| LMS:{_truncate_cell(item['lms_status'], 16)}"
-            f"{short_issue}"
-        )
-        clean_teacher = (
-            re.sub(r"\s*\([^)]*\)", "", item["teacher"] or "").strip()
-            or item["teacher"]
-        )
-        short_date = (
-            item["class_date"][:5]
-            if len(item["class_date"]) >= 5
-            else item["class_date"]
-        )
-        short_url_issue = _short_url_issue(item["issue_description"])
-        url_issue_suffix = f" - {short_url_issue}" if short_url_issue else ""
-        url_compact_lines.append(
-            f"{item['stt']}. {item['class_code']} B{item['lesson']} ({short_date}) "
-            f"- {_truncate_url_text(clean_teacher, 18)} "
-            f"- Zalo:{_short_url_status(item['zalo_status'])}/LMS:{_short_url_status(item['lms_status'])}"
-            f"{url_issue_suffix}"
-        )
+    def _format_text_lists(rows: list[dict[str, str]]) -> tuple[list[str], list[str], list[str]]:
+        det: list[str] = []
+        ultra: list[str] = []
+        url_c: list[str] = []
+        for item in rows:
+            issue_suffix = (
+                f" | Vấn đề: {item['issue_description']}"
+                if item["issue_description"] and item["issue_description"] != "—"
+                else ""
+            )
+            det.append(
+                f"{item['stt']}. [{item['class_code']}] GV: {item['teacher']} | Buổi {item['lesson']} ({item['class_date']}) "
+                f"| Zalo: {item['zalo_status']} | LMS: {item['lms_status']}{issue_suffix}"
+            )
+            short_issue = (
+                f" | {_truncate_cell(item['issue_description'], 48)}"
+                if item["issue_description"] and item["issue_description"] != "—"
+                else ""
+            )
+            ultra.append(
+                f"{item['stt']}. [{item['class_code']}] B{item['lesson']} ({item['class_date']}) "
+                f"| {_truncate_cell(item['teacher'], 22)} "
+                f"| Zalo:{_truncate_cell(item['zalo_status'], 18)} "
+                f"| LMS:{_truncate_cell(item['lms_status'], 16)}"
+                f"{short_issue}"
+            )
+            clean_teacher = (
+                re.sub(r"\s*\([^)]*\)", "", item["teacher"] or "").strip()
+                or item["teacher"]
+            )
+            short_date = (
+                item["class_date"][:5]
+                if len(item["class_date"]) >= 5
+                else item["class_date"]
+            )
+            short_url_issue = _short_url_issue(item["issue_description"])
+            url_issue_suffix = f" - {short_url_issue}" if short_url_issue else ""
+            url_c.append(
+                f"{item['stt']}. {item['class_code']} B{item['lesson']} ({short_date}) "
+                f"- {_truncate_url_text(clean_teacher, 18)} "
+                f"- Zalo:{_short_url_status(item['zalo_status'])}/LMS:{_short_url_status(item['lms_status'])}"
+                f"{url_issue_suffix}"
+            )
+        return det, ultra, url_c
+
+    nx_det, nx_ultra, nx_url = _format_text_lists(prepared_nx_rows)
+    spck_det, spck_ultra, spck_url = _format_text_lists(prepared_spck_rows)
+
+    detail_lines: list[str] = list(nx_det)
+    ultra_compact_lines: list[str] = list(nx_ultra)
+    url_compact_lines: list[str] = list(nx_url)
+    if spck_det:
+        if detail_lines:
+            detail_lines.append("")
+        detail_lines.append("⚠️ Lưu ý lớp chưa hoàn tất SPCK trên LMS (đã hoàn tất NX Zalo & LMS):")
+        detail_lines.extend(spck_det)
+    if spck_ultra:
+        if ultra_compact_lines:
+            ultra_compact_lines.append("")
+        ultra_compact_lines.append("⚠️ Lưu ý SPCK (đã xong NX Zalo & LMS):")
+        ultra_compact_lines.extend(spck_ultra)
+    if spck_url:
+        if url_compact_lines:
+            url_compact_lines.append("")
+        url_compact_lines.append("Lưu ý SPCK:")
+        url_compact_lines.extend(spck_url)
 
     header_lines = [
         "Kính gửi Quản lý,",
         "",
         f"Hệ thống Zalo & BCNB Automation gửi báo cáo danh sách các lớp lỗi/chưa hoàn tất trong Tuần W{safe_week:02d}/{safe_year}{job_suffix}{badge_suffix}:",
         f"- Tổng số buổi học trong kỳ: {total_count} ({total_classes_count} lớp)",
-        f"- Số buổi học lỗi / cần kiểm tra: {failed_count} ({failed_classes_count} lớp)",
-        "",
+        f"- Số buổi học lỗi nhận xét (Zalo / LMS): {nx_failed_count} ({nx_failed_classes_count} lớp)",
     ]
+    if spck_only_count > 0:
+        header_lines.append(
+            f"- Lưu ý chưa hoàn tất SPCK trên LMS (không tính lỗi NX): {spck_only_count} ({spck_only_classes_count} lớp)"
+        )
+    header_lines.append("")
     footer_lines = [
         "",
         "Trân trọng,",
@@ -608,86 +747,39 @@ def build_failed_classes_email_package(
             *footer_lines,
         ]
     )
+    spck_url_summary = (
+        f"; {spck_only_count} buổi lưu ý SPCK" if spck_only_count > 0 else ""
+    )
     compose_url_compact_body = "\n".join(
         [
             "Kính gửi Quản lý,",
-            f"Báo cáo lớp lỗi Tuần W{safe_week:02d}/{safe_year}{job_suffix}{badge_suffix}: {failed_count}/{total_count} buổi học cần xử lý ({failed_classes_count} lớp).",
-            "(Mẹo: Bảng 9 cột kẻ khung đã tự động copy vào Clipboard - bấm Ctrl+V trong Gmail để dán bảng màu đầy đủ)",
+            f"Báo cáo lớp lỗi Tuần W{safe_week:02d}/{safe_year}{job_suffix}{badge_suffix}: {nx_failed_count}/{total_count} buổi lỗi NX ({nx_failed_classes_count} lớp){spck_url_summary}.",
+            "(Mẹo: Bảng 8 cột kẻ khung đã tự động copy vào Clipboard - bấm Ctrl+V trong Gmail để dán bảng màu đầy đủ)",
             "",
             *url_compact_lines,
             *footer_lines,
         ]
     )
 
-    html_rows: list[str] = []
-    for row_idx, item in enumerate(prepared_rows):
-        row_bg = "#ffffff" if row_idx % 2 == 0 else "#f8fafc"
-        cells = [
-            item["stt"],
-            sanitize_csv_cell(item["class_code"]) or "—",
-            sanitize_csv_cell(item["lesson"]) or "—",
-            sanitize_csv_cell(item["class_date"]) or "—",
-            sanitize_csv_cell(item["teacher"]) or "—",
-            sanitize_csv_cell(item["zalo_status"]) or "—",
-            sanitize_csv_cell(item["lms_status"]) or "—",
-            sanitize_csv_cell(item["evaluation_status"]) or "—",
-            sanitize_csv_cell(item["issue_description"]) or "—",
-        ]
-        is_zalo_missing = item.get("is_zalo_missing") == "1"
-        td_parts: list[str] = []
-        for col_i, cell in enumerate(cells):
-            extra_style = ""
-            cell_html = html.escape(cell)
-            if col_i == 0:
-                extra_style = "text-align:center;font-weight:600;color:#475569;"
-            elif col_i == 1:
-                extra_style = "font-weight:700;color:#0f172a;white-space:nowrap;"
-            elif col_i in (2, 3):
-                extra_style = "text-align:center;white-space:nowrap;"
-            elif col_i == 5 and is_zalo_missing:
-                extra_style = "color:#dc2626;font-weight:700;"
-                cell_html = f'<span style="color:#dc2626;font-weight:700;">{cell_html}</span>'
-            elif col_i == 7:
-                if is_zalo_missing and cell.startswith("❌"):
-                    extra_style = "color:#dc2626;font-weight:700;"
-                    cell_html = f'<span style="color:#dc2626;font-weight:700;">{cell_html}</span>'
-                elif cell.startswith("⚠️"):
-                    extra_style = "color:#b45309;font-weight:600;"
-                    cell_html = f'<span style="color:#b45309;font-weight:600;">{cell_html}</span>'
-            elif col_i == 8 and cell != "—":
-                extra_style = "color:#334155;font-weight:400;line-height:1.6;"
-                issue_items: list[str] = []
-                for issue in _split_display_issues(cell):
-                    issue_style = "margin:0 0 6px;"
-                    code = issue_code(issue)
-                    if re.match(
-                        r"^\[Zalo\]\s*Chưa\s+(?:gửi|nhận\s+xét|báo\s+cáo)",
-                        issue,
-                        flags=re.IGNORECASE,
-                    ):
-                        issue_style += "color:#dc2626;font-weight:600;"
-                    elif code in {
-                        ISSUE_CODE_LMS_SPCK_MISSING,
-                        ISSUE_CODE_LMS_SPCK_COMMENT_MISSING,
-                    }:
-                        issue_style += "color:#b45309;font-weight:600;"
-                    issue_items.append(f'<li style="{issue_style}">{html.escape(issue)}</li>')
-                cell_html = '<ul style="margin:0;padding-left:18px;">' + "".join(issue_items) + "</ul>"
-            td_parts.append(
-                f'<td style="border:1px solid #cbd5e1;padding:7px 10px;font-size:13px;vertical-align:top;background:{row_bg};{extra_style}">'
-                f"{cell_html}</td>"
-            )
-        html_rows.append(f"<tr>{''.join(td_parts)}</tr>")
-
-    th_html = "".join(
-        f'<th style="border:1px solid #1e293b;background:#0f172a;color:#ffffff;padding:8px 10px;font-size:12px;text-align:left;">{html.escape(header)}</th>'
-        for header in EMAIL_TABLE_HEADERS
-    )
-    html_table = (
-        '<table style="border-collapse:collapse;width:100%;max-width:1120px;margin-top:12px;font-family:Inter,Segoe UI,Arial,sans-serif;">'
-        f"<thead><tr>{th_html}</tr></thead>"
-        f"<tbody>{''.join(html_rows)}</tbody>"
-        "</table>"
+    html_table_parts: list[str] = []
+    if prepared_nx_rows:
+        html_table_parts.append(_build_html_rows_table(prepared_nx_rows, header_bg="#0f172a"))
+    else:
+        html_table_parts.append(
+            '<p style="margin:10px 0;color:#15803d;font-weight:600;">✅ Không có buổi học lỗi nhận xét Zalo / LMS.</p>'
+        )
+    if prepared_spck_rows:
+        html_table_parts.append(
+            '<p style="margin:18px 0 6px;font-size:13px;font-weight:700;color:#b45309;">'
+            "⚠️ Lưu ý lớp chưa hoàn tất SPCK trên LMS — Đã hoàn tất NX Zalo &amp; LMS (không tính lỗi nhận xét):</p>"
+            + _build_html_rows_table(prepared_spck_rows, header_bg="#78350f")
+        )
+    html_table = "".join(html_table_parts)
+    spck_summary_li = (
+        f'<li>Lưu ý chưa hoàn tất SPCK trên LMS (không tính lỗi NX): '
+        f'<strong style="color:#b45309;">{spck_only_count}</strong> ({spck_only_classes_count} lớp)</li>'
+        if spck_only_count > 0
+        else ""
     )
     html_body = (
         '<div style="font-family:Inter,Segoe UI,Arial,sans-serif;color:#0f172a;line-height:1.5;">'
@@ -696,7 +788,8 @@ def build_failed_classes_email_package(
         f"<strong>Tuần W{safe_week:02d}/{safe_year}{html.escape(job_suffix)}{html.escape(badge_suffix)}</strong>:</p>"
         "<ul>"
         f"<li>Tổng số buổi học trong kỳ: <strong>{total_count}</strong> ({total_classes_count} lớp)</li>"
-        f'<li>Số buổi học lỗi / cần xử lý: <strong style="color:#dc2626;">{failed_count}</strong> ({failed_classes_count} lớp)</li>'
+        f'<li>Số buổi học lỗi nhận xét (Zalo / LMS): <strong style="color:#dc2626;">{nx_failed_count}</strong> ({nx_failed_classes_count} lớp)</li>'
+        f"{spck_summary_li}"
         "</ul>"
         f"{html_table}"
         "<p style=\"margin-top:16px;font-size:12px;color:#475569;\">Trân trọng,<br>MindX Zalo &amp; BCNB Automation</p>"
@@ -757,6 +850,10 @@ def build_failed_classes_email_package(
         "mailto_url": mailto_url,
         "total_classes_count": total_classes_count,
         "failed_classes_count": failed_classes_count,
+        "nx_failed_count": nx_failed_count,
+        "nx_failed_classes_count": nx_failed_classes_count,
+        "spck_only_count": spck_only_count,
+        "spck_only_classes_count": spck_only_classes_count,
         "execution_mode": "dry-run" if resolved_is_dry_run else "production",
         "is_dry_run": resolved_is_dry_run,
         "execution_mode_badge": resolved_badge,
@@ -1031,7 +1128,7 @@ async def send_failed_classes_report_email(
             "is_dry_run": resolved_is_dry_run,
             "execution_mode_badge": resolved_badge,
             "message": (
-                f"Đã chuẩn bị báo cáo {len(failed_rows)} buổi học lỗi (bảng 9 cột đã tự động copy vào Clipboard — bấm Ctrl+V trong Gmail để dán bảng màu). "
+                f"Đã chuẩn bị báo cáo {len(failed_rows)} buổi học lỗi (bảng 8 cột đã tự động copy vào Clipboard — bấm Ctrl+V trong Gmail để dán bảng màu). "
                 f"Hệ thống đang mở sẵn khung gửi mail tới {', '.join(recipients)}."
             ),
             "week": int(week),
@@ -1041,6 +1138,10 @@ async def send_failed_classes_report_email(
             "failed_count": len(failed_rows),
             "total_classes_count": package["total_classes_count"],
             "failed_classes_count": package["failed_classes_count"],
+            "nx_failed_count": package["nx_failed_count"],
+            "nx_failed_classes_count": package["nx_failed_classes_count"],
+            "spck_only_count": package["spck_only_count"],
+            "spck_only_classes_count": package["spck_only_classes_count"],
             "recipients": recipients,
             "recipients_sha256": recipients_sha256,
             "content_sha256": content_sha256,
@@ -1321,6 +1422,10 @@ async def send_failed_classes_report_email(
         "failed_count": len(failed_rows),
         "total_classes_count": package["total_classes_count"],
         "failed_classes_count": package["failed_classes_count"],
+        "nx_failed_count": package["nx_failed_count"],
+        "nx_failed_classes_count": package["nx_failed_classes_count"],
+        "spck_only_count": package["spck_only_count"],
+        "spck_only_classes_count": package["spck_only_classes_count"],
         "recipients": recipients,
         "recipients_sha256": recipients_sha256,
         "content_sha256": content_sha256,

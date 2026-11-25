@@ -2862,7 +2862,7 @@ class BcnbActionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(merged_note, "QC ghi tay | [LMS] Chưa điểm danh")
 
         # 2. When UNVERIFIED (e.g. partial fetch), legacy [LMS] Chưa ghi nội dung bài học is dropped
-        #    when current raw_lms already has [LMS] Điền tóm tắt bài
+        #    when current raw_lms already has [LMS] Chưa có nội dung bài
         row_unverified = {
             "evidence_state": "SUBMITTED_VERIFIED",
             "lesson": "12",
@@ -2870,12 +2870,12 @@ class BcnbActionTests(unittest.IsolatedAsyncioTestCase):
             "lms_comments": {"status": "UNVERIFIED"},
             "lms_spck": {"status": "UNVERIFIED"},
             "lms_quality_issues": [
-                {"code": "LMS_SUMMARY_NOTE", "severity": "NOTE", "text": "[LMS] Điền tóm tắt bài"},
+                {"code": "LMS_SUMMARY_NOTE", "severity": "NOTE", "text": "[LMS] Chưa có nội dung bài"},
                 {"code": "LMS_MANUAL_CHECK", "severity": "NOTE", "text": "[LMS] Kiểm tra tay trên LMS"},
             ],
             "quality_issues": [
                 "[LMS] Chưa ghi nội dung bài học",
-                {"code": "LMS_SUMMARY_NOTE", "severity": "NOTE", "text": "[LMS] Điền tóm tắt bài"},
+                {"code": "LMS_SUMMARY_NOTE", "severity": "NOTE", "text": "[LMS] Chưa có nội dung bài"},
                 {"code": "LMS_MANUAL_CHECK", "severity": "NOTE", "text": "[LMS] Kiểm tra tay trên LMS"},
             ],
             "zalo_content_issues": [],
@@ -2895,11 +2895,42 @@ class BcnbActionTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(sync_unv)
         eff_texts = [x.get("text") if isinstance(x, dict) else str(x) for x in eff_unv]
-        self.assertEqual(eff_texts, ["[LMS] Điền tóm tắt bài", "[LMS] Kiểm tra tay trên LMS"])
+        self.assertEqual(eff_texts, ["[LMS] Chưa có nội dung bài", "[LMS] Kiểm tra tay trên LMS"])
         self.assertNotIn(
             "[LMS] Chưa ghi nội dung bài học",
             [x.get("text") if isinstance(x, dict) else str(x) for x in row_unverified["quality_issues"]],
         )
+
+        # 3. Prior verified [SPCK] Chưa nộp (0/6) + [SPCK] Kiểm tra tay trên LMS -> strips [SPCK] Kiểm tra tay trên LMS
+        row_spck_dup = {
+            "evidence_state": "NOT_FOUND_VERIFIED",
+            "lesson": "12",
+            "lms_attendance": {"status": "VERIFIED", "attended_count": 6},
+            "lms_comments": {"status": "COMPLETE", "submitted_count": 6},
+            "lms_spck": {"status": "UNVERIFIED", "submitted_count": 0},
+            "lms_quality_issues": [
+                {"code": "LMS_SUMMARY_NOTE", "severity": "NOTE", "text": "[LMS] Chưa có nội dung bài"},
+                {"code": "LMS_MANUAL_CHECK", "severity": "NOTE", "text": "[SPCK] Kiểm tra tay trên LMS"},
+                {"code": "LMS_SPCK_MISSING", "severity": "FAIL", "text": "[SPCK] Chưa nộp (0/6)"},
+            ],
+            "quality_issues": [
+                {"code": "LMS_SUMMARY_NOTE", "severity": "NOTE", "text": "[LMS] Chưa có nội dung bài"},
+                {"code": "LMS_MANUAL_CHECK", "severity": "NOTE", "text": "[SPCK] Kiểm tra tay trên LMS"},
+                {"code": "LMS_SPCK_MISSING", "severity": "FAIL", "text": "[SPCK] Chưa nộp (0/6)"},
+            ],
+            "zalo_content_issues": [],
+            "scan_target": {"class_code": "VT-ROB-SEMIA06", "lesson": "12"},
+        }
+        eff_spck_dup, sync_spck_dup = _collect_row_verifiable_auto_issues(
+            row_spck_dup,
+            existing_note="[LMS] Điền tóm tắt bài; [SPCK] Chưa nộp (0/6)",
+            lms_slots_by_class={"VT-ROB-SEMIA06": [{"index": 11, "studentWorksFetchError": True}]},
+            proven_auto_issues=["[LMS] Điền tóm tắt bài", "[SPCK] Chưa nộp (0/6)"],
+        )
+        self.assertTrue(sync_spck_dup)
+        eff_spck_texts = [x.get("text") if isinstance(x, dict) else str(x) for x in eff_spck_dup]
+        self.assertEqual(eff_spck_texts, ["[LMS] Chưa có nội dung bài", "[SPCK] Chưa nộp (0/6)"])
+        self.assertNotIn("[SPCK] Kiểm tra tay trên LMS", eff_spck_texts)
 
 
 if __name__ == "__main__":

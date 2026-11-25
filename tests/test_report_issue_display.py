@@ -103,7 +103,8 @@ class ReportIssueDisplayTests(unittest.TestCase):
         fields = _prepare_email_row_fields(1, row)
         self.assertEqual(fields["issue_description"], "; ".join([COMMENT, MISSING]))
         csv_rows = list(csv.reader(io.StringIO(build_weekly_summary_csv([row]))))
-        self.assertEqual(csv_rows[1][7], "; ".join([COMMENT, MISSING]))
+        self.assertEqual(len(csv_rows[0]), 8)
+        self.assertEqual(csv_rows[1][6], "; ".join([COMMENT, MISSING]))
 
     def test_reason_semicolons_and_manual_notes_keep_their_text(self):
         reason = "[LMS] Nhận xét cần xem lại (2/4 nhận xét; chưa rõ điểm mạnh: 1/4; chưa rõ lời khuyên: 2/4)"
@@ -220,10 +221,9 @@ class ReportIssueDisplayTests(unittest.TestCase):
         self.assertEqual(f3["zalo_status"], "❌ Chưa nhận xét")
         self.assertEqual(f3["evaluation_status"], "❌ Đã hoàn tất nhận xét LMS, chưa nhận xét Zalo")
         self.assertEqual(f3["is_zalo_missing"], "1")
-        self.assertIn(
-            "❌ Đã hoàn tất nhận xét LMS, chưa nhận xét Zalo",
-            build_weekly_summary_csv([zalo_missing_and_spck_row]),
-        )
+        zalo_missing_csv = build_weekly_summary_csv([zalo_missing_and_spck_row])
+        self.assertIn("❌ Chưa nhận xét", zalo_missing_csv)
+        self.assertNotIn("Tình trạng đánh giá", zalo_missing_csv)
         l14_stale_review = {
             **zalo_missing_and_spck_row,
             "lesson": "14",
@@ -233,10 +233,9 @@ class ReportIssueDisplayTests(unittest.TestCase):
             _prepare_email_row_fields(4, l14_stale_review)["evaluation_status"],
             "✅ Đã hoàn thành nhận xét",
         )
-        self.assertIn(
-            "✅ Đã hoàn thành nhận xét",
-            build_weekly_summary_csv([l14_stale_review]),
-        )
+        l14_csv = build_weekly_summary_csv([l14_stale_review])
+        self.assertIn("✅ Miễn báo cáo (Buổi 14)", l14_csv)
+        self.assertNotIn("Tình trạng đánh giá", l14_csv)
         manual_stale_review = {
             **zalo_missing_and_spck_row,
             "manual_approved": True,
@@ -247,10 +246,9 @@ class ReportIssueDisplayTests(unittest.TestCase):
             _prepare_email_row_fields(5, manual_stale_review)["evaluation_status"],
             "✅ Đã hoàn thành nhận xét",
         )
-        self.assertIn(
-            "✅ Đã hoàn thành nhận xét",
-            build_weekly_summary_csv([manual_stale_review]),
-        )
+        manual_csv = build_weekly_summary_csv([manual_stale_review])
+        self.assertIn("✅ Đã duyệt tay & Tích BCNB", manual_csv)
+        self.assertNotIn("Tình trạng đánh giá", manual_csv)
 
         package = build_failed_classes_email_package(
             week=45,
@@ -261,20 +259,12 @@ class ReportIssueDisplayTests(unittest.TestCase):
             recipients=["quangda@mindx.net.vn"],
         )
         html_tbl = package["html_table"]
+        self.assertNotIn("Tình trạng đánh giá", html_tbl)
+        self.assertEqual(package["nx_failed_count"], 1)
+        self.assertEqual(package["spck_only_count"], 2)
+        self.assertIn("Lưu ý lớp chưa hoàn tất SPCK trên LMS", html_tbl)
         self.assertIn(
             'color:#dc2626;font-weight:700;"><span style="color:#dc2626;font-weight:700;">❌ Chưa nhận xét</span></td>',
-            html_tbl,
-        )
-        self.assertIn(
-            'color:#dc2626;font-weight:700;"><span style="color:#dc2626;font-weight:700;">❌ Đã hoàn tất nhận xét LMS, chưa nhận xét Zalo</span></td>',
-            html_tbl,
-        )
-        self.assertIn(
-            'color:#b45309;font-weight:600;"><span style="color:#b45309;font-weight:600;">⚠️ Chưa nộp SPCK trên LMS</span></td>',
-            html_tbl,
-        )
-        self.assertIn(
-            'color:#b45309;font-weight:600;"><span style="color:#b45309;font-weight:600;">⚠️ SPCK chưa có nhận xét trên LMS</span></td>',
             html_tbl,
         )
         parsed = IssueListParser()
@@ -285,8 +275,8 @@ class ReportIssueDisplayTests(unittest.TestCase):
         self.assertEqual(
             warn_items,
             [
-                "[LMS] Chưa nộp SPCK (4/4 HS)",
                 "[LMS] SPCK chưa có nhận xét (4/4 HS)",
+                "[LMS] Chưa nộp SPCK (4/4 HS)",
                 "[LMS] SPCK chưa có nhận xét (4/4 HS)",
             ],
         )
@@ -382,14 +372,17 @@ class ReportIssueDisplayTests(unittest.TestCase):
         parsed.feed(pkg["html_table"])
         red_items = [item for item, style in zip(parsed.items, parsed.styles) if "#dc2626" in style]
         warn_items = [item for item, style in zip(parsed.items, parsed.styles) if "#b45309" in style]
-        self.assertEqual(red_items, ["[Zalo] Chưa gửi báo cáo nhận xét trên nhóm Zalo"])
+        self.assertEqual(
+            red_items,
+            ["[LMS] Chưa NX (1/4)", "[Zalo] Chưa gửi báo cáo nhận xét trên nhóm Zalo"],
+        )
         self.assertEqual(
             warn_items,
-            ["[SPCK] Chưa nộp (0/4)", "[SPCK] Chưa NX (1/4)"],
+            ["[SPCK] Chưa NX (1/4)", "[SPCK] Chưa nộp (0/4)"],
         )
         self.assertIn("[LMS] Chưa NX (1/4)", parsed.items)
         self.assertIn("[SPCK] Bổ sung tên SP, ảnh", parsed.items)
-        self.assertIn("[LMS] Điền tóm tắt bài", parsed.items)
+        self.assertIn("[LMS] Chưa có nội dung bài", parsed.items)
 
     def test_legacy_and_muc_a_dedup_and_missing_attendance_email_csv_display(self):
         from services.report_email_service import _short_url_issue
@@ -421,20 +414,20 @@ class ReportIssueDisplayTests(unittest.TestCase):
             _split_display_issues(_resolve_row_issue_description(row_rob_dup, st={})),
             [
                 "QC nhắc riêng",
-                "[LMS] Điền tóm tắt bài",
+                "[LMS] Chưa có nội dung bài",
                 "[LMS] Kiểm tra tay trên LMS",
                 "[Zalo] Thiếu ngày/buổi",
             ],
         )
 
-        # Reverse order + compound Mức A summary note ([LMS] Điền tóm tắt bài, viết kỹ NX)
+        # Reverse order + compound Mức A summary note ([LMS] Điền tóm tắt bài, viết kỹ NX) -> [LMS] Chưa có nội dung bài, viết kỹ NX
         row_compound = {
             "qc_issue_note": "[LMS] Chưa ghi nội dung bài học",
             "lms_quality_issues": ["[LMS] Điền tóm tắt bài, viết kỹ NX", "[LMS] Chưa ghi nội dung bài học"],
         }
         self.assertEqual(
             _resolve_row_issue_description(row_compound, st={}),
-            "[LMS] Điền tóm tắt bài, viết kỹ NX",
+            "[LMS] Chưa có nội dung bài, viết kỹ NX",
         )
 
         # 2. MISSING_ATTENDANCE row renders ❌ Chưa điểm danh LMS and [LMS] Chưa điểm danh in Email & CSV
@@ -466,6 +459,168 @@ class ReportIssueDisplayTests(unittest.TestCase):
         csv_text = build_weekly_summary_csv([missing_att_row])
         self.assertIn("❌ Chưa điểm danh LMS", csv_text)
         self.assertIn("[LMS] Chưa điểm danh", csv_text)
+
+    def test_dec_056_8col_email_csv_red_lms_and_spck_separate_table_and_dedup(self) -> None:
+        import csv
+        import io
+        from services.report_email_service import EMAIL_TABLE_HEADERS
+        from repositories.report_repository import CSV_HEADERS
+
+        self.assertEqual(len(EMAIL_TABLE_HEADERS), 8)
+        self.assertNotIn("Tình trạng đánh giá", EMAIL_TABLE_HEADERS)
+        self.assertEqual(len(CSV_HEADERS), 8)
+        self.assertNotIn("Tình trạng đánh giá", CSV_HEADERS)
+
+        pta15_row = {
+            "class_code": "VT-C4K-PTA15",
+            "teacher": "Giảng viên PTA15",
+            "lesson": "1",
+            "class_date": "22/11/2026",
+            "zalo_status": "✅ Đã nộp – Có minh chứng",
+            "evidence_state": "SUBMITTED_VERIFIED",
+            "lms_attendance": {"status": "VERIFIED", "attended_count": 6, "absent_count": 0},
+            "lms_comments": {"status": "MISSING", "submitted_count": 0},
+            "lms_quality_issues": [
+                {"code": "LMS_QUALITY_FAIL", "severity": "FAIL", "text": "[LMS] Chưa NX (6/6)"},
+                {"code": "LMS_SUMMARY_NOTE", "severity": "NOTE", "text": "[LMS] Điền tóm tắt bài"},
+            ],
+        }
+        partial_lms_row = {
+            "class_code": "VT-C4K-PTB02",
+            "teacher": "Giảng viên PTB02",
+            "lesson": "3",
+            "class_date": "22/11/2026",
+            "zalo_status": "✅ Đã nộp – Có minh chứng",
+            "evidence_state": "SUBMITTED_VERIFIED",
+            "lms_attendance": {"status": "VERIFIED", "attended_count": 6, "absent_count": 0},
+            "lms_comments": {"status": "MISSING", "submitted_count": 5},
+            "lms_quality_issues": [
+                {"code": "LMS_QUALITY_FAIL", "severity": "FAIL", "text": "[LMS] Chưa NX (1/6)"},
+            ],
+        }
+        semia06_row = {
+            "class_code": "VT-ROB-SEMIA06",
+            "teacher": "Giảng viên SEMIA06",
+            "lesson": "12",
+            "class_date": "22/11/2026",
+            "zalo_status": "❌ Chưa nhận xét",
+            "evidence_state": "NOT_FOUND_VERIFIED",
+            "lms_attendance": {"status": "VERIFIED", "attended_count": 6, "absent_count": 0},
+            "lms_comments": {"status": "COMPLETE", "submitted_count": 6},
+            "lms_spck": {"status": "UNVERIFIED", "submitted_count": 0},
+            "qc_issue_note": "[SPCK] Chưa nộp (0/6); [LMS] Điền tóm tắt bài; [SPCK] Kiểm tra tay trên LMS",
+            "lms_quality_issues": [
+                {"code": "LMS_SUMMARY_NOTE", "severity": "NOTE", "text": "[LMS] Điền tóm tắt bài"},
+                {"code": "LMS_MANUAL_CHECK", "severity": "NOTE", "text": "[SPCK] Kiểm tra tay trên LMS"},
+                {"code": "LMS_SPCK_MISSING", "severity": "FAIL", "text": "[SPCK] Chưa nộp (0/6)"},
+            ],
+        }
+        prea16_spck_only = {
+            "class_code": "VT-ROB-PREA16",
+            "teacher": "Giảng viên PREA16",
+            "lesson": "12",
+            "class_date": "17/11/2026",
+            "zalo_status": "✅ Đã nộp – Có minh chứng",
+            "evidence_state": "SUBMITTED_VERIFIED",
+            "lms_attendance": {"status": "VERIFIED", "attended_count": 5, "absent_count": 0},
+            "lms_comments": {"status": "COMPLETE", "submitted_count": 5},
+            "lms_spck": {"status": "MISSING", "submitted_count": 0},
+            "lms_quality_issues": [
+                {"code": "LMS_SPCK_MISSING", "severity": "FAIL", "text": "[SPCK] Chưa nộp (0/5)"},
+            ],
+        }
+
+        pkg = build_failed_classes_email_package(
+            week=47,
+            year=2026,
+            failed_rows=[pta15_row, partial_lms_row, semia06_row, prea16_spck_only],
+            total_rows_count=20,
+            selected_job_id=580,
+            recipients=["quangda@mindx.net.vn"],
+        )
+        self.assertEqual(pkg["nx_failed_count"], 3)
+        self.assertEqual(pkg["spck_only_count"], 1)
+        self.assertIn("3/20 buổi lỗi NX (3 lớp) · 1 buổi lưu ý SPCK", pkg["subject"])
+        self.assertNotIn("Tình trạng đánh giá", pkg["html_body"])
+        self.assertNotIn("Tình trạng đánh giá", pkg["text_table"])
+        self.assertIn(
+            '<span style="color:#dc2626;font-weight:700;">❌ Chưa nhận xét</span>',
+            pkg["html_table"],
+        )
+        self.assertIn(
+            '<span style="color:#dc2626;font-weight:700;">❌ Chưa nhận xét (thiếu 1/6 HS)</span>',
+            pkg["html_table"],
+        )
+        self.assertIn("[LMS] Chưa có nội dung bài", pkg["html_table"])
+        self.assertNotIn("[LMS] Điền tóm tắt bài", pkg["html_table"])
+        self.assertNotIn("[SPCK] Kiểm tra tay trên LMS", pkg["html_table"])
+
+        parsed_csv = list(csv.reader(io.StringIO(pkg["csv_text"].lstrip("\ufeff"))))
+        self.assertEqual(parsed_csv[0], list(CSV_HEADERS))
+        self.assertEqual(len(parsed_csv[0]), 8)
+        self.assertEqual(len(parsed_csv), 5)
+
+        # Zero NX errors + SPCK-only row still builds valid email
+        pkg_spck_only = build_failed_classes_email_package(
+            week=47,
+            year=2026,
+            failed_rows=[prea16_spck_only],
+            total_rows_count=20,
+            selected_job_id=581,
+            recipients=["quangda@mindx.net.vn"],
+        )
+        self.assertEqual(pkg_spck_only["nx_failed_count"], 0)
+        self.assertEqual(pkg_spck_only["spck_only_count"], 1)
+        self.assertIn("0/20 buổi lỗi NX · 1 buổi lưu ý SPCK", pkg_spck_only["subject"])
+        self.assertIn("Không có buổi học lỗi nhận xét Zalo / LMS", pkg_spck_only["html_table"])
+        self.assertIn("VT-ROB-PREA16", pkg_spck_only["html_table"])
+
+        # Missing attendance & legacy LMS comment-missing bullets are red (#dc2626) in NX LMS and issue list
+        missing_att_pkg = build_failed_classes_email_package(
+            week=47,
+            year=2026,
+            failed_rows=[
+                {
+                    "class_code": "VT-ROB-ATT01",
+                    "teacher": "Giảng viên T",
+                    "lesson": "12",
+                    "class_date": "22/11/2026",
+                    "zalo_status": "✅ Đã nộp – Có minh chứng",
+                    "evidence_state": "SUBMITTED_VERIFIED",
+                    "lms_attendance": {"status": "MISSING_ATTENDANCE", "attended_count": 0},
+                    "lms_comments": {"status": "MISSING_ATTENDANCE", "submitted_count": 0},
+                    "lms_quality_issues": [
+                        {"code": "LMS_QUALITY_FAIL", "severity": "FAIL", "text": "[LMS] Chưa điểm danh"},
+                    ],
+                },
+                {
+                    "class_code": "VT-C4K-LEG01",
+                    "teacher": "Giảng viên L",
+                    "lesson": "4",
+                    "class_date": "22/11/2026",
+                    "zalo_status": "✅ Đã nộp – Có minh chứng",
+                    "evidence_state": "SUBMITTED_VERIFIED",
+                    "lms_status": "❌ Chưa nhận xét",
+                    "issue_description": "[LMS] Thiếu nhận xét học viên (2/6 HS)",
+                },
+            ],
+            total_rows_count=10,
+            selected_job_id=582,
+            recipients=["quangda@mindx.net.vn"],
+        )
+        self.assertIn(
+            '<span style="color:#dc2626;font-weight:700;">❌ Chưa điểm danh LMS</span>',
+            missing_att_pkg["html_table"],
+        )
+        parsed_att = IssueListParser()
+        parsed_att.feed(missing_att_pkg["html_table"])
+        red_att_items = [
+            item for item, style in zip(parsed_att.items, parsed_att.styles) if "#dc2626" in style
+        ]
+        self.assertEqual(
+            red_att_items,
+            ["[LMS] Chưa điểm danh", "[LMS] Thiếu nhận xét học viên (2/6 HS)"],
+        )
 
 
 if __name__ == "__main__":

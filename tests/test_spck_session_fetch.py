@@ -96,6 +96,11 @@ global.fetch = async (_url, req) => {
         req.signal.addEventListener('abort', () => reject(Error('timeout')), {once: true});
     });
     if (mode === 'http_error') return {ok: false, status: 503};
+    if (mode === 'http_401') return {ok: false, status: 401};
+    if (mode === 'http_400') return {ok: false, status: 400};
+    if (mode === 'http_429') return {ok: false, status: 429};
+    if (mode === 'transient_429' && requests.length === 1) return {ok: false, status: 429};
+    if (mode === 'transient_503' && requests.length === 1) return {ok: false, status: 503};
     if (mode === 'graphql_error') return response({errors: [{message: 'synthetic error'}]});
     if (mode === 'invalid_json') return {ok: true, status: 200, text: async () => '{'};
     const pair = b.variables.studentId;
@@ -263,8 +268,26 @@ class SpckSessionFetchTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_batch_work_request_budget_fails_closed(self) -> None:
         data, page = await self.fetch("budget", count=1)
-        self.assertEqual(len(page.requests), 120)
+        self.assertEqual(len(page.requests), 240)
         self.assertTrue(data["VT-JSB59"][2].get("studentWorksFetchError"))
+
+    async def test_transient_503_retries_and_succeeds(self) -> None:
+        for mode in ("transient_503", "transient_429"):
+            with self.subTest(mode=mode):
+                data, page = await self.fetch(mode, count=4)
+                self.assertEqual(len(page.requests), 2)
+                slot = data["VT-GA38"][0]
+                self.assertFalse(slot.get("studentWorksFetchError"))
+                result = evaluate_lms_spck_quality(slot, class_code="VT-GA38", lesson=12)
+                self.assertEqual(result["submitted_count"], 4)
+                self.assertEqual(result["issues"], [])
+
+        # Persistent 401 (authFailed) and 400 do not retry; persistent 429 stops after max 2 attempts
+        for mode, expected_reqs in (("http_401", 1), ("http_400", 1), ("http_429", 2)):
+            with self.subTest(mode=mode):
+                data, page = await self.fetch(mode, count=4)
+                self.assertEqual(len(page.requests), expected_reqs)
+                self.assertTrue(data["VT-GA38"][0].get("studentWorksFetchError"))
 
     async def test_only_selected_lesson_fetches_spck_even_with_three_slots(self) -> None:
         page = _NodePage("scope", 7)

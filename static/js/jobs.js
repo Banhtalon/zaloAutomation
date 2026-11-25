@@ -1073,8 +1073,17 @@
         function hasRowSpckMissingFail(r) {
             if (!r || typeof r !== 'object') return false;
             const st = r.scan_target && typeof r.scan_target === 'object' ? r.scan_target : {};
+            const att = r.lms_attendance || st.lms_attendance;
+            if (att && ['UNVERIFIED', 'EXEMPT', 'MISSING_ATTENDANCE'].includes(att.status)) {
+                return false;
+            }
             const spck = r.lms_spck || st.lms_spck;
-            if (spck && spck.status) return spck.status === 'MISSING';
+            if (spck && spck.status) {
+                if (spck.status === 'MISSING') return true;
+                if (['NOT_REQUIRED', 'EXEMPT', 'COMPLETE', 'PARTIAL', 'MISSING_ATTENDANCE'].includes(spck.status)) {
+                    return false;
+                }
+            }
             const spckFailRe = /^(?:\[LMS\]\s*Chưa\s+nộp\s+SPCK|\[SPCK\]\s*Chưa\s+nộp)\b/i;
             const checkVal = val => {
                 if (!val) return false;
@@ -1099,11 +1108,15 @@
         function hasRowSpckCommentMissingFail(r) {
             if (!r || typeof r !== 'object') return false;
             const st = r.scan_target && typeof r.scan_target === 'object' ? r.scan_target : {};
-            const spck = r.lms_spck || st.lms_spck;
-            if (spck && ['NOT_REQUIRED', 'EXEMPT', 'UNVERIFIED', 'MISSING', 'MISSING_ATTENDANCE'].includes(spck.status)) {
+            const att = r.lms_attendance || st.lms_attendance;
+            if (att && ['UNVERIFIED', 'EXEMPT', 'MISSING_ATTENDANCE'].includes(att.status)) {
                 return false;
             }
-            if (spck && Number.isInteger(spck.missing_comment_count)) {
+            const spck = r.lms_spck || st.lms_spck;
+            if (spck && ['NOT_REQUIRED', 'EXEMPT', 'MISSING', 'MISSING_ATTENDANCE'].includes(spck.status)) {
+                return false;
+            }
+            if (spck && spck.status !== 'UNVERIFIED' && Number.isInteger(spck.missing_comment_count)) {
                 return spck.missing_comment_count > 0;
             }
             const spckCommentFailRe = /^(?:\[LMS\]\s*SPCK\s+chưa\s+có\s+nhận\s+xét|\[SPCK\]\s*Chưa\s+(?:có\s+)?(?:nhận\s+xét|NX))\b/i;
@@ -1349,7 +1362,17 @@
                     if (!attendance || ![comments.submitted_count, attendance.attended_count, attendance.absent_count].every(n => Number.isInteger(n) && n >= 0)) {
                         return '⏳ Chờ xác minh điểm danh/nhận xét LMS';
                     }
-                    let status = `${comments.status === 'MISSING' ? '❌' : '✅'} Đã nhận xét ${comments.submitted_count}/${attendance.attended_count} HS đi học`;
+                    let status;
+                    if (comments.status === 'MISSING') {
+                        if (comments.submitted_count === 0) {
+                            status = '❌ Chưa nhận xét';
+                        } else {
+                            const missingN = Math.max(1, attendance.attended_count - comments.submitted_count);
+                            status = `❌ Chưa nhận xét (thiếu ${missingN}/${attendance.attended_count} HS)`;
+                        }
+                    } else {
+                        status = `✅ Đã nhận xét ${comments.submitted_count}/${attendance.attended_count} HS đi học`;
+                    }
                     if (attendance.absent_count) status += ` · ${attendance.absent_count} HS nghỉ miễn`;
                     if (comments.status === 'REVIEW') status += ' · cần xem lại chất lượng';
                     if (attendance.unverified_count) status += ' · còn điểm danh chờ xác minh';
@@ -1386,13 +1409,13 @@
             };
             const semanticDedupInfo = text => {
                 const s = String(text || '').trim();
-                if (/^\[LMS\]\s*Chưa\s+ghi\s+nội\s+dung\s+bài\s+học\.?$/i.test(s)) {
-                    return { key: '[lms:summary_note]', preferred: false, compoundSummary: false };
-                }
-                if (/^\[LMS\]\s*Điền\s+tóm\s+tắt\s+bài\.?$/i.test(s)) {
+                if (/^\[LMS\]\s*Chưa\s+có\s+nội\s+dung\s+bài\.?$/i.test(s)) {
                     return { key: '[lms:summary_note]', preferred: true, compoundSummary: false };
                 }
-                if (/^\[LMS\]\s*Điền\s+tóm\s+tắt\s+bài\s*,/i.test(s)) {
+                if (/^\[LMS\]\s*(?:Chưa\s+ghi\s+nội\s+dung\s+bài\s+học|Điền\s+tóm\s+tắt\s+bài)\.?$/i.test(s)) {
+                    return { key: '[lms:summary_note]', preferred: false, compoundSummary: false };
+                }
+                if (/^\[LMS\]\s*(?:Chưa\s+có\s+nội\s+dung\s+bài|Điền\s+tóm\s+tắt\s+bài)\s*,/i.test(s)) {
                     return { key: normKey(s), preferred: true, compoundSummary: true };
                 }
                 if (/^\[LMS\]\s*(?!.*SPCK).*cần\s+kiểm\s+tra\s+thủ\s+công\.?$/i.test(s)) {
@@ -1438,6 +1461,14 @@
                 }
                 if (isAuto || /^(?:\[LMS\]|\[Zalo\]|\[SPCK\])\s*/i.test(cleaned)) {
                     cleaned = normalizeAutoIssueTextInJs(cleaned);
+                }
+                if (/^\[LMS\]\s*Điền\s+tóm\s+tắt\s+bài\.?$/i.test(cleaned)) {
+                    cleaned = '[LMS] Chưa có nội dung bài';
+                } else {
+                    const mSumComp = cleaned.match(/^\[LMS\]\s*Điền\s+tóm\s+tắt\s+bài(\s*,\s*.+)$/i);
+                    if (mSumComp) {
+                        cleaned = `[LMS] Chưa có nội dung bài${mSumComp[1]}`;
+                    }
                 }
                 const { key, preferred, compoundSummary } = semanticDedupInfo(cleaned);
                 if (!key) return;
@@ -1502,7 +1533,19 @@
             addVal(r.quality_issues || st.quality_issues, false);
             addVal(r.lms_quality_issues || st.lms_quality_issues, false);
             addVal(r.zalo_content_issues || st.zalo_content_issues, false);
-            return parts.join('; ');
+            const isSpckManualCheck = p => (
+                /^\[SPCK\]\s*Kiểm\s+tra\s+tay\b/i.test(p)
+                || /^\[(?:LMS|SPCK)\]\s*(?=.*SPCK).*cần\s+kiểm\s+tra\s+thủ\s+công\.?$/i.test(p)
+                || /^\[SPCK\]\s*.*cần\s+kiểm\s+tra\s+thủ\s+công\.?$/i.test(p)
+            );
+            const hasVerifiedSpck = parts.some(
+                p => !isSpckManualCheck(p)
+                    && /^(?:\[SPCK\]\s*(?:Chưa\s+nộp|Chưa\s+(?:có\s+)?(?:nhận\s+xét|NX)|Bổ\s+sung)\b|\[LMS\]\s*(?:Chưa\s+nộp\s+SPCK|SPCK\s+chưa\s+có\s+nhận\s+xét|Thiếu\s+nộp\s+SPCK|Tiêu\s+đề\s+SPCK|SPCK\b|(?:Nhận|Nhan)\s+x[eé]t\s+SPCK)\b)/i.test(p)
+            );
+            const finalParts = hasVerifiedSpck
+                ? parts.filter(p => !isSpckManualCheck(p))
+                : parts;
+            return finalParts.join('; ');
         }
 
         function resolveDashboardRowSpckStatus(r) {
@@ -1682,7 +1725,7 @@
             ) {
                 return false;
             }
-            const allowedSegRe = /^(?:\[SPCK\]\s*(?:Chưa\s+nộp\b|Chưa\s+(?:có\s+)?(?:nhận\s+xét|NX)\b|Bổ\s+sung\b|Kiểm\s+tra\s+tay\b)|\[LMS\]\s*(?:Chưa\s+nộp\s+SPCK|SPCK\s+chưa\s+có\s+nhận\s+xét|Thiếu\s+nộp\s+SPCK|Tiêu\s+đề\s+SPCK|SPCK\b|(?:Nhận|Nhan)\s+x[eé]t\s+SPCK|Chưa\s+ghi\s+nội\s+dung\s+bài\s+học|Lỗi\s+điểm\s+danh|Nhận\s+xét\s+(?:sơ\s+sài|học\s+viên\s+trùng\s+lặp|Checkpoint\s+thiếu|Checkpoint\s+chưa\s+đủ|buổi\s+học\s+cần\s+xem\s+lại|cần\s+xem\s+lại)|(?:(?:Điền\s+tóm\s+tắt\s+bài|Kiểm\s+tra\s+điểm\s+danh-NX|Viết\s+kỹ\s+NX|Đủ\s+khung\s+Checkpoint)\s*(?:,\s*|$))+|Kiểm\s+tra\s+tay\b|.*cần\s+kiểm\s+tra\s+thủ\s+công)|\[Zalo\]\s*(?:Báo\s+cáo\s+không\s+ghi\s+ngày\/buổi|Thiếu\s+ngày\/buổi|Báo\s+cáo\s+ghi\s+sai\s+ngày|Sai\s+ngày\s*\(|Đã\s+báo\s+cáo\s+nhưng\s+ghi\s+sai\s+ngày))/i;
+            const allowedSegRe = /^(?:\[SPCK\]\s*(?:Chưa\s+nộp\b|Chưa\s+(?:có\s+)?(?:nhận\s+xét|NX)\b|Bổ\s+sung\b|Kiểm\s+tra\s+tay\b)|\[LMS\]\s*(?:Chưa\s+nộp\s+SPCK|SPCK\s+chưa\s+có\s+nhận\s+xét|Thiếu\s+nộp\s+SPCK|Tiêu\s+đề\s+SPCK|SPCK\b|(?:Nhận|Nhan)\s+x[eé]t\s+SPCK|Chưa\s+ghi\s+nội\s+dung\s+bài\s+học|Lỗi\s+điểm\s+danh|Nhận\s+xét\s+(?:sơ\s+sài|học\s+viên\s+trùng\s+lặp|Checkpoint\s+thiếu|Checkpoint\s+chưa\s+đủ|buổi\s+học\s+cần\s+xem\s+lại|cần\s+xem\s+lại)|(?:(?:Điền\s+tóm\s+tắt\s+bài|Chưa\s+có\s+nội\s+dung\s+bài|Kiểm\s+tra\s+điểm\s+danh-NX|Viết\s+kỹ\s+NX|Đủ\s+khung\s+Checkpoint)\s*(?:,\s*|$))+|Kiểm\s+tra\s+tay\b|.*cần\s+kiểm\s+tra\s+thủ\s+công)|\[Zalo\]\s*(?:Báo\s+cáo\s+không\s+ghi\s+ngày\/buổi|Thiếu\s+ngày\/buổi|Báo\s+cáo\s+ghi\s+sai\s+ngày|Sai\s+ngày\s*\(|Đã\s+báo\s+cáo\s+nhưng\s+ghi\s+sai\s+ngày))/i;
             const segments = String(resolvedIssue || '')
                 .split(/\s*[;|]\s*(?=\[(?:LMS|Zalo|SPCK)\])/i)
                 .map(s => s.trim())
@@ -1861,7 +1904,9 @@
                         const resolvedLms = resolveDashboardRowLmsStatus(r);
                         if (resolvedLms && resolvedLms !== 'Chưa quét LMS') {
                             const lmsDetail = document.createElement('div');
-                            lmsDetail.className = 'status-detail';
+                            lmsDetail.className = resolvedLms.startsWith('❌')
+                                ? 'status-detail font-semibold text-rose-700'
+                                : 'status-detail';
                             lmsDetail.textContent = `LMS: ${resolvedLms}`;
                             td.appendChild(lmsDetail);
                         }

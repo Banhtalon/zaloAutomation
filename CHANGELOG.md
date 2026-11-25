@@ -4,6 +4,26 @@ Tài liệu này ghi lại toàn bộ quá trình hình thành, phát triển ki
 
 ---
 
+## [2026-11-25] — Chuẩn hóa Báo cáo Quản lý 8 cột (`1A + 2A + 3A`), chống trùng `[SPCK] Kiểm tra tay trên LMS` & đổi nhãn `[LMS] Chưa có nội dung bài` (`DEC-056`)
+
+- **Phân loại luồng & Review**: `[FULL GATE]` (`DEC-047`, `DEC-054`) · Review độc lập Read-Only `Neon XHigh` (`gemini-4-neon-xhigh`, `@verifier`: `#2` `NEEDS_FIX` 1 `[P0]` + 4 `[P2]` → `#4` `NEEDS_FIX` 1 `[P1]` ở `jobs.js` → **`#6` `VERDICT: PASS`**, `0` P0/P1/P2).
+- **Thay đổi Logic & Báo cáo (1A, 2A, 3A, 4)**:
+  - **Phương án 1A (`NX LMS`) — `services/report_status.py`, `services/report_email_service.py`, `static/js/jobs.js`**: Chuẩn hóa `resolve_lms_status` (kèm `TypeGuard[int]` `_is_non_negative_int`) và `resolveDashboardRowLmsStatus` hiển thị `"❌ Chưa nhận xét"` (0 HS) hoặc `"❌ Chưa nhận xét (thiếu k/N HS)"` khi thiếu nhận xét `≥ 1` HS đi học; tô chữ đỏ đậm (`#dc2626` bọc `<span>` tương thích Webmail) cho cột `NX LMS` khi bắt đầu bằng `❌` và gạch đầu dòng `[LMS] Chưa NX|nhận xét|điểm danh|Chưa có nhận xét|Thiếu nhận xét` trong Email HTML; tô `text-rose-700` dòng `LMS:` trên Dashboard.
+  - **Phương án 2A (Email & CSV 8 cột) — `services/report_email_service.py`, `repositories/report_repository.py`**: Bỏ cột `Tình trạng đánh giá` khỏi `EMAIL_TABLE_HEADERS`, bảng HTML, bảng Unicode, `detail_lines`, `CSV_HEADERS` và `build_weekly_summary_csv` (dọn dead code `eval_status` & import thừa `NOT_FOUND_VERIFIED` trong CSV builder), giữ nguyên `_resolve_row_evaluation_status` / `evaluation_status` cho Dashboard và API nội bộ.
+  - **Phương án 3A (Tách bảng SPCK & Chống trùng `Kiểm tra tay`) — `services/report_status.py`, `services/lms_quality_service.py`, `services/zalo_bcnb_service.py`, `repositories/report_repository.py`, `services/report_email_service.py`, `static/js/jobs.js`**:
+    - Thêm `is_spck_only_warning_row` để tách các buổi đã xong NX Zalo & LMS nhưng chỉ thiếu/chưa NX SPCK sang **Bảng 2** cảnh báo vàng (`#b45309`) trong Email Quản lý, không cộng vào `nx_failed_count` ở tiêu đề và thống kê đầu thư (hỗ trợ cả ca 0 lỗi NX + có SPCK-only).
+    - Trong `has_spck_missing_fail` / `has_spck_comment_missing_fail` (Python & JS), giữ khóa fail-closed trả `False` khi `lms_attendance.status` là `UNVERIFIED`/`EXEMPT`/`MISSING_ATTENDANCE`, nhưng vẫn kiểm tra `lms_quality_issues` / `quality_issues` khi điểm danh `VERIFIED` và `lms_spck.status == "UNVERIFIED"`.
+    - Nâng trần `fetchSessionWorks` (`MAX_WORK_REQUESTS=240`, `workDeadline=max(45000, timeoutMs*4)`) kèm 1 lần retry `250ms` cho 5xx/429/network/abort; chặn ghép `[SPCK] Kiểm tra tay trên LMS` khi đã có lỗi SPCK xác minh (vẫn giữ `[LMS] Kiểm tra tay trên LMS` D4 và bảo toàn `[LMS] SPCK cần kiểm tra thủ công` độc lập).
+  - **Đổi nhãn `[LMS] Chưa có nội dung bài`**: Sinh nhãn mới ở `evaluate_lms_slot_summary`, mở rộng nhận diện/khử trùng ở `report_status.py`, `zalo_bcnb_service.py`, `report_repository.py`, `report_email_service.py`, `jobs.js` và giữ nguyên `services/bcnb_safety.py` bảo toàn provenance `external_action_audit`.
+- **Kiểm thử & Tệp thay đổi (15 code/test files + 3 docs)**:
+  - `services/{report_status,lms_quality_service,zalo_bcnb_service,report_email_service}.py`, `repositories/report_repository.py`, `static/js/jobs.js`, `tests/{check_template_js.js,test_report_status.py,test_report_issue_display.py,test_lms_quality_service.py,test_api_routes_unit.py,test_attendance_reporting.py,test_spck_session_fetch.py,test_bcnb_actions.py,test_today_ops_service.py}`, `PROJECT_DECISIONS.md`, `PROJECT_STATE.md`, `CHANGELOG.md`.
+- **Bằng chứng kiểm chứng (`[FULL GATE]`)**:
+  - Bộ kiểm chứng cô lập (`ZALO_QUALITY_ISOLATED=1`): **`791/791`** regression tests `OK` (`282.114s`), branch coverage **`80.4%`**, Ruff `0` lỗi, `PHASE 9A QUALITY PASS` (`secrets=0`), Phase 2–9B gates `PASS`, `phase3-app-smoke-ok`, `compileall` `exit 0`.
+  - `node tests/check_template_js.js`: `template-js-contract-ok scripts=8 handlers=48 behavior=14` (`exit 0`).
+  - Review độc lập Read-Only `Neon XHigh` (`@verifier`, `#6`): **`VERDICT: PASS`**, xác nhận `mypy` `0` lỗi trên `80` files (`ruff`/`mypy`/`check_template_js.js`/`git diff --check` đều exit `0`). Ghi nhận giới hạn OS trên shell máy chính: Windows Application Control chặn DLL `mypy` và `graphify.exe`.
+
+---
+
 ## [2026-11-22] — Nâng cấp `Lớp Hôm Nay (Live)`: Mặc định `Tuần thực tế`, Bỏ qua lớp đã tick đủ & Tick-only BCNB + Lưu từng dòng (`Wave 8`, `DEC-055`)
 
 - **Phân loại luồng & Review**: `[FULL GATE]` (`DEC-047`, `DEC-054`) · Pre-Wave 8 SQLite hot backup + restore drill (`5d16848` -> `.backups/db/pre-wave8-20261122-080139.sqlite3`) · Review độc lập Read-Only `Neon XHigh` (`gemini-4-neon-xhigh`, `@verifier`, `#11` `NEEDS_FIX` -> sửa đủ 4 findings & thêm 4 regression tests `#14` -> **`#16` `VERDICT: PASS`**, `[P0]=0, [P1]=0, [P2]=0`).

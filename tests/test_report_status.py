@@ -1036,7 +1036,7 @@ class ReportStatusSingleSourceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("VT-C4K-PTB16", resolved or {})
         self.assertEqual(
             [issue_text(x) for x in results[0]["lms_quality_issues"]],
-            ["[LMS] Điền tóm tắt bài"],
+            ["[LMS] Chưa có nội dung bài"],
         )
         self.assertEqual(
             issue_severity(results[0]["lms_quality_issues"][0]),
@@ -1536,7 +1536,7 @@ class ReportStatusSingleSourceTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("VT-C4K-LATE1", rows_after)
             executed_row = rows_after["VT-C4K-LATE1"]
             self.assertFalse(bool(executed_row.get("session_deferred")))
-            self.assertEqual(executed_row["lms_status"], "❌ Đã nhận xét 0/1 HS đi học")
+            self.assertEqual(executed_row["lms_status"], "❌ Chưa nhận xét")
             self.assertTrue(executed_row["is_failed"])
 
             # 5. Newer deferred snapshot (Snapshot 2) MUST override older non-deferred snapshot (Snapshot 1)
@@ -1687,7 +1687,17 @@ class ReportStatusSingleSourceTests(unittest.IsolatedAsyncioTestCase):
                 SEVERITY_NOTE,
             ),
             (
+                "[LMS] Chưa có nội dung bài, kiểm tra điểm danh-NX, viết kỹ NX",
+                ISSUE_CODE_LMS_COMMENT_NOTE,
+                SEVERITY_NOTE,
+            ),
+            (
                 "[LMS] Điền tóm tắt bài, đủ khung Checkpoint",
+                ISSUE_CODE_LMS_COMMENT_NOTE,
+                SEVERITY_NOTE,
+            ),
+            (
+                "[LMS] Chưa có nội dung bài, đủ khung Checkpoint",
                 ISSUE_CODE_LMS_COMMENT_NOTE,
                 SEVERITY_NOTE,
             ),
@@ -1696,7 +1706,13 @@ class ReportStatusSingleSourceTests(unittest.IsolatedAsyncioTestCase):
                 ISSUE_CODE_LMS_ATTENDANCE_CONFLICT_NOTE,
                 SEVERITY_NOTE,
             ),
+            (
+                "[LMS] Chưa có nội dung bài, kiểm tra điểm danh-NX",
+                ISSUE_CODE_LMS_ATTENDANCE_CONFLICT_NOTE,
+                SEVERITY_NOTE,
+            ),
             ("[LMS] Điền tóm tắt bài", ISSUE_CODE_LMS_SUMMARY_NOTE, SEVERITY_NOTE),
+            ("[LMS] Chưa có nội dung bài", ISSUE_CODE_LMS_SUMMARY_NOTE, SEVERITY_NOTE),
             ("[LMS] Kiểm tra tay trên LMS", ISSUE_CODE_LMS_MANUAL_CHECK, SEVERITY_NOTE),
             ("[Zalo] Thiếu ngày/buổi", ISSUE_CODE_ZALO_REPORT_NO_DATE, SEVERITY_NOTE),
             ("[Zalo] Sai ngày (04/11)", ISSUE_CODE_ZALO_REPORT_WRONG_DATE, SEVERITY_NOTE),
@@ -1927,6 +1943,102 @@ class ReportStatusSingleSourceTests(unittest.IsolatedAsyncioTestCase):
         }
         self.assertEqual(resolve_lms_status(deferred_row), "⏳ Chưa tới giờ kiểm tra")
         self.assertFalse(is_failed(deferred_row))
+
+    def test_dec_056_lms_missing_comment_wording_and_spck_only_classification(self) -> None:
+        from services.report_status import (
+            SUBMITTED_VERIFIED,
+            has_spck_comment_missing_fail,
+            has_spck_missing_fail,
+            is_failed,
+            is_spck_only_warning_row,
+            resolve_lms_status,
+        )
+
+        # 1A: missing any LMS comment -> ❌ Chưa nhận xét (0/N) or ❌ Chưa nhận xét (thiếu k/N HS)
+        row_0_of_6 = {
+            "lms_attendance": {"status": "VERIFIED", "attended_count": 6, "absent_count": 0},
+            "lms_comments": {"status": "MISSING", "submitted_count": 0},
+        }
+        self.assertEqual(resolve_lms_status(row_0_of_6), "❌ Chưa nhận xét")
+
+        row_5_of_6 = {
+            "lms_attendance": {"status": "VERIFIED", "attended_count": 6, "absent_count": 2},
+            "lms_comments": {"status": "MISSING", "submitted_count": 5},
+        }
+        self.assertEqual(
+            resolve_lms_status(row_5_of_6),
+            "❌ Chưa nhận xét (thiếu 1/6 HS) · 2 HS nghỉ miễn",
+        )
+
+        row_6_of_6 = {
+            "lms_attendance": {"status": "VERIFIED", "attended_count": 6, "absent_count": 0},
+            "lms_comments": {"status": "COMPLETE", "submitted_count": 6},
+        }
+        self.assertEqual(resolve_lms_status(row_6_of_6), "✅ Đã nhận xét 6/6 HS đi học")
+
+        # 3A: UNVERIFIED lms_spck still preserves verified [SPCK] Chưa nộp / Chưa NX fail in issues
+        row_spck_unverified_with_prior = {
+            "status": "✅ Đã nộp – Có minh chứng",
+            "evidence_state": SUBMITTED_VERIFIED,
+            "lms_attendance": {"status": "VERIFIED", "attended_count": 6, "absent_count": 0},
+            "lms_comments": {"status": "COMPLETE", "submitted_count": 6},
+            "lms_spck": {"status": "UNVERIFIED", "submitted_count": 0},
+            "lms_quality_issues": [
+                {"code": "LMS_SPCK_MISSING", "severity": "FAIL", "text": "[SPCK] Chưa nộp (0/6)"},
+            ],
+        }
+        self.assertTrue(has_spck_missing_fail(row_spck_unverified_with_prior))
+        self.assertTrue(is_failed(row_spck_unverified_with_prior))
+        self.assertTrue(is_spck_only_warning_row(row_spck_unverified_with_prior))
+
+        row_spck_comm_unverified = {
+            "status": "✅ Đã nộp – Có minh chứng",
+            "evidence_state": SUBMITTED_VERIFIED,
+            "lms_attendance": {"status": "VERIFIED", "attended_count": 4, "absent_count": 0},
+            "lms_comments": {"status": "COMPLETE", "submitted_count": 4},
+            "lms_spck": {"status": "UNVERIFIED", "submitted_count": 0, "missing_comment_count": 0},
+            "lms_quality_issues": [
+                {"code": "LMS_SPCK_COMMENT_MISSING", "severity": "FAIL", "text": "[SPCK] Chưa NX (1/4)"},
+            ],
+        }
+        self.assertTrue(has_spck_comment_missing_fail(row_spck_comm_unverified))
+        self.assertTrue(is_spck_only_warning_row(row_spck_comm_unverified))
+
+        # Rows with Zalo or LMS error are NOT spck-only
+        self.assertFalse(
+            is_spck_only_warning_row(
+                {
+                    **row_spck_unverified_with_prior,
+                    "status": "❌ Chưa nhận xét",
+                    "evidence_state": "NOT_FOUND_VERIFIED",
+                }
+            )
+        )
+        self.assertFalse(
+            is_spck_only_warning_row(
+                {
+                    **row_spck_unverified_with_prior,
+                    "lms_comments": {"status": "MISSING", "submitted_count": 5},
+                }
+            )
+        )
+        self.assertFalse(is_spck_only_warning_row({**row_spck_unverified_with_prior, "session_deferred": True}))
+
+        # Attendance UNVERIFIED / EXEMPT / MISSING_ATTENDANCE + UNVERIFIED lms_spck + stale SPCK issues -> False
+        for att_st in ("UNVERIFIED", "EXEMPT", "MISSING_ATTENDANCE"):
+            row_att_guard = {
+                "status": "✅ Đã nộp – Có minh chứng",
+                "evidence_state": SUBMITTED_VERIFIED,
+                "lms_attendance": {"status": att_st, "attended_count": 0},
+                "lms_comments": {"status": "EXEMPT" if att_st == "EXEMPT" else att_st, "submitted_count": 0},
+                "lms_spck": {"status": "UNVERIFIED", "submitted_count": 0},
+                "lms_quality_issues": [
+                    {"code": "LMS_SPCK_MISSING", "severity": "FAIL", "text": "[SPCK] Chưa nộp (0/6)"},
+                    {"code": "LMS_SPCK_COMMENT_MISSING", "severity": "FAIL", "text": "[SPCK] Chưa NX (1/4)"},
+                ],
+            }
+            self.assertFalse(has_spck_missing_fail(row_att_guard), msg=f"att={att_st}")
+            self.assertFalse(has_spck_comment_missing_fail(row_att_guard), msg=f"att={att_st}")
 
 
 if __name__ == "__main__":

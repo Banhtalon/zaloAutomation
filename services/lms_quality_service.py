@@ -362,7 +362,7 @@ def evaluate_lms_slot_summary(summary_raw: str | None) -> dict[str, Any]:
     """Check whether `slot.summary` contains substantive lesson content (Requirement #3)."""
     summary_issue = make_structured_issue(
         ISSUE_CODE_LMS_SUMMARY_NOTE,
-        "[LMS] Điền tóm tắt bài",
+        "[LMS] Chưa có nội dung bài",
         severity=SEVERITY_NOTE,
     )
     clean_text = _strip_html(summary_raw)
@@ -4875,49 +4875,77 @@ async def fetch_lms_class_slots_via_page(
 
         // The LMS silently caps unpaginated work queries at 20 rows: scope by session,
         // then verify every missing attendee (or every attendee at the cap) separately.
-        const MAX_WORK_REQUESTS = 120;
+        const MAX_WORK_REQUESTS = 240;
         const MAX_WORKS_RESPONSE_BYTES = 5 * 1024 * 1024;
         const WORK_RESPONSE_CAP = 20;
         let workRequests = 0;
-        const workDeadline = Date.now() + Math.max(15000, (timeoutMs || 12000) * 3);
+        const workDeadline = Date.now() + Math.max(45000, (timeoutMs || 12000) * 4);
         const fetchSessionWorks = async (sessionId, studentId) => {
-            if (authFailed || workRequests >= MAX_WORK_REQUESTS || Date.now() >= workDeadline) return null;
-            workRequests += 1;
-            const ctrl = new AbortController();
-            const timer = setTimeout(() => ctrl.abort(), Math.min(timeoutMs || 12000, Math.max(1, workDeadline - Date.now())));
-            try {
-                const resp = await fetch(endpoint, {
-                    method: 'POST',
-                    headers: { 'content-type': 'application/json', 'authorization': bearerHeader, 'token': rawTokenHeader },
-                    body: JSON.stringify({
-                        operationName: 'findAllStudentWorks',
-                        variables: { sessionId, ...(studentId ? { studentId } : {}) },
-                        query: studentWorksQuery
-                    }),
-                    signal: ctrl.signal
-                });
-                if (!resp.ok) {
-                    if (isAuthErrorPayload(resp.status, null)) authFailed = true;
+            for (let attempt = 0; attempt < 2; attempt++) {
+                if (authFailed || workRequests >= MAX_WORK_REQUESTS || Date.now() >= workDeadline) return null;
+                workRequests += 1;
+                const ctrl = new AbortController();
+                const timer = setTimeout(() => ctrl.abort(), Math.min(timeoutMs || 12000, Math.max(1, workDeadline - Date.now())));
+                let canRetry = false;
+                try {
+                    const resp = await fetch(endpoint, {
+                        method: 'POST',
+                        headers: { 'content-type': 'application/json', 'authorization': bearerHeader, 'token': rawTokenHeader },
+                        body: JSON.stringify({
+                            operationName: 'findAllStudentWorks',
+                            variables: { sessionId, ...(studentId ? { studentId } : {}) },
+                            query: studentWorksQuery
+                        }),
+                        signal: ctrl.signal
+                    });
+                    if (!resp.ok) {
+                        if (isAuthErrorPayload(resp.status, null)) {
+                            authFailed = true;
+                            return null;
+                        }
+                        if ((resp.status >= 500 || resp.status === 429) && attempt === 0 && Date.now() < workDeadline) {
+                            canRetry = true;
+                        } else {
+                            return null;
+                        }
+                    } else {
+                        const bounded = await readBoundedJson(resp, MAX_WORKS_RESPONSE_BYTES);
+                        if (bounded.overflow || Date.now() >= workDeadline) return null;
+                        if (ctrl.signal.aborted) {
+                            if (attempt === 0 && Date.now() < workDeadline) {
+                                canRetry = true;
+                            } else {
+                                return null;
+                            }
+                        } else {
+                            const payload = bounded.data;
+                            if (payload && Array.isArray(payload.errors) && payload.errors.length) {
+                                if (isAuthErrorPayload(resp.status, payload)) authFailed = true;
+                                return null;
+                            }
+                            const result = (((payload || {}).data || {}).findAllStudentWorks || {});
+                            const rows = result.data;
+                            if (!Array.isArray(rows) || rows.length > maxStudents * 2 || result.truncated === true || result.hasNextPage === true) return null;
+                            const total = result.total != null ? result.total : result.totalCount;
+                            if (total != null && (!Number.isInteger(Number(total)) || Number(total) !== rows.length)) return null;
+                            return rows;
+                        }
+                    }
+                } catch (_) {
+                    if (attempt === 0 && !authFailed && Date.now() < workDeadline) {
+                        canRetry = true;
+                    } else {
+                        return null;
+                    }
+                } finally {
+                    clearTimeout(timer);
+                }
+                if (!canRetry || authFailed || workRequests >= MAX_WORK_REQUESTS || Date.now() >= workDeadline) {
                     return null;
                 }
-                const bounded = await readBoundedJson(resp, MAX_WORKS_RESPONSE_BYTES);
-                if (bounded.overflow || ctrl.signal.aborted || Date.now() >= workDeadline) return null;
-                const payload = bounded.data;
-                if (payload && Array.isArray(payload.errors) && payload.errors.length) {
-                    if (isAuthErrorPayload(resp.status, payload)) authFailed = true;
-                    return null;
-                }
-                const result = (((payload || {}).data || {}).findAllStudentWorks || {});
-                const rows = result.data;
-                if (!Array.isArray(rows) || rows.length > maxStudents * 2 || result.truncated === true || result.hasNextPage === true) return null;
-                const total = result.total != null ? result.total : result.totalCount;
-                if (total != null && (!Number.isInteger(Number(total)) || Number(total) !== rows.length)) return null;
-                return rows;
-            } catch (_) {
-                return null;
-            } finally {
-                clearTimeout(timer);
+                await new Promise((r) => setTimeout(r, 250));
             }
+            return null;
         };
         const exactId = (value) => typeof value === 'string' && value.trim() && value === value.trim() && value.length <= 64 ? value : '';
         for (const code of classCodes) {
@@ -5899,7 +5927,8 @@ def inspect_and_attach_quality_issues(
             seen_lms = {issue_text(x) for x in lms_issues if issue_text(x)}
             current_lms_codes = {issue_code(x) for x in lms_issues if issue_code(x)}
             current_has_summary_note = ISSUE_CODE_LMS_SUMMARY_NOTE in current_lms_codes or any(
-                "dien tom tat bai" in fold_text(issue_text(x)) for x in lms_issues
+                ("dien tom tat bai" in fold_text(issue_text(x)) or "chua co noi dung bai" in fold_text(issue_text(x)))
+                for x in lms_issues
             )
             dedup_semantic_codes = {
                 ISSUE_CODE_LMS_SUMMARY_NOTE,
@@ -5942,6 +5971,21 @@ def inspect_and_attach_quality_issues(
                         continue
                     seen_lms.add(pt)
                     lms_issues.append(prior_l)
+
+        spck_verified_codes = {
+            ISSUE_CODE_LMS_SPCK_MISSING,
+            ISSUE_CODE_LMS_SPCK_COMMENT_MISSING,
+            ISSUE_CODE_LMS_SPCK_NOTE,
+        }
+        if any(issue_code(x) in spck_verified_codes for x in lms_issues):
+            lms_issues = [
+                x
+                for x in lms_issues
+                if not (
+                    issue_code(x) == ISSUE_CODE_LMS_MANUAL_CHECK
+                    and "spck" in fold_text(issue_text(x))
+                )
+            ]
 
         if slot_evaluated or lms_issues:
             result["lms_quality_issues"] = list(lms_issues)

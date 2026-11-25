@@ -96,7 +96,7 @@ class AttendanceReportingTests(unittest.TestCase):
         self.assertEqual(_annotate_item_status(dict(row))["lms_status"], status)
         csv = build_weekly_summary_csv([row])
         self.assertIn(status, csv)
-        self.assertIn("SPCK 7/7 HS đi học · 1 HS nghỉ miễn", csv)
+        self.assertNotIn("Tình trạng đánh giá", csv)
         self.assertNotIn("❌ Chưa nộp SPCK", csv)
         email = _prepare_email_row_fields(1, row)
         self.assertEqual(email["lms_status"], status)
@@ -171,10 +171,9 @@ class AttendanceReportingTests(unittest.TestCase):
                 _prepare_email_row_fields(1, stale_row)["evaluation_status"],
                 "⏳ Đã hoàn tất nhận xét Zalo, chưa nhận xét LMS",
             )
-            self.assertIn(
-                "⏳ Đã hoàn tất nhận xét Zalo, chưa nhận xét LMS",
-                build_weekly_summary_csv([stale_row]),
-            )
+            stale_csv = build_weekly_summary_csv([stale_row])
+            self.assertIn("❌ Chưa nhận xét (thiếu 1/7 HS) · 1 HS nghỉ miễn", stale_csv)
+            self.assertNotIn("Tình trạng đánh giá", stale_csv)
 
         incomplete_counts_row = {
             "class_code": "VT-CSA03",

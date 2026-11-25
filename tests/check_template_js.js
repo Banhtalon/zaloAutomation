@@ -1869,8 +1869,8 @@ async function checkWeeklyHistoryAndCsvExport() {
           total_count: 2,
           filename: `Bao_Cao_Lop_Loi_Tuan_W${String(parsedBody.week || 41).padStart(2, '0')}_${parsedBody.year || 2026}.csv`,
           csv_text:
-            '\uFEFFMã lớp,Giáo viên,Buổi học,Ngày học,Trạng thái Zalo,Trạng thái LMS,Tình trạng đánh giá,Mô tả vấn đề (TE/TF/QC),Thời gian kiểm chứng\r\n' +
-            'VT-C4K-GI35,Nguyễn Văn A,1,10/10/2026,❌ Chưa tìm thấy báo cáo,❌ Chưa nhận xét (Trễ 3 ngày),⏳ Chưa nhận xét Zalo & LMS,[Zalo] Chưa gửi báo cáo nhận xét trên nhóm Zalo,2026-10-11T14:02:00Z\r\n',
+            '\uFEFFMã lớp,Giáo viên,Buổi học,Ngày học,Trạng thái Zalo,Trạng thái LMS,Mô tả vấn đề (TE/TF/QC),Thời gian kiểm chứng\r\n' +
+            'VT-C4K-GI35,Nguyễn Văn A,1,10/10/2026,❌ Chưa tìm thấy báo cáo,❌ Chưa nhận xét (Trễ 3 ngày),[Zalo] Chưa gửi báo cáo nhận xét trên nhóm Zalo,2026-10-11T14:02:00Z\r\n',
           html_table: '<table><tr><td>VT-C4K-GI35</td></tr></table>',
           text_table: '┌──────────┐\n│ VT-C4K   │\n└──────────┘',
           text_body: 'BẢNG ĐẦY ĐỦ 10 LỚP: VT-C4K-GI35',
@@ -1894,16 +1894,16 @@ async function checkWeeklyHistoryAndCsvExport() {
           ok: true,
           status: 200,
           text: async () =>
-            '\uFEFFMã lớp,Giáo viên,Buổi học,Ngày học,Trạng thái Zalo,Trạng thái LMS,Tình trạng đánh giá,Mô tả vấn đề (TE/TF/QC),Thời gian kiểm chứng\r\n',
+            '\uFEFFMã lớp,Giáo viên,Buổi học,Ngày học,Trạng thái Zalo,Trạng thái LMS,Mô tả vấn đề (TE/TF/QC),Thời gian kiểm chứng\r\n',
         };
       }
       return {
         ok: true,
         status: 200,
         text: async () =>
-          '\uFEFFMã lớp,Giáo viên,Buổi học,Ngày học,Trạng thái Zalo,Trạng thái LMS,Tình trạng đánh giá,Mô tả vấn đề (TE/TF/QC),Thời gian kiểm chứng\r\n' +
-          "VT-JSB16,'=Trần Thị B,4,11/10/2026,✅ Đã nộp – Có minh chứng,✅ Đã nhận xét & Tích BCNB,✅ Đã hoàn thành nhận xét,,2026-10-11T14:00:00Z\r\n" +
-          'VT-C4K-GI35,Nguyễn Văn A,1,10/10/2026,❌ Chưa tìm thấy báo cáo,❌ Chưa nhận xét (Trễ 3 ngày),⏳ Chưa nhận xét Zalo & LMS,[Zalo] Chưa gửi báo cáo nhận xét trên nhóm Zalo,2026-10-11T14:02:00Z\r\n',
+          '\uFEFFMã lớp,Giáo viên,Buổi học,Ngày học,Trạng thái Zalo,Trạng thái LMS,Mô tả vấn đề (TE/TF/QC),Thời gian kiểm chứng\r\n' +
+          "VT-JSB16,'=Trần Thị B,4,11/10/2026,✅ Đã nộp – Có minh chứng,✅ Đã nhận xét & Tích BCNB,,2026-10-11T14:00:00Z\r\n" +
+          'VT-C4K-GI35,Nguyễn Văn A,1,10/10/2026,❌ Chưa tìm thấy báo cáo,❌ Chưa nhận xét (Trễ 3 ngày),[Zalo] Chưa gửi báo cáo nhận xét trên nhóm Zalo,2026-10-11T14:02:00Z\r\n',
       };
     }
     if (url.startsWith('/api/reports/weekly-summary?week=41') && pendingW41ExportRejecter === 'DEFER_REJECT') {
@@ -2019,13 +2019,13 @@ async function checkWeeklyHistoryAndCsvExport() {
     'Selective rescan must block when historical week view is active',
   );
 
-  // 3. Export CSV produces UTF-8 with BOM, 9 management columns, formula sanitization, and no raw chat leak
+  // 3. Export CSV produces UTF-8 with BOM, 8 management columns, formula sanitization, and no raw chat leak
   const csvOutput = await vm.runInContext('exportWeeklySummaryCsv()', harness.context);
   assertFrontend(
     csvOutput.startsWith(
-      '\uFEFFMã lớp,Giáo viên,Buổi học,Ngày học,Trạng thái Zalo,Trạng thái LMS,Tình trạng đánh giá,Mô tả vấn đề (TE/TF/QC),Thời gian kiểm chứng\r\n',
+      '\uFEFFMã lớp,Giáo viên,Buổi học,Ngày học,Trạng thái Zalo,Trạng thái LMS,Mô tả vấn đề (TE/TF/QC),Thời gian kiểm chứng\r\n',
     ),
-    'Exported CSV must start with UTF-8 BOM and exact 9 management headers',
+    'Exported CSV must start with UTF-8 BOM and exact 8 management headers',
   );
   assertFrontend(
     csvOutput.includes("VT-JSB16,'=Trần Thị B,4,11/10/2026") &&
@@ -2322,6 +2322,31 @@ async function checkWeeklyHistoryAndCsvExport() {
   assertFrontend(
     vm.runInContext('rememberSelectiveScanBaseline()', harness.context) === false,
     'Row with explicit null snapshot_id must be blocked from selective rescan baseline',
+  );
+
+  // 8b. Dashboard DOM must highlight failed LMS status (starting with ❌) with text-rose-700
+  vm.runInContext(
+    `renderZaloResults([
+      {
+        group: 'VT-C4K-PTA15',
+        person: 'GV PTA15',
+        status: '✅ Đã nộp – Có minh chứng',
+        evidence_state: 'SUBMITTED_VERIFIED',
+        lms_attendance: { status: 'VERIFIED', attended_count: 6, absent_count: 0 },
+        lms_comments: { status: 'MISSING', submitted_count: 0 },
+        lms_quality_issues: [{ code: 'LMS_QUALITY_FAIL', severity: 'FAIL', text: '[LMS] Chưa NX (6/6)' }],
+        scan_target: { week: 42, year: 2026, class_code: 'VT-C4K-PTA15', lesson: '1', class_date: '15/10/2026', class_date_iso: '2026-10-15' }
+      }
+    ], true, { snapshotId: 99, periodKey: '2026-W42' })`,
+    harness.context,
+  );
+  const pta15StatusChildren = harness.elements.get('results-table').children[0].children[3].children;
+  const pta15LmsDiv = pta15StatusChildren.find(ch => String(ch.textContent || '').startsWith('LMS: '));
+  assertFrontend(
+    Boolean(pta15LmsDiv) &&
+      pta15LmsDiv.textContent === 'LMS: ❌ Chưa nhận xét' &&
+      String(pta15LmsDiv.className || '').includes('text-rose-700'),
+    'Dashboard DOM LMS detail line must show ❌ Chưa nhận xét in text-rose-700',
   );
 
   // 9. Superseded live-mode request in onHistoryWeekChange must NOT wipe a newly loaded historical week
@@ -3952,6 +3977,36 @@ async function checkTodayLivePageWorkflow() {
         qc_issue_note: '[LMS] Chưa ghi nội dung bài học',
         lms_quality_issues: ['[LMS] Điền tóm tắt bài, viết kỹ NX', '[LMS] Chưa ghi nội dung bài học'],
       };
+      const semia06DupRow = {
+        lesson: '12',
+        status: '❌ Chưa nhận xét',
+        evidence_state: 'NOT_FOUND_VERIFIED',
+        lms_attendance: { status: 'VERIFIED', attended_count: 6, absent_count: 0 },
+        lms_comments: { status: 'COMPLETE', submitted_count: 6 },
+        lms_spck: { status: 'UNVERIFIED', submitted_count: 0 },
+        qc_issue_note: '[SPCK] Chưa nộp (0/6); [LMS] Điền tóm tắt bài; [SPCK] Kiểm tra tay trên LMS',
+        lms_quality_issues: ['[LMS] Điền tóm tắt bài', '[SPCK] Kiểm tra tay trên LMS', '[SPCK] Chưa nộp (0/6)'],
+      };
+      const legacySpckManualRow = {
+        qc_issue_note: '[LMS] Tiêu đề SPCK chưa ghi kèm tên học viên (2/4 HS); [LMS] Không tải được SPCK, cần kiểm tra thủ công',
+      };
+      const attGuardCheck = ['UNVERIFIED', 'EXEMPT', 'MISSING_ATTENDANCE'].every(attSt => {
+        const gRow = {
+          lms_attendance: { status: attSt, attended_count: 0 },
+          lms_comments: { status: attSt === 'EXEMPT' ? 'EXEMPT' : attSt, submitted_count: 0 },
+          lms_spck: { status: 'UNVERIFIED', submitted_count: 0 },
+          lms_quality_issues: ['[SPCK] Chưa nộp (0/6)', '[SPCK] Chưa NX (1/4)'],
+        };
+        return !hasRowSpckMissingFail(gRow) && !hasRowSpckCommentMissingFail(gRow);
+      });
+      const pta15MissingRow = {
+        lms_attendance: { status: 'VERIFIED', attended_count: 6, absent_count: 0 },
+        lms_comments: { status: 'MISSING', submitted_count: 0 },
+      };
+      const partialMissingRow = {
+        lms_attendance: { status: 'VERIFIED', attended_count: 6, absent_count: 1 },
+        lms_comments: { status: 'MISSING', submitted_count: 5 },
+      };
       return collectTodayMissingReasons(ongoingB13).length === 0
         && !isTodayItemMissingLms(ongoingB13)
         && isTodaySpckComplete(allAbsentExempt)
@@ -3959,6 +4014,8 @@ async function checkTodayLivePageWorkflow() {
         && !isTodaySpckComplete(missingSpckComments)
         && isTodayItemMissingLms(missingSpckComments)
         && collectTodayMissingReasons(missingSpckComments).includes('[SPCK] Chưa NX (2/4)')
+        && resolveDashboardRowLmsStatus(pta15MissingRow) === '❌ Chưa nhận xét'
+        && resolveDashboardRowLmsStatus(partialMissingRow) === '❌ Chưa nhận xét (thiếu 1/6 HS) · 1 HS nghỉ miễn'
         && resolveDashboardRowLmsStatus(missingAttendanceRow) === '❌ Chưa điểm danh LMS'
         && resolveDashboardRowSpckStatus(missingAttendanceRow) === 'SPCK khóa (chưa điểm danh)'
         && resolveRowIsFailed(missingAttendanceRow) === true
@@ -3972,8 +4029,14 @@ async function checkTodayLivePageWorkflow() {
         )
         && isTodayItemMissingLms(todayMissingAtt)
         && JSON.stringify(collectTodayMissingReasons(todayMissingAtt)) === JSON.stringify(['Chưa điểm danh LMS'])
-        && resolveDashboardRowIssueDescription(legacyPlusMucARow) === 'QC nhắc riêng; [LMS] Điền tóm tắt bài; [LMS] Kiểm tra tay trên LMS; [Zalo] Thiếu ngày/buổi'
-        && resolveDashboardRowIssueDescription(compoundSummaryDedupRow) === '[LMS] Điền tóm tắt bài, viết kỹ NX'
+        && resolveDashboardRowIssueDescription(legacyPlusMucARow) === 'QC nhắc riêng; [LMS] Chưa có nội dung bài; [LMS] Kiểm tra tay trên LMS; [Zalo] Thiếu ngày/buổi'
+        && resolveDashboardRowIssueDescription(compoundSummaryDedupRow) === '[LMS] Chưa có nội dung bài, viết kỹ NX'
+        && resolveDashboardRowIssueDescription(semia06DupRow) === '[SPCK] Chưa nộp (0/6); [LMS] Chưa có nội dung bài'
+        && resolveDashboardRowIssueDescription(legacySpckManualRow) === '[LMS] Tiêu đề SPCK chưa ghi kèm tên học viên (2/4 HS)'
+        && resolveDashboardRowIssueDescription({ qc_issue_note: '[LMS] SPCK cần kiểm tra thủ công' }) === '[LMS] SPCK cần kiểm tra thủ công'
+        && resolveDashboardRowIssueDescription({ qc_issue_note: '[SPCK] Kiểm tra tay trên LMS' }) === '[SPCK] Kiểm tra tay trên LMS'
+        && attGuardCheck
+        && hasRowSpckMissingFail(semia06DupRow)
         && hasRowSpckMissingFail(mucASpckOnlyRow)
         && isRowSpckOnlyWarningFail(
           mucASpckOnlyRow,

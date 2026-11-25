@@ -1796,9 +1796,10 @@ class ApiRoutesUnitTests(unittest.IsolatedAsyncioTestCase):
                 csv_decoded = csv_resp.body.decode("utf-8")
                 self.assertTrue(csv_decoded.startswith("\ufeff"))
                 self.assertIn(
-                    "Mã lớp,Giáo viên,Buổi học,Ngày học,Trạng thái Zalo,Trạng thái LMS,Tình trạng đánh giá,Mô tả vấn đề (TE/TF/QC),Thời gian kiểm chứng",
+                    "Mã lớp,Giáo viên,Buổi học,Ngày học,Trạng thái Zalo,Trạng thái LMS,Mô tả vấn đề (TE/TF/QC),Thời gian kiểm chứng",
                     csv_decoded,
                 )
+                self.assertNotIn("Tình trạng đánh giá", csv_decoded)
                 self.assertIn("VT-JSB16,Trần Thị B,5,18/10/2026", csv_decoded)
 
                 # 4. Validation errors
@@ -2315,7 +2316,7 @@ class ApiRoutesUnitTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn("VT-JSB16", smtp_sent_resp["csv_text"])
                 self.assertIn("<table", smtp_sent_resp["html_table"])
                 self.assertIn("Mô tả vấn đề (TE/TF/QC)", smtp_sent_resp["html_table"])
-                self.assertIn("Tình trạng đánh giá", smtp_sent_resp["html_table"])
+                self.assertNotIn("Tình trạng đánh giá", smtp_sent_resp["html_table"])
                 self.assertIn("┌", smtp_sent_resp["text_table"])
                 self.assertIn("VT-C4K-GI35", smtp_sent_resp["text_table"])
                 self.assertFalse(
@@ -3226,7 +3227,8 @@ class ApiRoutesUnitTests(unittest.IsolatedAsyncioTestCase):
         )
         csv_text = build_weekly_summary_csv([summary_row])
         self.assertIn("✅ Miễn báo cáo (Buổi 14)", csv_text)
-        self.assertIn("✅ Đã hoàn thành nhận xét", csv_text)
+        self.assertIn("✅ Đã nộp LMS", csv_text)
+        self.assertNotIn("Tình trạng đánh giá", csv_text)
         self.assertNotIn("Zalo cần kiểm tra", csv_text)
 
     async def test_wave5_stage_5_4_eligibility_resource_limits_active_lock_unscanned_rows_and_session_lms(

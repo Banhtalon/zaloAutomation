@@ -998,7 +998,8 @@ def _collect_row_verifiable_auto_issues(
     current_raw_texts = {issue_text(item) for item in raw_lms if issue_text(item)}
     raw_lms_codes = {issue_code(item) for item in raw_lms if issue_code(item)}
     raw_lms_has_summary_note = ISSUE_CODE_LMS_SUMMARY_NOTE in raw_lms_codes or any(
-        "dien tom tat bai" in fold_text(issue_text(item)) for item in raw_lms
+        ("dien tom tat bai" in fold_text(issue_text(item)) or "chua co noi dung bai" in fold_text(issue_text(item)))
+        for item in raw_lms
     )
     dedup_semantic_codes = {
         ISSUE_CODE_LMS_SUMMARY_NOTE,
@@ -1077,6 +1078,28 @@ def _collect_row_verifiable_auto_issues(
                 lms_auto.append(item)
     else:
         lms_auto = list(raw_lms)
+
+    def _is_spck_manual_check_item(item: Any) -> bool:
+        return (
+            issue_code(item) == ISSUE_CODE_LMS_MANUAL_CHECK
+            and "spck" in fold_text(issue_text(item))
+        )
+
+    if any(issue_code(x) in spck_codes for x in lms_auto):
+        lms_auto = [x for x in lms_auto if not _is_spck_manual_check_item(x)]
+        for list_field in ("lms_quality_issues", "quality_issues"):
+            if isinstance(result.get(list_field), list):
+                result[list_field] = [
+                    x for x in result[list_field] if not _is_spck_manual_check_item(x)
+                ]
+            if isinstance(result.get("scan_target"), dict) and isinstance(
+                result["scan_target"].get(list_field), list
+            ):
+                result["scan_target"][list_field] = [
+                    x
+                    for x in result["scan_target"][list_field]
+                    if not _is_spck_manual_check_item(x)
+                ]
 
     if superseded_texts:
         for list_field in ("lms_quality_issues", "quality_issues"):
@@ -1183,6 +1206,7 @@ def _deferred_issue_family_keys(item: Any) -> set[str]:
             keys.add("family:lms_missing_comment")
         if (
             "dien tom tat bai" in folded_body
+            or "chua co noi dung bai" in folded_body
             or "chua ghi noi dung bai hoc" in folded_body
             or code == ISSUE_CODE_LMS_SUMMARY_NOTE
         ):

@@ -42,7 +42,7 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
         ):
             res = evaluate_lms_slot_summary(bad_summary)
             self.assertFalse(res["has_valid_summary"], msg=f"Should fail: {bad_summary}")
-            self.assertEqual(issue_text(res["issue"]), "[LMS] Điền tóm tắt bài")
+            self.assertEqual(issue_text(res["issue"]), "[LMS] Chưa có nội dung bài")
             self.assertEqual(issue_severity(res["issue"]), SEVERITY_NOTE)
 
         for good_summary in (
@@ -322,7 +322,7 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(scan_results[0]["lms_quality_issues"]), 1)
         self.assertEqual(
             issue_text(scan_results[0]["lms_quality_issues"][0]),
-            "[LMS] Điền tóm tắt bài, viết kỹ NX",
+            "[LMS] Chưa có nội dung bài, viết kỹ NX",
         )
         self.assertEqual(
             issue_severity(scan_results[0]["lms_quality_issues"][0]),
@@ -872,7 +872,7 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
             selected_job_id=397,
             recipients=["quangda@mindx.net.vn"],
         )
-        self.assertEqual(len(CSV_HEADERS), 9)
+        self.assertEqual(len(CSV_HEADERS), 8)
         parsed_csv = list(csv.reader(io.StringIO(pkg10["csv_text"].lstrip("\ufeff"))))
         self.assertEqual(parsed_csv[0], list(CSV_HEADERS))
         self.assertEqual(len(parsed_csv), 11)
@@ -3172,8 +3172,11 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("color:#b45309;font-weight:600;", email_pkg["html_table"])
         self.assertNotIn("color:#b91c1c;font-weight:600;\">[SPCK]", email_pkg["html_table"])
+        self.assertEqual(email_pkg["nx_failed_count"], 0)
+        self.assertEqual(email_pkg["spck_only_count"], 1)
         self.assertIn("[SPCK] Chưa NX (1/2)", email_pkg["html_table"])
-        self.assertIn("⚠️ SPCK chưa có nhận xét trên LMS", email_pkg["html_table"])
+        self.assertIn("Lưu ý lớp chưa hoàn tất SPCK trên LMS", email_pkg["html_table"])
+        self.assertNotIn("Tình trạng đánh giá", email_pkg["html_table"])
 
     def test_phase65_attendance_conflict_spck_wording_and_robotics_rules(self) -> None:
         from services.lms_quality_service import evaluate_lms_spck_quality
@@ -4608,12 +4611,12 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
                 (
                     ISSUE_CODE_LMS_COMMENT_NOTE,
                     SEVERITY_NOTE,
-                    "[LMS] Điền tóm tắt bài, kiểm tra điểm danh-NX, viết kỹ NX",
+                    "[LMS] Chưa có nội dung bài, kiểm tra điểm danh-NX, viết kỹ NX",
                 ),
             ],
         )
 
-        # Checkpoint lesson (Coding B5): summary + shallow checkpoint -> "[LMS] Điền tóm tắt bài, đủ khung Checkpoint"
+        # Checkpoint lesson (Coding B5): summary + shallow checkpoint -> "[LMS] Chưa có nội dung bài, đủ khung Checkpoint"
         slot_cp = evaluate_lms_slot_quality(
             {
                 "summary": "",
@@ -4627,7 +4630,7 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             [(issue_code(x), issue_severity(x), issue_text(x)) for x in slot_cp["issues"]],
-            [(ISSUE_CODE_LMS_COMMENT_NOTE, SEVERITY_NOTE, "[LMS] Điền tóm tắt bài, đủ khung Checkpoint")],
+            [(ISSUE_CODE_LMS_COMMENT_NOTE, SEVERITY_NOTE, "[LMS] Chưa có nội dung bài, đủ khung Checkpoint")],
         )
 
         # Summary + attendance conflict only -> code = LMS_ATTENDANCE_CONFLICT_NOTE
@@ -4646,7 +4649,7 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
                 (
                     ISSUE_CODE_LMS_ATTENDANCE_CONFLICT_NOTE,
                     SEVERITY_NOTE,
-                    "[LMS] Điền tóm tắt bài, kiểm tra điểm danh-NX",
+                    "[LMS] Chưa có nội dung bài, kiểm tra điểm danh-NX",
                 )
             ],
         )
@@ -4671,7 +4674,7 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             [(issue_code(x), issue_severity(x), issue_text(x)) for x in slot_sum_only["issues"]],
-            [(ISSUE_CODE_LMS_SUMMARY_NOTE, SEVERITY_NOTE, "[LMS] Điền tóm tắt bài")],
+            [(ISSUE_CODE_LMS_SUMMARY_NOTE, SEVERITY_NOTE, "[LMS] Chưa có nội dung bài")],
         )
 
         # 2. SPCK: 0 submitted -> [SPCK] Chưa nộp (0/4); missing NX -> [SPCK] Chưa NX (x/y);
@@ -4870,7 +4873,7 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
         )
 
         # 2. When attendance is genuinely UNVERIFIED (truncated), legacy [LMS] Chưa ghi nội dung bài học
-        #    is deduplicated in favor of Mức A [LMS] Điền tóm tắt bài so they never coexist
+        #    is deduplicated in favor of Mức A [LMS] Chưa có nội dung bài so they never coexist
         row_unverified = {
             "class_code": "VT-KIND-ROB4B04",
             "lesson": "12",
@@ -4906,12 +4909,66 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             [issue_text(x) for x in row_unverified["lms_quality_issues"]],
-            ["[LMS] Điền tóm tắt bài", "[LMS] Kiểm tra tay trên LMS"],
+            ["[LMS] Chưa có nội dung bài", "[LMS] Kiểm tra tay trên LMS"],
         )
         self.assertIn(
             "[LMS] Chưa ghi nội dung bài học",
             [issue_text(x) for x in row_unverified["lms_previous_quality_issues"]],
         )
+
+        # 3. Prior verified [SPCK] Chưa nộp (0/6) + transient studentWorksFetchError -> keeps [SPCK] Chưa nộp (0/6),
+        #    never coexists with [SPCK] Kiểm tra tay trên LMS
+        row_semia06 = {
+            "class_code": "VT-ROB-SEMIA06",
+            "lesson": "12",
+            "class_date_iso": "2026-11-22",
+            "evidence_state": "NOT_FOUND_VERIFIED",
+            "lms_quality_issues": [
+                {"code": "LMS_SUMMARY_NOTE", "severity": "NOTE", "text": "[LMS] Điền tóm tắt bài"},
+                {"code": "LMS_SPCK_MISSING", "severity": "FAIL", "text": "[SPCK] Chưa nộp (0/6)"},
+            ],
+            "quality_issues": [
+                {"code": "LMS_SUMMARY_NOTE", "severity": "NOTE", "text": "[LMS] Điền tóm tắt bài"},
+                {"code": "LMS_SPCK_MISSING", "severity": "FAIL", "text": "[SPCK] Chưa nộp (0/6)"},
+            ],
+            "scan_target": {
+                "class_code": "VT-ROB-SEMIA06",
+                "lesson": "12",
+                "class_date": "22/11/2026",
+                "class_date_iso": "2026-11-22",
+                "khoi": "Robotics",
+            },
+        }
+        inspect_and_attach_quality_issues(
+            [row_semia06],
+            lms_slots_by_class={
+                "VT-ROB-SEMIA06": [
+                    {
+                        "_id": "s12-semi",
+                        "index": 11,
+                        "date": "2026-11-22",
+                        "summary": "",
+                        "studentAttendance": [
+                            {
+                                "status": "ATTENDED",
+                                "studentKey": f"s{i}",
+                                "comment": (
+                                    "Điểm mạnh: Con hiểu bài tốt và thực hành đúng quy trình.\n"
+                                    "Điểm cần cải thiện: Chú ý lắp nối chắc chắn hơn.\n"
+                                    "Lời khuyên: Ôn lại kiến thức buổi học."
+                                ),
+                            }
+                            for i in range(6)
+                        ],
+                        "studentWorksFetchError": True,
+                    }
+                ]
+            },
+            now=datetime(2026, 11, 25, 10, 0, tzinfo=BUSINESS_TIMEZONE),
+        )
+        semia_texts = [issue_text(x) for x in row_semia06["lms_quality_issues"]]
+        self.assertEqual(semia_texts, ["[LMS] Chưa có nội dung bài", "[SPCK] Chưa nộp (0/6)"])
+        self.assertNotIn("[SPCK] Kiểm tra tay trên LMS", semia_texts)
 
 
 if __name__ == "__main__":

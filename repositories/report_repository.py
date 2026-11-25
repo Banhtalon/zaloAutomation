@@ -17,15 +17,19 @@ from services.report_status import (
     CATEGORY_MISSING,
     CATEGORY_NOT_SCANNED,
     CATEGORY_REVIEW,
+    ISSUE_CODE_LMS_MANUAL_CHECK,
+    ISSUE_CODE_LMS_SPCK_COMMENT_MISSING,
+    ISSUE_CODE_LMS_SPCK_MISSING,
+    ISSUE_CODE_LMS_SPCK_NOTE,
     LESSON_14_EXEMPTION,
     LESSON_14_STATUS,
-    NOT_FOUND_VERIFIED,
     categorize_row,
     has_spck_comment_missing_fail,
     has_spck_missing_fail,
     is_failed,
     is_lesson_14,
     is_session_deferred,
+    issue_code,
     issue_text,
     resolve_lms_status,
     resolve_spck_status,
@@ -39,7 +43,6 @@ CSV_HEADERS: tuple[str, ...] = (
     "Ngày học",
     "Trạng thái Zalo",
     "Trạng thái LMS",
-    "Tình trạng đánh giá",
     "Mô tả vấn đề (TE/TF/QC)",
     "Thời gian kiểm chứng",
 )
@@ -201,48 +204,6 @@ def build_weekly_summary_csv(
         if dry_badge and f"[{dry_badge}]" not in zalo_status:
             zalo_status = f"[{dry_badge}] {zalo_status}" if zalo_status else f"[{dry_badge}]"
         lms_status = resolve_lms_status(row, str(row.get("lms_status") or "").strip())
-        eval_status = str(row.get("evaluation_status") or "").strip()
-        computed_cat = categorize_row({**row, "zalo_status": zalo_status})
-        raw_cat = str(row.get("category") or "").strip()
-        is_stale_not_found_review = (
-            raw_cat == CATEGORY_REVIEW
-            and str(row.get("evidence_state") or "").strip().upper() == NOT_FOUND_VERIFIED
-            and computed_cat in {CATEGORY_MISSING, CATEGORY_EXEMPT, CATEGORY_DONE}
-        )
-        row_category = computed_cat if is_stale_not_found_review else (raw_cat or computed_cat)
-        if (
-            row_category == CATEGORY_EXEMPT
-            or (row_category == CATEGORY_DONE and bool(row.get("manual_approved")))
-        ) and (
-            "zalo cần kiểm tra" in eval_status.lower()
-            or "chưa nhận xét zalo" in eval_status.lower()
-        ):
-            eval_status = ""
-        if (
-            not eval_status
-            or is_stale_not_found_review
-            or "lms_comments" in row
-            or "lms_comments" in st
-            or eval_status
-            in {
-                "❌ Chưa nộp SPCK trên LMS",
-                "❌ SPCK chưa có nhận xét trên LMS",
-                "⚠️ Chưa nộp SPCK trên LMS",
-                "⚠️ SPCK chưa có nhận xét trên LMS",
-            }
-            or row_category == CATEGORY_MISSING
-            or has_spck_missing_fail(row)
-            or has_spck_comment_missing_fail(row)
-        ) and (zalo_status or lms_status):
-            eval_status = _resolve_row_evaluation_status(
-                zalo_status=zalo_status,
-                lms_status=lms_status,
-                nx_zalo_checked=row.get("nx_zalo_checked"),
-                nx_lms_checked=row.get("nx_lms_checked"),
-                row=row,
-                category=row_category,
-                raw_evaluation_status=eval_status,
-            )
         issue_desc = str(row.get("issue_description") or "").strip()
         if issue_desc:
             issue_desc = _resolve_row_issue_description(
@@ -259,7 +220,6 @@ def build_weekly_summary_csv(
                 sanitize_csv_cell(row.get("class_date")),
                 sanitize_csv_cell(zalo_status),
                 sanitize_csv_cell(lms_status),
-                sanitize_csv_cell(eval_status),
                 sanitize_csv_cell(issue_desc),
                 sanitize_csv_cell(row.get("verified_at")),
             ]
@@ -674,11 +634,19 @@ def _resolve_row_issue_description(
 
     def _semantic_dedup_info(text: str) -> tuple[str, bool, bool]:
         s = text.strip()
-        if re.match(r"^\[LMS\]\s*Chưa\s+ghi\s+nội\s+dung\s+bài\s+học\.?$", s, flags=re.IGNORECASE):
-            return "[lms:summary_note]", False, False
-        if re.match(r"^\[LMS\]\s*Điền\s+tóm\s+tắt\s+bài\.?$", s, flags=re.IGNORECASE):
+        if re.match(r"^\[LMS\]\s*Chưa\s+có\s+nội\s+dung\s+bài\.?$", s, flags=re.IGNORECASE):
             return "[lms:summary_note]", True, False
-        if re.match(r"^\[LMS\]\s*Điền\s+tóm\s+tắt\s+bài\s*,", s, flags=re.IGNORECASE):
+        if re.match(
+            r"^\[LMS\]\s*(?:Chưa\s+ghi\s+nội\s+dung\s+bài\s+học|Điền\s+tóm\s+tắt\s+bài)\.?$",
+            s,
+            flags=re.IGNORECASE,
+        ):
+            return "[lms:summary_note]", False, False
+        if re.match(
+            r"^\[LMS\]\s*(?:Chưa\s+có\s+nội\s+dung\s+bài|Điền\s+tóm\s+tắt\s+bài)\s*,",
+            s,
+            flags=re.IGNORECASE,
+        ):
             return _norm_issue_key(s), True, True
         if re.match(
             r"^\[LMS\]\s*(?!.*SPCK).*cần\s+kiểm\s+tra\s+thủ\s+công\.?$",
@@ -752,6 +720,16 @@ def _resolve_row_issue_description(
             return
         if is_auto or re.match(r"^\[(?:LMS|Zalo|SPCK)\]\s*", cleaned, flags=re.IGNORECASE):
             cleaned = normalize_auto_issue_text(cleaned)
+        if re.match(r"^\[LMS\]\s*Điền\s+tóm\s+tắt\s+bài\.?$", cleaned, flags=re.IGNORECASE):
+            cleaned = "[LMS] Chưa có nội dung bài"
+        else:
+            m_sum_comp = re.match(
+                r"^\[LMS\]\s*Điền\s+tóm\s+tắt\s+bài(\s*,\s*.+)$",
+                cleaned,
+                flags=re.IGNORECASE,
+            )
+            if m_sum_comp:
+                cleaned = f"[LMS] Chưa có nội dung bài{m_sum_comp.group(1)}"
         key, is_preferred, is_compound_summary = _semantic_dedup_info(cleaned)
         if not key:
             return
@@ -827,6 +805,20 @@ def _resolve_row_issue_description(
         lms_summary_text=lms_summary,
     ):
         _add_one(issue_text(zalo_issue), is_auto=True)
+    spck_verified_codes = {
+        ISSUE_CODE_LMS_SPCK_MISSING,
+        ISSUE_CODE_LMS_SPCK_COMMENT_MISSING,
+        ISSUE_CODE_LMS_SPCK_NOTE,
+    }
+    if any(issue_code(p) in spck_verified_codes for p in parts):
+        parts = [
+            p
+            for p in parts
+            if not (
+                issue_code(p) == ISSUE_CODE_LMS_MANUAL_CHECK
+                and "spck" in p.lower()
+            )
+        ]
     return "; ".join(parts)
 
 
