@@ -62,6 +62,7 @@ const requiredIds = [
   'dashboard-compact-strip', 'dashboard-preflight-pill',
   'dashboard-plan-strip-text', 'dashboard-progress-strip-text',
   'dashboard-preflight-drawer', 'dashboard-preflight-drawer-checks',
+  'dashboard-advanced-panel', 'btn-toggle-dashboard-advanced',
   'btn-today', 'tab-today',
   'today-kpi-total', 'today-kpi-total-label', 'today-kpi-zalo', 'today-kpi-lms', 'today-kpi-spck', 'today-kpi-bcnb',
   'today-scope-week-btn', 'today-scope-date-btn', 'today-date-controls',
@@ -85,6 +86,9 @@ if (/id=["']zalo-preflight["']/.test(dashboardHtml) || !/id=["']zalo-preflight["
 }
 if (!/class="data-panel glass-panel shrink-0/.test(dashboardHtml) || !appCssSource.includes('#tab-dashboard .table-scroll')) {
   throw new Error('Dashboard data-panel must not shrink into a constrained inner scrollbox');
+}
+if (!dashboardHtml.includes('dashboard-results-table') || !dashboardHtml.includes('<colgroup>')) {
+  throw new Error('Dashboard results table must declare dashboard-results-table and <colgroup> proportions');
 }
 
 const handlerNames = new Set();
@@ -644,6 +648,27 @@ async function checkRequiredWeekDashboardView() {
   assertFrontend(harness.elements.get('count-total').innerText === '0', 'Empty Zalo job must clear old metrics');
   assertFrontend(harness.elements.get('results-table').children.length === 1, 'Empty Zalo job must render one empty-state row');
   assertFrontend(vm.runInContext('latestZaloResults.length', harness.context) === 0, 'Empty Zalo job must clear old target rows');
+
+  // Toggle advanced panel & formatDashboardScanTimestamp VN time check
+  const advPanel = harness.context.document.getElementById('dashboard-advanced-panel');
+  const advBtn = harness.context.document.getElementById('btn-toggle-dashboard-advanced');
+  advPanel.classList.add('hidden');
+  vm.runInContext('toggleDashboardAdvancedPanel()', harness.context);
+  assertFrontend(!advPanel.classList.contains('hidden'), 'toggleDashboardAdvancedPanel must reveal hidden panel');
+  assertFrontend(advBtn.classList.contains('bg-blue-600'), 'toggleDashboardAdvancedPanel must highlight toggle button');
+  vm.runInContext('toggleDashboardAdvancedPanel()', harness.context);
+  assertFrontend(advPanel.classList.contains('hidden'), 'toggleDashboardAdvancedPanel must hide panel on second click');
+
+  const formattedIso = vm.runInContext("formatDashboardScanTimestamp('2026-11-25T09:02:18+00:00')", harness.context);
+  assertFrontend(
+    formattedIso.time === '16:02' && formattedIso.date === '25/11/2026',
+    `Expected VN time 16:02 / 25/11/2026, got ${JSON.stringify(formattedIso)}`,
+  );
+  const formattedFallback = vm.runInContext("formatDashboardScanTimestamp('')", harness.context);
+  assertFrontend(
+    formattedFallback.time === 'Hôm nay' && formattedFallback.date === '',
+    'Empty timestamp must fall back to Hôm nay',
+  );
 }
 
 async function checkZaloPreflightUiSafety() {

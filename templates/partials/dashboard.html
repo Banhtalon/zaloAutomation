@@ -1,5 +1,5 @@
 <!-- TAB 1: ZALO AUTO -->
-<div id="tab-dashboard" class="tab-content active shrink-0 flex-col space-y-3.5" role="tabpanel" aria-labelledby="btn-dashboard">
+<div id="tab-dashboard" class="tab-content active shrink-0 flex-col space-y-3" role="tabpanel" aria-labelledby="btn-dashboard">
     <div class="metrics-grid grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 shrink-0">
         <div class="metric-card glass-panel glow-card-blue flex items-center justify-between">
             <div class="flex items-center min-w-0">
@@ -64,7 +64,7 @@
     </div>
 
     <!-- COMPACT SAFETY & CONTROL BAR -->
-    <div class="glass-panel p-3.5 space-y-2.5 shrink-0">
+    <div class="glass-panel p-3 shrink-0">
         <!-- ROW 1: PRIMARY 3-STEP WORKFLOW (LEFT) & SECONDARY POST-SCAN TOOLS (RIGHT) -->
         <div class="dashboard-action-bar flex flex-wrap items-center justify-between gap-3">
             <div class="dashboard-workflow-group flex flex-wrap items-center gap-2 bg-slate-100 p-1.5 rounded-xl border border-slate-300" role="group" aria-label="Quy trình thực thi chính">
@@ -100,54 +100,57 @@
             </div>
         </div>
 
-        <!-- ROW 2: MERGED SEARCH & WEEKLY HISTORY FILTER BAR (RECESSED WELL) -->
-        <div class="well-inset p-2.5 flex flex-wrap items-center justify-between gap-2.5 text-xs text-slate-800">
-            <div class="flex flex-wrap items-center gap-2.5 flex-1 min-w-[260px]">
-                <label class="search-box search-box--compact input-3d rounded-lg flex items-center overflow-hidden" for="searchInput">
-                    <span class="pl-3 text-slate-500" aria-hidden="true"><i class="fa-solid fa-magnifying-glass"></i></span>
-                    <span class="sr-only">Tìm theo nhóm hoặc giáo viên</span>
-                    <input type="search" id="searchInput" class="bg-transparent border-none text-xs font-semibold text-slate-900 focus:ring-0 block w-full py-1.5 px-2.5 outline-none" placeholder="Tìm theo nhóm, giáo viên...">
-                </label>
-
-                <div class="flex flex-wrap items-center gap-1.5">
-                    <label for="history-week-select" class="font-extrabold text-slate-700 uppercase text-[11px] whitespace-nowrap">
-                        <i class="fa-regular fa-calendar-check mr-1 text-blue-700" aria-hidden="true"></i>Tuần:
+        <!-- HIDDEN BY DEFAULT: SEARCH, WEEKLY HISTORY, PREFLIGHT STRIP & MANUAL REVIEW QUEUE -->
+        <div id="dashboard-advanced-panel" class="hidden mt-2.5 pt-2.5 border-t border-slate-200 space-y-2.5">
+            <!-- ROW 2: MERGED SEARCH & WEEKLY HISTORY FILTER BAR (RECESSED WELL) -->
+            <div class="well-inset p-2.5 flex flex-wrap items-center justify-between gap-2.5 text-xs text-slate-800">
+                <div class="flex flex-wrap items-center gap-2.5 flex-1 min-w-[260px]">
+                    <label class="search-box search-box--compact input-3d rounded-lg flex items-center overflow-hidden" for="searchInput">
+                        <span class="pl-3 text-slate-500" aria-hidden="true"><i class="fa-solid fa-magnifying-glass"></i></span>
+                        <span class="sr-only">Tìm theo nhóm hoặc giáo viên</span>
+                        <input type="search" id="searchInput" class="bg-transparent border-none text-xs font-semibold text-slate-900 focus:ring-0 block w-full py-1.5 px-2.5 outline-none" placeholder="Tìm theo nhóm, giáo viên...">
                     </label>
-                    <select id="history-week-select" onchange="onHistoryWeekChange()" class="input-3d rounded-lg px-2.5 py-1.5 text-xs font-bold text-slate-800 cursor-pointer">
-                        <option value="">Tuần hiện tại (theo kế hoạch)</option>
-                    </select>
-                    <label for="history-job-select" class="font-extrabold text-slate-700 uppercase text-[11px] ml-1 whitespace-nowrap">Phiên:</label>
-                    <select id="history-job-select" onchange="onHistoryJobChange()" class="input-3d rounded-lg px-2.5 py-1.5 text-xs font-bold text-slate-800 cursor-pointer">
-                        <option value="">Mới nhất / Tổng hợp tuần</option>
-                    </select>
-                    <button type="button" id="btn-load-weekly-history" onclick="loadWeeklyHistorySummary()" class="preflight-refresh px-2.5 py-1" title="Làm mới dữ liệu lịch sử tuần đang chọn" aria-label="Làm mới lịch sử tuần">
-                        <i class="fa-solid fa-arrows-rotate text-blue-600" aria-hidden="true"></i>
-                    </button>
+
+                    <div class="flex flex-wrap items-center gap-1.5">
+                        <label for="history-week-select" class="font-extrabold text-slate-700 uppercase text-[11px] whitespace-nowrap">
+                            <i class="fa-regular fa-calendar-check mr-1 text-blue-700" aria-hidden="true"></i>Tuần:
+                        </label>
+                        <select id="history-week-select" onchange="onHistoryWeekChange()" class="input-3d rounded-lg px-2.5 py-1.5 text-xs font-bold text-slate-800 cursor-pointer">
+                            <option value="">Tuần hiện tại (theo kế hoạch)</option>
+                        </select>
+                        <label for="history-job-select" class="font-extrabold text-slate-700 uppercase text-[11px] ml-1 whitespace-nowrap">Phiên:</label>
+                        <select id="history-job-select" onchange="onHistoryJobChange()" class="input-3d rounded-lg px-2.5 py-1.5 text-xs font-bold text-slate-800 cursor-pointer">
+                            <option value="">Mới nhất / Tổng hợp tuần</option>
+                        </select>
+                        <button type="button" id="btn-load-weekly-history" onclick="loadWeeklyHistorySummary()" class="preflight-refresh px-2.5 py-1" title="Làm mới dữ liệu lịch sử tuần đang chọn" aria-label="Làm mới lịch sử tuần">
+                            <i class="fa-solid fa-arrows-rotate text-blue-600" aria-hidden="true"></i>
+                        </button>
+                    </div>
+                </div>
+                <span id="weekly-history-status-badge" class="rounded-lg bg-slate-900 text-white border border-slate-950 px-3 py-1.5 text-[11px] font-bold shadow-sm truncate">Chế độ: Theo dõi phiên hiện tại</span>
+            </div>
+
+            <!-- ROW 3: COMPACT PREFLIGHT & PROGRESS STRIP -->
+            <div id="dashboard-compact-strip" class="well-inset px-3 py-2 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-800">
+                <div class="flex flex-wrap items-center gap-2 min-w-0">
+                    <span id="dashboard-preflight-pill" class="rounded-md bg-slate-700 border border-slate-900 px-2 py-0.5 text-[10px] font-extrabold uppercase tracking-wider text-white shrink-0">Đang kiểm tra</span>
+                    <span id="dashboard-plan-strip-text" class="font-bold text-slate-800 truncate">Chưa có kế hoạch tuần BCNB · Hãy bấm “Dò kế hoạch”</span>
+                </div>
+                <div class="flex flex-wrap items-center gap-2 shrink-0">
+                    <span id="dashboard-progress-strip-text" class="hidden font-mono text-[11px] font-bold text-indigo-900 bg-indigo-50 border border-indigo-300 rounded px-2 py-0.5"></span>
+                    <details id="dashboard-preflight-drawer" class="hidden">
+                        <summary id="dashboard-preflight-drawer-summary" class="cursor-pointer font-extrabold text-blue-700 hover:underline select-none">Chi tiết kiểm tra</summary>
+                        <div id="dashboard-preflight-drawer-checks" class="mt-1.5 space-y-1 text-[11px] font-semibold"></div>
+                    </details>
                 </div>
             </div>
-            <span id="weekly-history-status-badge" class="rounded-lg bg-slate-900 text-white border border-slate-950 px-3 py-1.5 text-[11px] font-bold shadow-sm truncate">Chế độ: Theo dõi phiên hiện tại</span>
-        </div>
 
-        <!-- ROW 3: COMPACT PREFLIGHT & PROGRESS STRIP -->
-        <div id="dashboard-compact-strip" class="well-inset px-3 py-2 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-800">
-            <div class="flex flex-wrap items-center gap-2 min-w-0">
-                <span id="dashboard-preflight-pill" class="rounded-md bg-slate-700 border border-slate-900 px-2 py-0.5 text-[10px] font-extrabold uppercase tracking-wider text-white shrink-0">Đang kiểm tra</span>
-                <span id="dashboard-plan-strip-text" class="font-bold text-slate-800 truncate">Chưa có kế hoạch tuần BCNB · Hãy bấm “Dò kế hoạch”</span>
-            </div>
-            <div class="flex flex-wrap items-center gap-2 shrink-0">
-                <span id="dashboard-progress-strip-text" class="hidden font-mono text-[11px] font-bold text-indigo-900 bg-indigo-50 border border-indigo-300 rounded px-2 py-0.5"></span>
-                <details id="dashboard-preflight-drawer" class="hidden">
-                    <summary id="dashboard-preflight-drawer-summary" class="cursor-pointer font-extrabold text-blue-700 hover:underline select-none">Chi tiết kiểm tra</summary>
-                    <div id="dashboard-preflight-drawer-checks" class="mt-1.5 space-y-1 text-[11px] font-semibold"></div>
-                </details>
-            </div>
+            <details id="zalo-review-queue" class="hidden rounded-xl border-2 border-amber-400 border-l-8 border-l-amber-600 bg-amber-50 px-4 py-2.5 text-xs text-amber-950 shadow-sm shrink-0">
+                <summary class="cursor-pointer font-extrabold">Danh sách lớp cần kiểm tra thủ công</summary>
+                <div id="zalo-review-queue-items" class="mt-2 space-y-1.5 text-xs font-semibold"></div>
+            </details>
         </div>
     </div>
-
-    <details id="zalo-review-queue" class="hidden rounded-xl border-2 border-amber-400 border-l-8 border-l-amber-600 bg-amber-50 px-4 py-2.5 text-xs text-amber-950 shadow-sm shrink-0">
-        <summary class="cursor-pointer font-extrabold">Danh sách lớp cần kiểm tra thủ công</summary>
-        <div id="zalo-review-queue-items" class="mt-2 space-y-1.5 text-xs font-semibold"></div>
-    </details>
 
     <div class="data-panel glass-panel shrink-0 flex flex-col overflow-hidden">
         <!-- Dark Table Header Bar -->
@@ -156,25 +159,36 @@
                 <i class="fa-solid fa-table-list text-blue-400" aria-hidden="true"></i>
                 <span class="text-xs font-extrabold uppercase tracking-wider">Bảng giám sát tiến độ báo cáo nhóm Zalo</span>
             </div>
-            <div class="flex items-center gap-2 text-[11px]">
+            <div class="flex flex-wrap items-center gap-2 text-[11px]">
                 <span class="bg-rose-500/20 text-rose-300 border border-rose-500/40 px-2 py-0.5 rounded font-bold">
                     <i class="fa-solid fa-circle text-[7px] mr-1 align-middle text-rose-400" aria-hidden="true"></i>Ưu tiên xử lý trễ hạn
                 </span>
                 <span class="bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 px-2 py-0.5 rounded font-bold">
                     <i class="fa-solid fa-circle text-[7px] mr-1 align-middle text-emerald-400" aria-hidden="true"></i>Đạt chuẩn minh chứng
                 </span>
+                <button type="button" id="btn-toggle-dashboard-advanced" onclick="toggleDashboardAdvancedPanel()" aria-expanded="false" aria-controls="dashboard-advanced-panel" class="inline-flex items-center gap-1.5 rounded-md border border-slate-600 bg-slate-800 px-2.5 py-0.5 text-[11px] font-bold text-slate-200 hover:bg-slate-700 hover:text-white transition-colors" title="Hiện/ẩn tìm kiếm, chọn tuần lịch sử và chi tiết kiểm tra">
+                    <i class="fa-solid fa-sliders text-blue-400" aria-hidden="true"></i>
+                    <span>Bộ lọc</span>
+                </button>
             </div>
         </div>
 
         <div class="table-scroll shrink-0 flex-1">
-            <table class="data-table w-full text-sm text-left tabular-nums">
+            <table class="data-table dashboard-results-table w-full text-sm text-left tabular-nums">
+                <colgroup>
+                    <col class="col-group">
+                    <col class="col-person">
+                    <col class="col-time">
+                    <col class="col-status">
+                    <col class="col-evidence">
+                </colgroup>
                 <thead class="text-[11px] font-extrabold uppercase tracking-wider sticky top-0 z-10 border-b-2 border-slate-400">
                     <tr>
-                        <th class="px-5 py-3">Tên nhóm Zalo</th>
-                        <th class="px-5 py-3">Người phụ trách</th>
-                        <th class="px-5 py-3">Thời gian quét</th>
-                        <th class="px-5 py-3">Trạng thái báo cáo &amp; Chất lượng</th>
-                        <th class="px-5 py-3 text-center">Minh chứng</th>
+                        <th class="px-4 py-2.5">Tên nhóm Zalo</th>
+                        <th class="px-4 py-2.5">Người phụ trách</th>
+                        <th class="px-4 py-2.5">Thời gian quét</th>
+                        <th class="px-4 py-2.5">Trạng thái báo cáo &amp; Chất lượng</th>
+                        <th class="px-4 py-2.5 text-center">Minh chứng</th>
                     </tr>
                 </thead>
                 <tbody id="results-table" class="divide-y bg-transparent">

@@ -266,8 +266,8 @@ select:focus-visible,
 }
 
 .metric-card {
-    min-height: 76px;
-    padding: 14px 16px 12px;
+    min-height: 70px;
+    padding: 12px 14px 10px;
     position: relative;
     overflow: hidden;
     background: #FFFFFF;
@@ -773,6 +773,12 @@ input::placeholder {
     box-shadow: inset 4px 0 0 #D97706;
 }
 
+.status-cell--late {
+    color: #334155 !important;
+    background: rgba(100, 116, 139, 0.10);
+    box-shadow: inset 4px 0 0 #64748B;
+}
+
 .status-cell--error {
     color: #9F1239 !important;
     background: rgba(244, 63, 94, 0.09);
@@ -825,14 +831,85 @@ input::placeholder {
 .result-target-meta {
     width: 100%;
     margin-top: 5px;
-    color: #475569;
     font-size: 11px;
     font-weight: 600;
     line-height: 1.35;
 }
 
+.evidence-meta,
+.result-target-meta {
+    color: #475569;
+}
+
+.status-detail:not([class*="text-"]) {
+    color: #475569;
+}
+
 .status-detail {
     max-width: 340px;
+}
+
+.dashboard-results-table {
+    table-layout: fixed;
+    width: 100%;
+    min-width: 960px;
+}
+
+.dashboard-results-table col.col-group    { width: 22%; }
+.dashboard-results-table col.col-person   { width: 14%; }
+.dashboard-results-table col.col-time     { width: 11%; }
+.dashboard-results-table col.col-status   { width: 36%; }
+.dashboard-results-table col.col-evidence { width: 17%; }
+
+.dashboard-results-table tbody td {
+    vertical-align: top;
+    overflow-wrap: anywhere;
+    word-break: normal;
+}
+
+.dashboard-results-table tbody td:last-child {
+    vertical-align: middle;
+}
+
+.dashboard-results-table .status-cell {
+    font-size: 13px;
+    line-height: 1.4;
+}
+
+.dashboard-results-table .status-detail {
+    max-width: none;
+    margin-top: 4px;
+    font-size: 12px;
+    line-height: 1.45;
+}
+
+.dashboard-results-table .result-target-meta {
+    display: inline-block;
+    width: auto;
+    max-width: 100%;
+    margin-top: 6px;
+}
+
+.dashboard-results-table .evidence-actions {
+    min-width: 0;
+    gap: 6px;
+}
+
+.dashboard-scan-time {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    font-weight: 700;
+    color: #0F172A;
+    line-height: 1.35;
+}
+
+.dashboard-scan-date {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    font-weight: 600;
+    color: #64748B;
+    margin-top: 2px;
+    line-height: 1.3;
 }
 
 .result-target-meta {

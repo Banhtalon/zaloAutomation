@@ -4,6 +4,22 @@ Tài liệu này ghi lại toàn bộ quá trình hình thành, phát triển ki
 
 ---
 
+## [2026-11-25] — Tinh gọn Dashboard & Sửa bố cục bảng giám sát (`#tab-dashboard`)
+
+- **Phân loại luồng**: `[FAST-TRACK]` (`DEC-047`) — chỉ thay đổi giao diện HTML/CSS/JS hiển thị trên Dashboard và test contract frontend; không chạm luồng quét/ghi BCNB, LMS, DB schema hay PII.
+- **Thay đổi giao diện & logic hiển thị**:
+  - `templates/partials/dashboard.html`: Đóng gói thanh tìm kiếm/chọn tuần/phiên, dải preflight `#dashboard-compact-strip` và hàng đợi duyệt tay `#zalo-review-queue` vào vùng thu gọn mặc định `#dashboard-advanced-panel` (`hidden`), thêm nút bật/tắt `#btn-toggle-dashboard-advanced` (`Bộ lọc`) trên thanh tiêu đề bảng, thêm `<colgroup>` (`col-group`, `col-person`, `col-time`, `col-status`, `col-evidence`) trên `.dashboard-results-table` và chỉnh padding tiêu đề/khoảng cách tab gọn hơn.
+  - `static/css/app.css`: Khóa tỷ lệ cột cố định `22% / 14% / 11% / 36% / 17%` (`table-layout: fixed; min-width: 960px`) để cột `Trạng thái báo cáo & Chất lượng` rộng rãi dễ đọc, gỡ `max-width: 340px` trên `.dashboard-results-table .status-detail`, thêm `.status-cell--late`, tách màu mặc định `.status-detail:not([class*="text-"])` tránh đè màu `text-rose-700`/`text-amber-700`, căn lề trên theo dòng và thu gọn nhẹ `.metric-card`.
+  - `static/js/jobs.js`: Bổ sung `toggleDashboardAdvancedPanel()` và `formatDashboardScanTimestamp()` quy đổi chuỗi ISO UTC sang giờ Việt Nam (`HH:mm` + `dd/MM/yyyy`, giữ nguyên ISO gốc ở thuộc tính `title` và fallback `"Hôm nay"`), đồng thời căn chỉnh padding ô bảng kết quả.
+  - `tests/check_template_js.js`: Bổ sung kiểm tra hợp đồng ID `#dashboard-advanced-panel`, `#btn-toggle-dashboard-advanced`, `dashboard-results-table` / `<colgroup>`, `toggleDashboardAdvancedPanel()` và `formatDashboardScanTimestamp()`.
+- **Bằng chứng kiểm chứng (`[FAST-TRACK]`)**:
+  - `node tests/check_template_js.js`: `template-js-contract-ok scripts=8 handlers=49 behavior=14` (`exit 0`).
+  - `venv\Scripts\python.exe -m tests.check_app_smoke`: `phase3-app-smoke-ok` (`exit 0`).
+  - `venv\Scripts\python.exe tests\check_phase3_quality.py`: `phase3-quality-gate-ok` (`exit 0`).
+  - `git diff --check`: `exit 0` (`graphify.exe` bị OS Application Control chặn trên shell máy chính).
+
+---
+
 ## [2026-11-25] — Chuẩn hóa Báo cáo Quản lý 8 cột (`1A + 2A + 3A`), chống trùng `[SPCK] Kiểm tra tay trên LMS` & đổi nhãn `[LMS] Chưa có nội dung bài` (`DEC-056`)
 
 - **Phân loại luồng & Review**: `[FULL GATE]` (`DEC-047`, `DEC-054`) · Review độc lập Read-Only `Neon XHigh` (`gemini-4-neon-xhigh`, `@verifier`: `#2` `NEEDS_FIX` 1 `[P0]` + 4 `[P2]` → `#4` `NEEDS_FIX` 1 `[P1]` ở `jobs.js` → **`#6` `VERDICT: PASS`**, `0` P0/P1/P2).

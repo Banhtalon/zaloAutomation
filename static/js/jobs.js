@@ -1733,6 +1733,66 @@
             return segments.length > 0 && segments.every(seg => allowedSegRe.test(seg));
         }
 
+        function toggleDashboardAdvancedPanel() {
+            const panel = document.getElementById('dashboard-advanced-panel');
+            const button = document.getElementById('btn-toggle-dashboard-advanced');
+            if (!panel) return;
+            const willShow = panel.classList.contains('hidden');
+            panel.classList.toggle('hidden', !willShow);
+            if (button) {
+                button.setAttribute('aria-expanded', String(willShow));
+                button.classList.toggle('bg-blue-600', willShow);
+                button.classList.toggle('border-blue-400', willShow);
+                button.classList.toggle('text-white', willShow);
+                button.classList.toggle('bg-slate-800', !willShow);
+                button.classList.toggle('border-slate-600', !willShow);
+                button.classList.toggle('text-slate-200', !willShow);
+            }
+        }
+
+        function formatDashboardScanTimestamp(rawValue) {
+            const raw = String(rawValue || '').trim();
+            if (!raw) return { time: 'Hôm nay', date: '', raw: '' };
+            if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(raw)) {
+                return { time: raw, date: '', raw };
+            }
+            const parsed = new Date(raw);
+            if (Number.isNaN(parsed.getTime())) {
+                return { time: raw, date: '', raw };
+            }
+            try {
+                if (typeof Intl !== 'undefined' && typeof Intl.DateTimeFormat === 'function') {
+                    const parts = new Intl.DateTimeFormat('en-GB', {
+                        timeZone: 'Asia/Ho_Chi_Minh',
+                        day: '2-digit',
+                        month: '2-digit',
+                        year: 'numeric',
+                        hour: '2-digit',
+                        minute: '2-digit',
+                        hour12: false,
+                    }).formatToParts(parsed);
+                    const byType = Object.fromEntries(parts.map(p => [p.type, p.value]));
+                    if (byType.hour && byType.minute && byType.day && byType.month && byType.year) {
+                        const hh = byType.hour === '24' ? '00' : byType.hour;
+                        return {
+                            time: `${hh}:${byType.minute}`,
+                            date: `${byType.day}/${byType.month}/${byType.year}`,
+                            raw,
+                        };
+                    }
+                }
+            } catch (_) {
+                // Fall back to deterministic UTC+7 conversion if Intl timezone fails.
+            }
+            const vnDate = new Date(parsed.getTime() + 7 * 60 * 60 * 1000);
+            const pad = n => String(n).padStart(2, '0');
+            return {
+                time: `${pad(vnDate.getUTCHours())}:${pad(vnDate.getUTCMinutes())}`,
+                date: `${pad(vnDate.getUTCDate())}/${pad(vnDate.getUTCMonth() + 1)}/${vnDate.getUTCFullYear()}`,
+                raw,
+            };
+        }
+
         function renderZaloResults(resultsArray, force = false, options = {}) {
             const isHistoricalOption = Boolean(options && options.isHistoricalView);
             const preserveOrigin = Boolean(
@@ -1880,7 +1940,7 @@
                 const values = [r.group, r.person, r.timestamp || 'Hôm nay', r.status];
                 values.forEach((value, valueIndex) => {
                     const td = document.createElement('td');
-                    td.className = 'px-6 py-3.5';
+                    td.className = 'px-4 py-3';
                     if (valueIndex === 3) {
                         const status = normalizeZaloStatusDisplay(value, r);
                         td.classList.add('status-cell');
@@ -1967,13 +2027,31 @@
                             targetMeta.textContent = `W${target.week}/${target.year} · Buổi ${lesson} · ${classDate}`;
                             td.appendChild(targetMeta);
                         }
+                    } else if (valueIndex === 1) {
+                        td.classList.add('font-semibold', 'text-slate-800');
+                        td.textContent = String(value || '');
+                    } else if (valueIndex === 2) {
+                        const formatted = formatDashboardScanTimestamp(value);
+                        if (formatted.date) {
+                            td.title = formatted.raw;
+                            const timeLine = document.createElement('div');
+                            timeLine.className = 'dashboard-scan-time';
+                            timeLine.textContent = formatted.time;
+                            const dateLine = document.createElement('div');
+                            dateLine.className = 'dashboard-scan-date';
+                            dateLine.textContent = formatted.date;
+                            td.appendChild(timeLine);
+                            td.appendChild(dateLine);
+                        } else {
+                            td.textContent = formatted.time;
+                        }
                     } else {
                         td.textContent = String(value || '');
                     }
                     tr.appendChild(td);
                 });
                 const action = document.createElement('td');
-                action.className = 'px-6 py-3.5 text-center';
+                action.className = 'px-3 py-3 text-center';
                 const actions = document.createElement('div');
                 actions.className = 'evidence-actions';
                 const evidence = r.evidence && typeof r.evidence === 'object' ? r.evidence : null;
