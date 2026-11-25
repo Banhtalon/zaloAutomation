@@ -634,6 +634,10 @@ def _resolve_row_issue_description(
 
     def _semantic_dedup_info(text: str) -> tuple[str, bool, bool]:
         s = text.strip()
+        if re.match(r"^\[LMS\]\s*Thiếu\s+xếp\s+hạng\s*,\s*chưa\s+đủ\s+họ\s+tên\.?$", s, flags=re.IGNORECASE):
+            return "[lms:lesson14_ranking]", True, False
+        if re.match(r"^\[LMS\]\s*Thiếu\s+xếp\s+hạng\.?$", s, flags=re.IGNORECASE):
+            return "[lms:lesson14_ranking]", False, False
         if re.match(r"^\[LMS\]\s*Chưa\s+có\s+nội\s+dung\s+bài\.?$", s, flags=re.IGNORECASE):
             return "[lms:summary_note]", True, False
         if re.match(

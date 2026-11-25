@@ -287,6 +287,8 @@ def _short_url_issue(value: str) -> str:
     s = s.replace("Chưa ghi nội dung bài học", "Thiếu ND")
     s = s.replace("Chưa có nội dung bài", "Thiếu ND")
     s = s.replace("Điền tóm tắt bài", "Thiếu ND")
+    s = s.replace("Thiếu xếp hạng, chưa đủ họ tên", "Thiếu XH/họ tên")
+    s = s.replace("Thiếu xếp hạng", "Thiếu XH")
     s = s.replace("Nhận xét HS sơ sài, thiếu đủ 3 ý", "NX thiếu ý")
     s = s.replace("Nhận xét thiếu ý", "NX thiếu ý")
     s = s.replace("Nhận xét học viên quá ngắn/sơ sài", "NX sơ sài")

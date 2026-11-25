@@ -1409,6 +1409,12 @@
             };
             const semanticDedupInfo = text => {
                 const s = String(text || '').trim();
+                if (/^\[LMS\]\s*Thiếu\s+xếp\s+hạng\s*,\s*chưa\s+đủ\s+họ\s+tên\.?$/i.test(s)) {
+                    return { key: '[lms:lesson14_ranking]', preferred: true, compoundSummary: false };
+                }
+                if (/^\[LMS\]\s*Thiếu\s+xếp\s+hạng\.?$/i.test(s)) {
+                    return { key: '[lms:lesson14_ranking]', preferred: false, compoundSummary: false };
+                }
                 if (/^\[LMS\]\s*Chưa\s+có\s+nội\s+dung\s+bài\.?$/i.test(s)) {
                     return { key: '[lms:summary_note]', preferred: true, compoundSummary: false };
                 }
@@ -1725,7 +1731,7 @@
             ) {
                 return false;
             }
-            const allowedSegRe = /^(?:\[SPCK\]\s*(?:Chưa\s+nộp\b|Chưa\s+(?:có\s+)?(?:nhận\s+xét|NX)\b|Bổ\s+sung\b|Kiểm\s+tra\s+tay\b)|\[LMS\]\s*(?:Chưa\s+nộp\s+SPCK|SPCK\s+chưa\s+có\s+nhận\s+xét|Thiếu\s+nộp\s+SPCK|Tiêu\s+đề\s+SPCK|SPCK\b|(?:Nhận|Nhan)\s+x[eé]t\s+SPCK|Chưa\s+ghi\s+nội\s+dung\s+bài\s+học|Lỗi\s+điểm\s+danh|Nhận\s+xét\s+(?:sơ\s+sài|học\s+viên\s+trùng\s+lặp|Checkpoint\s+thiếu|Checkpoint\s+chưa\s+đủ|buổi\s+học\s+cần\s+xem\s+lại|cần\s+xem\s+lại)|(?:(?:Điền\s+tóm\s+tắt\s+bài|Chưa\s+có\s+nội\s+dung\s+bài|Kiểm\s+tra\s+điểm\s+danh-NX|Viết\s+kỹ\s+NX|Đủ\s+khung\s+Checkpoint)\s*(?:,\s*|$))+|Kiểm\s+tra\s+tay\b|.*cần\s+kiểm\s+tra\s+thủ\s+công)|\[Zalo\]\s*(?:Báo\s+cáo\s+không\s+ghi\s+ngày\/buổi|Thiếu\s+ngày\/buổi|Báo\s+cáo\s+ghi\s+sai\s+ngày|Sai\s+ngày\s*\(|Đã\s+báo\s+cáo\s+nhưng\s+ghi\s+sai\s+ngày))/i;
+            const allowedSegRe = /^(?:\[SPCK\]\s*(?:Chưa\s+nộp\b|Chưa\s+(?:có\s+)?(?:nhận\s+xét|NX)\b|Bổ\s+sung\b|Kiểm\s+tra\s+tay\b)|\[LMS\]\s*(?:Chưa\s+nộp\s+SPCK|SPCK\s+chưa\s+có\s+nhận\s+xét|Thiếu\s+nộp\s+SPCK|Tiêu\s+đề\s+SPCK|SPCK\b|(?:Nhận|Nhan)\s+x[eé]t\s+SPCK|Chưa\s+ghi\s+nội\s+dung\s+bài\s+học|Thiếu\s+xếp\s+hạng(?:\s*,\s*chưa\s+đủ\s+họ\s+tên)?|Lỗi\s+điểm\s+danh|Nhận\s+xét\s+(?:sơ\s+sài|học\s+viên\s+trùng\s+lặp|Checkpoint\s+thiếu|Checkpoint\s+chưa\s+đủ|buổi\s+học\s+cần\s+xem\s+lại|cần\s+xem\s+lại)|(?:(?:Điền\s+tóm\s+tắt\s+bài|Chưa\s+có\s+nội\s+dung\s+bài|Kiểm\s+tra\s+điểm\s+danh-NX|Viết\s+kỹ\s+NX|Đủ\s+khung\s+Checkpoint)\s*(?:,\s*|$))+|Kiểm\s+tra\s+tay\b|.*cần\s+kiểm\s+tra\s+thủ\s+công)|\[Zalo\]\s*(?:Báo\s+cáo\s+không\s+ghi\s+ngày\/buổi|Thiếu\s+ngày\/buổi|Báo\s+cáo\s+ghi\s+sai\s+ngày|Sai\s+ngày\s*\(|Đã\s+báo\s+cáo\s+nhưng\s+ghi\s+sai\s+ngày))/i;
             const segments = String(resolvedIssue || '')
                 .split(/\s*[;|]\s*(?=\[(?:LMS|Zalo|SPCK)\])/i)
                 .map(s => s.trim())

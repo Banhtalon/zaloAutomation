@@ -167,7 +167,7 @@ _LMS_SPCK_NOTE_RE = re.compile(
     flags=re.IGNORECASE,
 )
 _LMS_SUMMARY_NOTE_RE = re.compile(
-    r"^\[LMS\]\s*(?:Chưa\s+ghi\s+nội\s+dung\s+bài\s+học\b|Điền\s+tóm\s+tắt\s+bài(?:\s*\.?$)|Chưa\s+có\s+nội\s+dung\s+bài(?:\s*\.?$))",
+    r"^\[LMS\]\s*(?:Chưa\s+ghi\s+nội\s+dung\s+bài\s+học\b|Điền\s+tóm\s+tắt\s+bài(?:\s*\.?$)|Chưa\s+có\s+nội\s+dung\s+bài(?:\s*\.?$)|Thiếu\s+xếp\s+hạng(?:\s*,\s*chưa\s+đủ\s+họ\s+tên)?(?:\s*\.?$))",
     flags=re.IGNORECASE,
 )
 _LMS_MISSING_ATTENDANCE_RE = re.compile(

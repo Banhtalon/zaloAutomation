@@ -998,7 +998,11 @@ def _collect_row_verifiable_auto_issues(
     current_raw_texts = {issue_text(item) for item in raw_lms if issue_text(item)}
     raw_lms_codes = {issue_code(item) for item in raw_lms if issue_code(item)}
     raw_lms_has_summary_note = ISSUE_CODE_LMS_SUMMARY_NOTE in raw_lms_codes or any(
-        ("dien tom tat bai" in fold_text(issue_text(item)) or "chua co noi dung bai" in fold_text(issue_text(item)))
+        (
+            "dien tom tat bai" in fold_text(issue_text(item))
+            or "chua co noi dung bai" in fold_text(issue_text(item))
+            or "thieu xep hang" in fold_text(issue_text(item))
+        )
         for item in raw_lms
     )
     dedup_semantic_codes = {
@@ -1208,6 +1212,7 @@ def _deferred_issue_family_keys(item: Any) -> set[str]:
             "dien tom tat bai" in folded_body
             or "chua co noi dung bai" in folded_body
             or "chua ghi noi dung bai hoc" in folded_body
+            or "thieu xep hang" in folded_body
             or code == ISSUE_CODE_LMS_SUMMARY_NOTE
         ):
             keys.add("family:lms_summary")

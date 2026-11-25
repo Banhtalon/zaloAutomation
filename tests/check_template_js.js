@@ -4032,6 +4032,30 @@ async function checkTodayLivePageWorkflow() {
         lms_attendance: { status: 'VERIFIED', attended_count: 6, absent_count: 1 },
         lms_comments: { status: 'MISSING', submitted_count: 5 },
       };
+      const spckL14RankingRow = {
+        lesson: '14',
+        status: '✅ Miễn báo cáo (Buổi 14)',
+        evidence_state: 'LESSON_14_EXEMPTION',
+        lms_attendance: { status: 'VERIFIED', attended_count: 4, absent_count: 0 },
+        lms_comments: { status: 'EXEMPT', submitted_count: 0 },
+        lms_spck: { status: 'MISSING', submitted_count: 0, attended_count: 4, exempt_count: 0 },
+        qc_issue_note: '[LMS] Thiếu xếp hạng',
+        lms_quality_issues: [
+          { code: 'LMS_SUMMARY_NOTE', severity: 'NOTE', text: '[LMS] Thiếu xếp hạng, chưa đủ họ tên' },
+          { code: 'LMS_SPCK_MISSING', severity: 'FAIL', text: '[SPCK] Chưa nộp (0/4)' },
+        ],
+      };
+      const l14RankingOnlyRow = {
+        lesson: '14',
+        status: '✅ Miễn báo cáo (Buổi 14)',
+        evidence_state: 'LESSON_14_EXEMPTION',
+        lms_attendance: { status: 'VERIFIED', attended_count: 4, absent_count: 0 },
+        lms_comments: { status: 'EXEMPT', submitted_count: 0 },
+        lms_spck: { status: 'NOT_REQUIRED' },
+        lms_quality_issues: [
+          { code: 'LMS_SUMMARY_NOTE', severity: 'NOTE', text: '[LMS] Thiếu xếp hạng' },
+        ],
+      };
       return collectTodayMissingReasons(ongoingB13).length === 0
         && !isTodayItemMissingLms(ongoingB13)
         && isTodaySpckComplete(allAbsentExempt)
@@ -4086,7 +4110,16 @@ async function checkTodayLivePageWorkflow() {
           resolveDashboardRowIssueDescription(mucAMixedFailRow),
         )
         && splitMucA.manual === 'QC ghi chú tay'
-        && splitMucA.autoIssues.length === 3;
+        && splitMucA.autoIssues.length === 3
+        && resolveRowIssueSeverity(l14RankingOnlyRow) === 'NOTE'
+        && resolveRowIsFailed(l14RankingOnlyRow) === false
+        && resolveDashboardRowIssueDescription(spckL14RankingRow) === '[LMS] Thiếu xếp hạng, chưa đủ họ tên; [SPCK] Chưa nộp (0/4)'
+        && isRowSpckOnlyWarningFail(
+          spckL14RankingRow,
+          resolveRowCategory(spckL14RankingRow),
+          resolveDashboardRowLmsStatus(spckL14RankingRow),
+          resolveDashboardRowIssueDescription(spckL14RankingRow),
+        );
     })()`,
     harness.context,
   );

@@ -2140,7 +2140,9 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(res_ok["issues"], [])
 
-        # 2. Buổi 14: Valid B12/13 SPCK but missing YouTube & Slide -> 2 NOTE issues (not FAIL)
+        from services.report_status import ISSUE_CODE_LMS_SUMMARY_NOTE
+
+        # 2. Buổi 14: Valid B12/13 SPCK but missing summary ranking & YouTube & Slide -> NOTE issues (not FAIL)
         res_b14_missing_media = evaluate_lms_slot_quality(
             {
                 "summary": "",
@@ -2154,13 +2156,16 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(res_b14_missing_media["is_exempt"])
         self.assertEqual(
             [issue_text(x) for x in res_b14_missing_media["issues"]],
-            ["[SPCK] Bổ sung YouTube, Slide"],
+            ["[LMS] Thiếu xếp hạng", "[SPCK] Bổ sung YouTube, Slide"],
+        )
+        self.assertEqual(
+            [issue_code(x) for x in res_b14_missing_media["issues"]],
+            [ISSUE_CODE_LMS_SUMMARY_NOTE, ISSUE_CODE_LMS_SPCK_NOTE],
         )
         for item in res_b14_missing_media["issues"]:
-            self.assertEqual(issue_code(item), ISSUE_CODE_LMS_SPCK_NOTE)
             self.assertEqual(issue_severity(item), SEVERITY_NOTE)
 
-        # 3. Buổi 14: With YouTube link and Canva/Slide link or .pptx file -> 0 issues
+        # 3. Buổi 14: With valid ranking summary, YouTube link and Canva/Slide link or .pptx file -> 0 issues
         valid_b14_stu1 = {
             **valid_work_b12,
             "videoUrls": ["https://www.youtube.com/watch?v=dQw4w9WgXcQ"],
@@ -2181,7 +2186,7 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
         }
         res_b14_ok = evaluate_lms_slot_quality(
             {
-                "summary": "",
+                "summary": "1. Nguyễn Văn An\n2. Trần Văn Bình",
                 "studentAttendance": attended_two,
                 "studentWorks": [valid_b14_stu1, valid_b14_stu2],
             },
@@ -2352,7 +2357,7 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
                                         _id: 'slot_14_id',
                                         index: 13,
                                         date: '2026-03-15T10:00:00.000Z',
-                                        summary: '',
+                                        summary: 'Giải nhất: Nguyễn Văn Minh Quân',
                                         studentAttendance: [{
                                             student: { id: 'stu_raw_id_99', fullName: 'Nguyễn Văn Minh Quân' },
                                             status: 'ATTENDED',
@@ -4969,6 +4974,541 @@ class LmsQualityServiceTests(unittest.IsolatedAsyncioTestCase):
         semia_texts = [issue_text(x) for x in row_semia06["lms_quality_issues"]]
         self.assertEqual(semia_texts, ["[LMS] Chưa có nội dung bài", "[SPCK] Chưa nộp (0/6)"])
         self.assertNotIn("[SPCK] Kiểm tra tay trên LMS", semia_texts)
+
+    async def test_lesson_14_ranking_and_full_name_check_all_classes_and_pii_free(self) -> None:
+        import json
+        import os
+        import subprocess
+        from unittest.mock import patch
+        from services.lms_quality_service import evaluate_lms_spck_quality
+        from services.report_status import (
+            ISSUE_CODE_LMS_QUALITY_FAIL,
+            ISSUE_CODE_LMS_SUMMARY_NOTE,
+            LESSON_14_EXEMPTION,
+            LESSON_14_STATUS,
+            SEVERITY_FAIL,
+            SEVERITY_NOTE,
+            is_failed,
+            is_lms_ready_for_bcnb_tick,
+            issue_code,
+            issue_severity,
+            issue_text,
+        )
+
+        roster_4 = [
+            "Nguyễn Văn An",
+            "Trần Thị Bình",
+            "Lê Hoàng Cường",
+            "Phạm Minh Đức",
+        ]
+        att_4 = [
+            {
+                "status": "ATTENDED",
+                "studentKey": f"stu_{idx + 1}",
+                "student": {"fullName": name},
+                "comment": "",
+            }
+            for idx, name in enumerate(roster_4)
+        ]
+
+        # 1. Passing formats: numbered, Giải nhất/nhì/ba, Top 1/2/3, Hạng 1/2/3, emoji, inline, <ol><li>
+        passing_summaries = [
+            "1. Nguyễn Văn An\n2. Trần Thị Bình\n3. Lê Hoàng Cường",
+            "Giải nhất: Nguyễn Văn An\nGiải nhì: Trần Thị Bình\nGiải ba: Lê Hoàng Cường",
+            "Top 1: Nguyễn Văn An, Top 2: Trần Thị Bình, Top 3: Lê Hoàng Cường",
+            "Top 1: Bạn Nguyễn Văn An\nTop 2: Bạn Trần Thị Bình\nTop 3: Bạn Lê Hoàng Cường",
+            "No. 1: Bạn Nguyễn Văn An\nNo. 2: Bạn Trần Thị Bình\nNo. 3: Bạn Lê Hoàng Cường",
+            "#1: Học viên Nguyễn Văn An\n#2: Học viên Trần Thị Bình\n#3: Học viên Lê Hoàng Cường",
+            "Top 3 bạn xuất sắc nhất:\nTop 1: Bạn Nguyễn Văn An\nTop 2: Bạn Trần Thị Bình\nTop 3: Bạn Lê Hoàng Cường",
+            "Hạng 1 - Nguyễn Văn An\nHạng 2 - Trần Thị Bình\nHạng 3 - Lê Hoàng Cường",
+            "🥇 Nguyễn Văn An\n🥈 Trần Thị Bình\n🥉 Lê Hoàng Cường",
+            "<p>Xếp hạng SPCK:</p><ol><li>Nguyễn Văn An - Game Python</li><li>Trần Thị Bình - App</li><li>Lê Hoàng Cường - Web</li></ol>",
+            "<ol><li></li><li><br></li><li>Nguyễn Văn An</li><li>Trần Thị Bình</li><li>Lê Hoàng Cường</li></ol>",
+            "1-Nguyễn Văn An\n2:Trần Thị Bình\n3)Lê Hoàng Cường",
+            "Xếp hạng: 1. nguyen van an; 2. tran thi binh; 3. le hoang cuong",
+        ]
+        for idx, summary_text in enumerate(passing_summaries):
+            res = evaluate_lms_slot_quality(
+                {
+                    "summary": summary_text,
+                    "studentAttendance": att_4,
+                    "studentWorks": [],
+                },
+                class_code="VT-C4K-PTB05",
+                khoi="Coding",
+                lesson=14,
+            )
+            self.assertEqual(res["issues"], [], msg=f"case={idx}")
+            self.assertTrue(res["has_valid_summary"], msg=f"case={idx}")
+            self.assertEqual(res["summary_clean"], "", msg=f"case={idx}")
+
+        # 2. Fewer than 3 attendees -> only min(3, attended_count) ranks required
+        res_2_att = evaluate_lms_slot_quality(
+            {
+                "summary": "Giải nhất: Nguyễn Văn An\nGiải nhì: Trần Thị Bình",
+                "studentAttendance": att_4[:2],
+                "studentWorks": [],
+            },
+            class_code="VT-CSB02",
+            khoi="Coding",
+            lesson=14,
+        )
+        self.assertEqual(res_2_att["issues"], [])
+
+        res_1_att = evaluate_lms_slot_quality(
+            {
+                "summary": "Top 1: Nguyễn Văn An",
+                "studentAttendance": att_4[:1],
+                "studentWorks": [],
+            },
+            class_code="VT-C4K-PTB05",
+            khoi="Coding",
+            lesson=14,
+        )
+        self.assertEqual(res_1_att["issues"], [])
+
+        # 3. Missing ranking across ALL courses (PTB, CSB, Coding, Robotics) -> [LMS] Thiếu xếp hạng (NOTE)
+        for cls_code, khoi_name, summary_bad in (
+            ("VT-C4K-PTB05", "Coding", ""),
+            ("VT-CSB02", "Coding", "Buổi 14: Thuyết trình sản phẩm cuối khóa"),
+            ("VT-C4K-PTB06", "Coding", "1. Ôn tập kiến thức\n2. Thuyết trình sản phẩm\n3. Tổng kết khóa học"),
+            ("VT-C4K-PTB07", "Coding", "1. Nguyễn Văn An\n2. Trần Thị Bình"),
+            ("VT-C4K-PTB08", "Coding", "Top 3 bạn xuất sắc nhất:\n1. Nguyễn Văn An\n2. Trần Thị Bình"),
+            ("VT-C4K-PTB09", "Coding", "Buổi 14: Thuyết trình và chọn Top 3 xuất sắc nhất lớp"),
+            ("VT-C4K-PTB10", "Coding", "Top 3 bạn xuất sắc nhất:\nTop 1: Nguyễn Văn An\nTop 2: Trần Thị Bình"),
+            ("VT-ROB-ARMI12", "Robotics", "Buổi 14: Thi đấu robot"),
+        ):
+            extra_works = (
+                [
+                    {
+                        "studentKey": f"stu_{i + 1}",
+                        "title": f"Robot Cứu Hộ {i + 1}",
+                        "thumbnail": "https://img/t.png",
+                        "imageUrl": ["https://img/s.png"],
+                        "attachmentUrls": ["https://files/code.sb3"],
+                        "videoUrls": ["https://youtu.be/abc12345"],
+                        "relatedUrls": [],
+                        "comment": "Hoàn thành tốt thuyết trình và demo sản phẩm cuối khóa xuất sắc.",
+                    }
+                    for i in range(4)
+                ]
+                if cls_code.startswith("VT-ROB")
+                else []
+            )
+            res_missing = evaluate_lms_slot_quality(
+                {
+                    "summary": summary_bad,
+                    "studentAttendance": att_4,
+                    "studentWorks": extra_works,
+                },
+                class_code=cls_code,
+                khoi=khoi_name,
+                lesson=14,
+            )
+            self.assertEqual(
+                [
+                    (issue_code(x), issue_severity(x), issue_text(x))
+                    for x in res_missing["issues"]
+                ],
+                [(ISSUE_CODE_LMS_SUMMARY_NOTE, SEVERITY_NOTE, "[LMS] Thiếu xếp hạng")],
+                msg=f"cls={cls_code}",
+            )
+            row_state = {
+                "class_code": cls_code,
+                "khoi": khoi_name,
+                "lesson": "14",
+                "status": LESSON_14_STATUS,
+                "evidence_state": LESSON_14_EXEMPTION,
+                "lms_status": "✅ Đã hoàn tất (Buổi 14 miễn NX)",
+                **{
+                    k: res_missing[k]
+                    for k in ("lms_attendance", "lms_comments", "lms_spck")
+                },
+                "lms_quality_issues": res_missing["issues"],
+            }
+            self.assertFalse(is_failed(row_state))
+            ready_ok, ready_reason = is_lms_ready_for_bcnb_tick(row_state)
+            self.assertTrue(ready_ok, msg=ready_reason)
+
+        # 4. Incomplete names (only given name or missing surname) -> [LMS] Thiếu xếp hạng, chưa đủ họ tên (NOTE)
+        incomplete_summaries = [
+            "1. An\n2. Bình\n3. Cường",
+            "1. Văn An\n2. Thị Bình\n3. Hoàng Cường",
+            "Giải nhất: Nguyễn Văn An\nGiải nhì: Trần Thị Bình\nGiải ba: Cường",
+            "Top 1: Bạn Nguyễn Văn An\nTop 2: Bạn Trần Thị Bình\nTop 3: Bạn Cường",
+            "Top 1: An\nTop 2: Trần Thị Bình",
+            "Giải nhất: Bạn Minh",
+        ]
+        for idx, summary_short in enumerate(incomplete_summaries):
+            res_short = evaluate_lms_slot_quality(
+                {
+                    "summary": summary_short,
+                    "studentAttendance": att_4,
+                    "studentWorks": [],
+                },
+                class_code="VT-C4K-PTB05",
+                khoi="Coding",
+                lesson=14,
+            )
+            self.assertEqual(
+                [
+                    (issue_code(x), issue_severity(x), issue_text(x))
+                    for x in res_short["issues"]
+                ],
+                [
+                    (
+                        ISSUE_CODE_LMS_SUMMARY_NOTE,
+                        SEVERITY_NOTE,
+                        "[LMS] Thiếu xếp hạng, chưa đủ họ tên",
+                    )
+                ],
+                msg=f"short_idx={idx}",
+            )
+
+        # 5. Lesson 13 does NOT apply Lesson 14 ranking wording
+        res_l13 = evaluate_lms_slot_quality(
+            {
+                "summary": "Buổi 13: Hoàn thiện và kiểm thử sản phẩm cuối khóa",
+                "studentAttendance": [
+                    {
+                        "status": "ATTENDED",
+                        "studentKey": "stu_1",
+                        "comment": (
+                            "Hôm nay con hoàn thiện tốt tính năng chính của sản phẩm và biết cách tự kiểm tra lỗi."
+                        ),
+                    }
+                ],
+                "studentWorks": [],
+            },
+            class_code="VT-C4K-PTB05",
+            khoi="Coding",
+            lesson=13,
+        )
+        self.assertEqual(res_l13["issues"], [])
+
+        # 6. MISSING_ATTENDANCE, EXEMPT (all absent), and UNVERIFIED guards at Lesson 14
+        res_missing_att = evaluate_lms_slot_quality(
+            {
+                "summary": "",
+                "activeClassStudentCount": 4,
+                "studentAttendance": [],
+            },
+            class_code="VT-C4K-PTB05",
+            khoi="Coding",
+            lesson=14,
+        )
+        self.assertEqual(
+            [(issue_code(x), issue_severity(x), issue_text(x)) for x in res_missing_att["issues"]],
+            [(ISSUE_CODE_LMS_QUALITY_FAIL, SEVERITY_FAIL, "[LMS] Chưa điểm danh")],
+        )
+
+        res_all_absent = evaluate_lms_slot_quality(
+            {
+                "summary": "",
+                "studentAttendance": [{"status": "ABSENT", "studentKey": "stu_1"}],
+            },
+            class_code="VT-C4K-PTB05",
+            khoi="Coding",
+            lesson=14,
+        )
+        self.assertEqual(res_all_absent["issues"], [])
+
+        res_unverified = evaluate_lms_slot_quality(
+            {
+                "summary": "",
+                "studentAttendance": [],
+            },
+            class_code="VT-C4K-PTB05",
+            khoi="Coding",
+            lesson=14,
+        )
+        self.assertNotIn("[LMS] Thiếu xếp hạng", [issue_text(x) for x in res_unverified["issues"]])
+
+        # 6b. P1/P2 verifier regressions: outline words colliding with student names, empty-roster Top 3 header,
+        #     HTML entities (&ndash;/&mdash;/&#39;), and Lesson 14 summary NOT forwarded to SPCK AI reviewer
+        outline_collision_roster = [
+            {
+                "status": "ATTENDED",
+                "studentKey": f"s_{i}",
+                "student": {"fullName": nm},
+                "comment": "",
+            }
+            for i, nm in enumerate(
+                ("Nguyễn Văn Thành", "Trần Minh Khoa", "Trần Thị Bình", "Phạm Gia Huy")
+            )
+        ]
+        for outline_txt in (
+            "1. Hoàn thành sản phẩm\n2. Giới thiệu dự án\n3. Tổng kết khóa học",
+            "1. Giới thiệu bài học\n2. Bình chọn dự án\n3. Tổng kết khóa học",
+        ):
+            res_outline = evaluate_lms_slot_quality(
+                {"summary": outline_txt, "studentAttendance": outline_collision_roster, "studentWorks": []},
+                class_code="VT-C4K-PTB05",
+                khoi="Coding",
+                lesson=14,
+            )
+            self.assertEqual([issue_text(x) for x in res_outline["issues"]], ["[LMS] Thiếu xếp hạng"])
+
+        # Empty roster Top 3 header with only 2 items must NOT falsely pass
+        res_empty_roster_top3 = evaluate_lms_slot_quality(
+            {
+                "summary": "Top 3 bạn xuất sắc nhất:\n1. Nguyễn Văn An\n2. Trần Thị Bình",
+                "studentAttendance": [{"status": "ATTENDED", "studentKey": f"s_{i}"} for i in range(3)],
+                "studentWorks": [],
+            },
+            class_code="VT-C4K-PTB05",
+            khoi="Coding",
+            lesson=14,
+        )
+        self.assertEqual([issue_text(x) for x in res_empty_roster_top3["issues"]], ["[LMS] Thiếu xếp hạng"])
+
+        # Lesson 14 SPCK AI reviewer must receive empty lesson_summary (0 residual PII)
+        seen_ai_summaries: list[str] = []
+
+        class _SpySpckAiReviewer:
+            def review_short_comments_sync(self, items, **kwargs):
+                seen_ai_summaries.append(str(kwargs.get("lesson_summary", "")))
+                return {item["id"]: "VALID_CONCISE" for item in items}
+
+        evaluate_lms_spck_quality(
+            {
+                "summary": "1. Nguyễn An\n2. Trần Bình",
+                "studentAttendance": [{"status": "ATTENDED", "studentKey": "s_1"}],
+                "studentWorks": [
+                    {
+                        "studentKey": "s_1",
+                        "title": "Game",
+                        "thumbnail": "https://img/t.png",
+                        "imageUrl": ["https://img/s.png"],
+                        "attachmentUrls": ["https://files/a.zip"],
+                        "videoUrls": ["https://youtu.be/abc"],
+                        "relatedUrls": ["https://docs.google.com/presentation/d/1"],
+                        "comment": "Làm tốt lắm.",
+                    }
+                ],
+            },
+            class_code="VT-JSB16",
+            khoi="Coding",
+            lesson=14,
+            ai_reviewer=_SpySpckAiReviewer(),
+        )
+        self.assertEqual(seen_ai_summaries, [""])
+
+        # 7. Browser JS formatItemSlots computes PII-free lesson14Ranking for PTB/CSB & Coding slots
+        runner_l14_js = """
+        const { script, args } = JSON.parse(require('fs').readFileSync(0, 'utf8'));
+        global.fetch = async (url, opts) => {
+            const body = JSON.parse((opts && opts.body) || '{}');
+            if (body.operationName === 'classesMissAttendOrComment') {
+                return {
+                    ok: true,
+                    status: 200,
+                    json: async () => ({
+                        data: {
+                            classesMissAttendOrComment: {
+                                data: [
+                                    {
+                                        id: 'cls_ptb_05',
+                                        name: 'VT-C4K-PTB05',
+                                        students: [
+                                            { activeInClass: true, student: { id: 's1', fullName: 'Nguyễn Văn An' } },
+                                            { activeInClass: true, student: { id: 's2', fullName: 'Trần Thị Bình' } },
+                                            { activeInClass: true, student: { id: 's3', fullName: 'Lê Hoàng Cường' } }
+                                        ],
+                                        slots: [{
+                                            _id: 'slot_ptb_14',
+                                            index: 13,
+                                            date: '2026-11-22T10:00:00.000Z',
+                                            summary: '<ol><li>Nguyễn Văn An</li><li>Trần Thị Bình</li><li>Cường</li></ol>',
+                                            studentAttendance: [
+                                                { student: { id: 's1', fullName: 'Nguyễn Văn An' }, status: 'ATTENDED', comment: '' },
+                                                { student: { id: 's2', fullName: 'Trần Thị Bình' }, status: 'ATTENDED', comment: '' },
+                                                { student: { id: 's3', fullName: 'Lê Hoàng Cường' }, status: 'ATTENDED', comment: '' }
+                                            ]
+                                        }]
+                                    },
+                                    {
+                                        id: 'cls_jsb_16',
+                                        name: 'VT-JSB16',
+                                        students: [
+                                            { activeInClass: true, student: { id: 'j1', fullName: 'Phạm Minh Đức' } },
+                                            { activeInClass: true, student: { id: 'j2', fullName: 'Võ Gia Huy' } },
+                                            { activeInClass: true, student: { id: 'j3', fullName: 'Đỗ Ngọc Lan' } }
+                                        ],
+                                        slots: [{
+                                            _id: 'slot_jsb_14',
+                                            index: 13,
+                                            date: '2026-11-22T10:00:00.000Z',
+                                            summary: 'Giải nhất: Phạm Minh Đức\\nGiải nhì: Võ Gia Huy\\nGiải ba: Đỗ Ngọc Lan',
+                                            studentAttendance: [
+                                                { student: { id: 'j1', fullName: 'Phạm Minh Đức' }, status: 'ATTENDED', comment: '' },
+                                                { student: { id: 'j2', fullName: 'Võ Gia Huy' }, status: 'ATTENDED', comment: '' },
+                                                { student: { id: 'j3', fullName: 'Đỗ Ngọc Lan' }, status: 'ATTENDED', comment: '' }
+                                            ]
+                                        }]
+                                    },
+                                    {
+                                        id: 'cls_csb_03',
+                                        name: 'VT-CSB03',
+                                        students: [
+                                            { activeInClass: true, student: { id: 'c1', fullName: 'Nguyễn Văn Thành' } },
+                                            { activeInClass: true, student: { id: 'c2', fullName: 'Trần Minh Khoa' } },
+                                            { activeInClass: true, student: { id: 'c3', fullName: 'Lê Bảo Chung' } }
+                                        ],
+                                        slots: [{
+                                            _id: 'slot_csb_14',
+                                            index: 13,
+                                            date: '2026-11-22T10:00:00.000Z',
+                                            summary: '<p>Top 3 bạn xuất sắc nhất:</p><p>1-Nguyễn Văn Thành &ndash; Game</p><p>2:Trần Minh Khoa &mdash; App</p>',
+                                            studentAttendance: [
+                                                { student: { id: 'c1', fullName: 'Nguyễn Văn Thành' }, status: 'ATTENDED', comment: '' },
+                                                { student: { id: 'c2', fullName: 'Trần Minh Khoa' }, status: 'ATTENDED', comment: '' },
+                                                { student: { id: 'c3', fullName: 'Lê Bảo Chung' }, status: 'ATTENDED', comment: '' }
+                                            ]
+                                        }]
+                                    },
+                                    {
+                                        id: 'cls_csb_04',
+                                        name: 'VT-CSB04',
+                                        students: [
+                                            { activeInClass: true, student: { id: 'd1', fullName: 'Nguyễn Văn Thành' } },
+                                            { activeInClass: true, student: { id: 'd2', fullName: 'Trần Minh Khoa' } },
+                                            { activeInClass: true, student: { id: 'd3', fullName: 'Lê Bảo Chung' } }
+                                        ],
+                                        slots: [{
+                                            _id: 'slot_csb_04_14',
+                                            index: 13,
+                                            date: '2026-11-22T10:00:00.000Z',
+                                            summary: 'Top 3 bạn xuất sắc nhất:\\nTop 1: Nguyễn Văn Thành\\nTop 2: Trần Minh Khoa',
+                                            studentAttendance: [
+                                                { student: { id: 'd1', fullName: 'Nguyễn Văn Thành' }, status: 'ATTENDED', comment: '' },
+                                                { student: { id: 'd2', fullName: 'Trần Minh Khoa' }, status: 'ATTENDED', comment: '' },
+                                                { student: { id: 'd3', fullName: 'Lê Bảo Chung' }, status: 'ATTENDED', comment: '' }
+                                            ]
+                                        }]
+                                    },
+                                    {
+                                        id: 'cls_csb_05',
+                                        name: 'VT-CSB05',
+                                        students: [
+                                            { activeInClass: true, student: { id: 'e1', fullName: 'Nguyễn Văn Thành' } },
+                                            { activeInClass: true, student: { id: 'e2', fullName: 'Trần Minh Khoa' } },
+                                            { activeInClass: true, student: { id: 'e3', fullName: 'Lê Bảo Chung' } }
+                                        ],
+                                        slots: [{
+                                            _id: 'slot_csb_05_14',
+                                            index: 13,
+                                            date: '2026-11-22T10:00:00.000Z',
+                                            summary: 'Top 3 bạn xuất sắc nhất:\\nTop 1: Bạn Nguyễn Văn Thành\\nTop 2: Bạn Trần Minh Khoa\\nTop 3: Bạn Lê Bảo Chung',
+                                            studentAttendance: [
+                                                { student: { id: 'e1', fullName: 'Nguyễn Văn Thành' }, status: 'ATTENDED', comment: '' },
+                                                { student: { id: 'e2', fullName: 'Trần Minh Khoa' }, status: 'ATTENDED', comment: '' },
+                                                { student: { id: 'e3', fullName: 'Lê Bảo Chung' }, status: 'ATTENDED', comment: '' }
+                                            ]
+                                        }]
+                                    }
+                                ]
+                            }
+                        }
+                    })
+                };
+            }
+            return {
+                ok: true,
+                status: 200,
+                json: async () => ({ data: { findAllStudentWorks: { data: [] } } })
+            };
+        };
+        (async () => {
+            const res = await eval('(' + script + ')')(args);
+            process.stdout.write(JSON.stringify(res));
+        })();
+        """
+
+        class _L14JsPage:
+            url = "https://lms.mindx.edu.vn/admin/class-sessions"
+
+            async def evaluate(self, script: str, args: dict) -> dict:
+                proc = subprocess.run(
+                    ["node", "-e", runner_l14_js],
+                    input=json.dumps(
+                        {
+                            "script": script,
+                            "args": {**args, "preResolvedToken": "eyJhbGciOiJub25lIn0.eyJleHAiOjQ5OTk5OTk5OTl9."},
+                        }
+                    ),
+                    text=True,
+                    encoding="utf-8",
+                    capture_output=True,
+                    check=True,
+                )
+                return json.loads(proc.stdout)
+
+        with patch.dict(os.environ, {"ZALO_QUALITY_ISOLATED": "0"}):
+            fetched_l14 = await fetch_lms_class_slots_via_page(
+                _L14JsPage(),
+                class_names=["VT-C4K-PTB05", "VT-JSB16", "VT-CSB03", "VT-CSB04", "VT-CSB05"],
+            )
+        serialized_l14 = json.dumps(fetched_l14, ensure_ascii=False)
+        for pii_name in ("Nguyễn", "Trần", "Cường", "Phạm", "Đức", "Huy", "Lan", "Thành", "Khoa", "Chung"):
+            self.assertNotIn(pii_name, serialized_l14)
+
+        ptb_slot = fetched_l14["VT-C4K-PTB05"][0]
+        self.assertEqual(ptb_slot["lesson14Ranking"]["fullNameRanks"], [1, 2])
+        self.assertEqual(ptb_slot["lesson14Ranking"]["incompleteNameRanks"], [3])
+        ptb_eval = evaluate_lms_slot_quality(
+            ptb_slot, class_code="VT-C4K-PTB05", khoi="Coding", lesson=14
+        )
+        self.assertEqual(
+            [issue_text(x) for x in ptb_eval["issues"]],
+            ["[LMS] Thiếu xếp hạng, chưa đủ họ tên"],
+        )
+
+        jsb_slot = fetched_l14["VT-JSB16"][0]
+        self.assertEqual(jsb_slot["lesson14Ranking"]["fullNameRanks"], [1, 2, 3])
+        self.assertEqual(jsb_slot["lesson14Ranking"]["incompleteNameRanks"], [])
+        jsb_eval = evaluate_lms_slot_quality(
+            jsb_slot, class_code="VT-JSB16", khoi="Coding", lesson=14
+        )
+        self.assertEqual(
+            [issue_text(x) for x in jsb_eval["issues"]],
+            ["[SPCK] Chưa nộp (0/3)"],
+        )
+
+        csb_slot = fetched_l14["VT-CSB03"][0]
+        self.assertEqual(csb_slot["lesson14Ranking"]["presentRanks"], [1, 2])
+        self.assertEqual(csb_slot["lesson14Ranking"]["fullNameRanks"], [1, 2])
+        self.assertEqual(csb_slot["lesson14Ranking"]["incompleteNameRanks"], [])
+        csb_eval = evaluate_lms_slot_quality(
+            csb_slot, class_code="VT-CSB03", khoi="Coding", lesson=14
+        )
+        self.assertEqual(
+            [issue_text(x) for x in csb_eval["issues"]],
+            ["[LMS] Thiếu xếp hạng"],
+        )
+
+        csb4_slot = fetched_l14["VT-CSB04"][0]
+        self.assertEqual(csb4_slot["lesson14Ranking"]["presentRanks"], [1, 2])
+        self.assertEqual(csb4_slot["lesson14Ranking"]["fullNameRanks"], [1, 2])
+        self.assertEqual(csb4_slot["lesson14Ranking"]["incompleteNameRanks"], [])
+        csb4_eval = evaluate_lms_slot_quality(
+            csb4_slot, class_code="VT-CSB04", khoi="Coding", lesson=14
+        )
+        self.assertEqual(
+            [issue_text(x) for x in csb4_eval["issues"]],
+            ["[LMS] Thiếu xếp hạng"],
+        )
+
+        csb5_slot = fetched_l14["VT-CSB05"][0]
+        self.assertEqual(csb5_slot["lesson14Ranking"]["fullNameRanks"], [1, 2, 3])
+        self.assertEqual(csb5_slot["lesson14Ranking"]["incompleteNameRanks"], [])
+        csb5_eval = evaluate_lms_slot_quality(
+            csb5_slot, class_code="VT-CSB05", khoi="Coding", lesson=14
+        )
+        self.assertEqual(
+            [issue_text(x) for x in csb5_eval["issues"]],
+            [],
+        )
 
 
 if __name__ == "__main__":

@@ -409,6 +409,429 @@ def evaluate_lms_slot_summary(summary_raw: str | None) -> dict[str, Any]:
     }
 
 
+_L14_OUTLINE_OR_PLACEHOLDER_PHRASES = (
+    "chua co",
+    "khong co",
+    "trong",
+    "na",
+    "n a",
+    "chua xep hang",
+    "chua chon",
+    "khong",
+    "on tap",
+    "thuyet trinh",
+    "tong ket",
+    "bai hoc",
+    "buoi hoc",
+    "kiem tra",
+    "du an",
+    "san pham",
+    "gioi thieu",
+    "hoan thanh",
+    "nhan xet",
+    "binh chon",
+    "danh gia",
+    "bao cao",
+    "trao doi",
+    "chuan bi",
+    "huong dan",
+    "thuc hanh",
+    "luyen tap",
+    "khoa hoc",
+    "ban giao",
+)
+_L14_HONORIFIC_WORDS = frozenset({"ban", "em", "be", "con", "hs", "hoc", "vien"})
+_L14_NON_NAME_GIVEN_WORDS = frozenset(
+    {
+        "bai",
+        "buoi",
+        "hoc",
+        "tap",
+        "trinh",
+        "ket",
+        "du",
+        "pham",
+        "giai",
+        "hang",
+        "top",
+        "lop",
+        "nhom",
+        "diem",
+        "chua",
+        "khong",
+        "trong",
+        "kiem",
+        "tra",
+        "spck",
+        "ban",
+        "em",
+        "con",
+        "be",
+        "hs",
+        "nhat",
+        "nhi",
+        "ba",
+        "dong",
+        "web",
+        "app",
+        "game",
+        "robot",
+        "slide",
+        "video",
+        "code",
+    }
+)
+_L14_RANKING_HEADER_RE = re.compile(
+    r"(?:xep\s+hang|trao\s+giai|vinh\s+danh|giai\s+thuong|ket\s+qua\s+spck|bang\s+xep\s+hang|top\s*3|thanh\s+tich\s+spck)"
+)
+_L14_OL_RANK_PREFIX_RE = re.compile(
+    r"^(?:[123]\s*[.):\-–—]|giai\b|hang\b|top\b|xep\s+hang\b|🥇|🥈|🥉)"
+)
+
+
+def _decode_basic_html_entities(text: str) -> str:
+    return (
+        html.unescape(text)
+        .replace("\xa0", " ")
+    )
+
+
+def _strip_html_preserving_ol(raw: str | None) -> str:
+    """Convert HTML fragment into plain text while preserving `<ol><li>` numbering."""
+    if not raw:
+        return ""
+    src = str(raw)
+
+    def _replace_ol(match: re.Match[str]) -> str:
+        inner = match.group(1)
+        items = re.findall(r"<li\b[^>]*>([\s\S]*?)</li>", inner, flags=re.IGNORECASE)
+        if not items:
+            return "\n"
+        out_lines: list[str] = []
+        non_empty_idx = 0
+        for item_html in items:
+            item_txt = re.sub(
+                r"(?i)<\s*(?:br|/p|/div)\b[^>]*>", " ", item_html
+            )
+            item_txt = re.sub(r"<[^>]+>", " ", item_txt)
+            item_txt = " ".join(_decode_basic_html_entities(item_txt).split()).strip()
+            if not item_txt:
+                continue
+            folded_item = fold_text(item_txt)
+            if non_empty_idx < 3 and not _L14_OL_RANK_PREFIX_RE.match(folded_item):
+                out_lines.append(f"{non_empty_idx + 1}. {item_txt}")
+            else:
+                out_lines.append(item_txt)
+            non_empty_idx += 1
+        return "\n" + "\n".join(out_lines) + "\n"
+
+    src = re.sub(r"<ol\b[^>]*>([\s\S]*?)</ol>", _replace_ol, src, flags=re.IGNORECASE)
+    return _strip_html(src)
+
+
+def _has_contiguous_words(haystack: Sequence[str], needle: Sequence[str]) -> bool:
+    if not needle or len(needle) > len(haystack):
+        return False
+    n_len = len(needle)
+    for idx in range(len(haystack) - n_len + 1):
+        if tuple(haystack[idx : idx + n_len]) == tuple(needle):
+            return True
+    return False
+
+
+def _analyze_lesson_14_ranking_python(
+    summary_raw: str | None,
+    roster_names: Sequence[str],
+) -> dict[str, Any]:
+    """Analyze Lesson 14 summary for Top 1-2-3 ranking and full student names."""
+    plain = _strip_html_preserving_ol(summary_raw)
+    if not plain:
+        return {
+            "presentRanks": [],
+            "fullNameRanks": [],
+            "incompleteNameRanks": [],
+            "hasExplicitRanking": False,
+            "rosterNameCount": 0,
+        }
+
+    folded_lines = [
+        " ".join(fold_text(line).split()).strip()
+        for line in plain.splitlines()
+    ]
+    folded = "\n".join(line for line in folded_lines if line)
+    if not folded:
+        return {
+            "presentRanks": [],
+            "fullNameRanks": [],
+            "incompleteNameRanks": [],
+            "hasExplicitRanking": False,
+            "rosterNameCount": 0,
+        }
+
+    roster_entries: list[tuple[str, ...]] = []
+    seen_roster: set[tuple[str, ...]] = set()
+    for raw_name in roster_names:
+        cleaned_name = re.sub(r"\([^)]*\)|\[[^\]]*\]", " ", str(raw_name or ""))
+        for candidate in (cleaned_name, str(raw_name or "")):
+            tokens = tuple(re.findall(r"[a-z]+", fold_text(candidate)))
+            if tokens and tokens not in seen_roster:
+                seen_roster.add(tokens)
+                roster_entries.append(tokens)
+    roster_entries.sort(key=len, reverse=True)
+
+    raw_markers: list[tuple[int, int, int, bool]] = []
+    for emoji, r_num in (("🥇", 1), ("🥈", 2), ("🥉", 3)):
+        pos = 0
+        while True:
+            hit = folded.find(emoji, pos)
+            if hit == -1:
+                break
+            end = hit + len(emoji)
+            while end < len(folded) and folded[end] in " :.-–—\t":
+                end += 1
+            raw_markers.append((hit, end, r_num, True))
+            pos = hit + len(emoji)
+
+    kw_rank_re = re.compile(
+        r"(?:^|(?<![a-z0-9]))(?:dong\s+)?(?:giai|hang|xep\s+hang|vi\s+tri)\s*(?:thu\s*)?"
+        r"(nhat|nhi|ba|iii|ii|i|1|2|3)(?![a-z0-9])(?:\s*[:\-–—.])?"
+    )
+    rank_token_map = {
+        "nhat": 1,
+        "1": 1,
+        "i": 1,
+        "nhi": 2,
+        "2": 2,
+        "ii": 2,
+        "ba": 3,
+        "3": 3,
+        "iii": 3,
+    }
+    for m in kw_rank_re.finditer(folded):
+        r_num = rank_token_map.get(m.group(1), 0)
+        if r_num:
+            raw_markers.append((m.start(), m.end(), r_num, True))
+
+    has_top_1_or_2 = bool(
+        re.search(
+            r"(?:^|(?<![a-z0-9]))(?:(?:top|no\.?|#)\s*[12]|1st|2nd)(?![a-z0-9])",
+            folded,
+        )
+    )
+    top_3_next_rank_re = re.compile(
+        r"^(?:[12]\s*[.):\-–—]|(?:top|no\.?|#)\s*[12](?![a-z0-9])|"
+        r"(?:giai|hang|xep\s+hang|vi\s+tri)\s*(?:nhat|1|i)(?![a-z0-9])|🥇)"
+    )
+    top_3_plural_header_re = re.compile(
+        r"^(?:ban|hoc\s+vien|hs|sinh\s+vien|xuat\s+sac|lop|spck|du\s+an|san\s+pham|nhom|thi\s+sinh|guong\s+mat)\b"
+    )
+    top_rank_re = re.compile(
+        r"(?:^|(?<![a-z0-9]))(?:(?:top|no\.?|#)\s*([123])|(1st|2nd|3rd))(?![a-z0-9])(?:\s*[:\-–—.])?"
+    )
+    for m in top_rank_re.finditer(folded):
+        tok = m.group(1) or m.group(2) or ""
+        r_num = 1 if tok in {"1", "1st"} else (2 if tok in {"2", "2nd"} else (3 if tok in {"3", "3rd"} else 0))
+        if tok == "3" and m.group(0).lstrip().startswith("top"):
+            after_txt = folded[m.end() :].lstrip(" :.-–—\t\n")
+            has_item_sep = bool(re.search(r"[:\-–—.]\s*$", m.group(0)))
+            if (
+                not has_top_1_or_2
+                or top_3_next_rank_re.match(after_txt)
+                or (not has_item_sep and top_3_plural_header_re.match(after_txt))
+            ):
+                continue
+        if r_num:
+            raw_markers.append((m.start(), m.end(), r_num, True))
+
+    bare_rank_re = re.compile(
+        r"(?:^|[\n,;|\-–—])\s*(?:dong\s+)?(nhat|nhi|ba)\s*[:\-–—]\s*"
+    )
+    for m in bare_rank_re.finditer(folded):
+        r_num = rank_token_map.get(m.group(1), 0)
+        if r_num:
+            raw_markers.append((m.start(), m.end(), r_num, True))
+
+    num_rank_re = re.compile(
+        r"(?:^|[\n,;|:])\s*[-•*]?\s*([123])\s*[.):\-–—](?:\s+|(?=[a-z]))"
+    )
+    for m in num_rank_re.finditer(folded):
+        raw_markers.append((m.start(), m.end(), int(m.group(1)), False))
+
+    raw_markers.sort(key=lambda item: (item[0], -(1 if item[3] else 0), -(item[1] - item[0])))
+    markers: list[tuple[int, int, int, bool]] = []
+    last_end = -1
+    for item in raw_markers:
+        if item[0] >= last_end:
+            markers.append(item)
+            last_end = item[1]
+
+    has_ranking_header = bool(_L14_RANKING_HEADER_RE.search(folded))
+    has_explicit_ranking = has_ranking_header or any(m[3] for m in markers)
+
+    present_ranks: set[int] = set()
+    full_name_ranks: set[int] = set()
+    incomplete_name_ranks: set[int] = set()
+
+    for idx, (_m_start, m_end, r_num, is_explicit) in enumerate(markers):
+        seg_end = markers[idx + 1][0] if idx + 1 < len(markers) else len(folded)
+        seg = folded[m_end:seg_end]
+        if idx + 1 == len(markers):
+            seg_lines = [ln.strip() for ln in seg.splitlines() if ln.strip()]
+            seg = seg_lines[0] if seg_lines else ""
+        seg_words = re.findall(r"[a-z]+", seg)
+        if not seg_words:
+            continue
+
+        matched_full = False
+        for entry_tokens in roster_entries:
+            if _has_contiguous_words(seg_words, entry_tokens):
+                matched_full = True
+                break
+
+        if matched_full:
+            present_ranks.add(r_num)
+            full_name_ranks.add(r_num)
+            continue
+
+        stripped_words = [w for w in seg_words if w not in _L14_HONORIFIC_WORDS]
+        stripped_text = " ".join(stripped_words)
+        is_outline_or_placeholder = any(
+            stripped_text == phrase or stripped_text.startswith(f"{phrase} ")
+            for phrase in _L14_OUTLINE_OR_PLACEHOLDER_PHRASES
+        )
+        if not stripped_words or is_outline_or_placeholder:
+            continue
+
+        matched_partial = False
+        is_project_phrase = _has_contiguous_words(seg_words, ("du", "an"))
+        for entry_tokens in roster_entries:
+            if len(entry_tokens) >= 2:
+                for start_k in range(1, len(entry_tokens)):
+                    suffix = entry_tokens[start_k:]
+                    if len(suffix) >= 2 and _has_contiguous_words(seg_words, suffix):
+                        matched_partial = True
+                        break
+                    if (
+                        len(suffix) == 1
+                        and len(suffix[0]) >= 2
+                        and suffix[0] not in _L14_NON_NAME_GIVEN_WORDS
+                        and not (suffix[0] == "an" and is_project_phrase)
+                        and (len(stripped_words) <= 2 or is_explicit or has_ranking_header)
+                        and suffix[0] in seg_words
+                    ):
+                        matched_partial = True
+                        break
+                if not matched_partial and len(entry_tokens) >= 3:
+                    prefix2 = entry_tokens[:2]
+                    if _has_contiguous_words(seg_words, prefix2):
+                        matched_partial = True
+                if matched_partial:
+                    break
+
+        if matched_partial:
+            present_ranks.add(r_num)
+            incomplete_name_ranks.add(r_num)
+            continue
+
+        if roster_entries:
+            if is_explicit or has_ranking_header:
+                present_ranks.add(r_num)
+                incomplete_name_ranks.add(r_num)
+        else:
+            meaningful_words = [
+                w for w in stripped_words if w not in _L14_NON_NAME_GIVEN_WORDS
+            ]
+            if len(meaningful_words) >= 2 and (
+                is_explicit or has_ranking_header or len(stripped_words) <= 5
+            ):
+                present_ranks.add(r_num)
+                full_name_ranks.add(r_num)
+            elif len(meaningful_words) == 1 and (is_explicit or has_ranking_header):
+                present_ranks.add(r_num)
+                incomplete_name_ranks.add(r_num)
+
+    incomplete_only = sorted(incomplete_name_ranks - full_name_ranks)
+    return {
+        "presentRanks": sorted(present_ranks),
+        "fullNameRanks": sorted(full_name_ranks),
+        "incompleteNameRanks": incomplete_only,
+        "hasExplicitRanking": has_explicit_ranking,
+        "rosterNameCount": len(roster_entries),
+    }
+
+
+def _coerce_rank_set(raw_ranks: Any) -> set[int]:
+    if not isinstance(raw_ranks, (list, tuple, set)):
+        return set()
+    out: set[int] = set()
+    for val in raw_ranks:
+        if isinstance(val, int) and not isinstance(val, bool) and val in {1, 2, 3}:
+            out.add(val)
+    return out
+
+
+def evaluate_lms_lesson_14_ranking(
+    slot_data: Mapping[str, Any] | None,
+    *,
+    attendance_status: str,
+    attended_count: int,
+) -> dict[str, Any]:
+    """Check Lesson 14 LMS slot summary for Top 1-2-3 ranking and full student names (all classes)."""
+    if attendance_status != "VERIFIED" or int(attended_count or 0) <= 0:
+        return {"has_valid_summary": True, "summary_clean": "", "issue": ""}
+
+    data = slot_data if isinstance(slot_data, Mapping) else {}
+    required_ranks = min(3, int(attended_count))
+    required_set = set(range(1, required_ranks + 1))
+
+    precomputed = data.get("lesson14Ranking")
+    if isinstance(precomputed, Mapping):
+        present_ranks = _coerce_rank_set(precomputed.get("presentRanks"))
+        full_name_ranks = _coerce_rank_set(precomputed.get("fullNameRanks"))
+        incomplete_name_ranks = _coerce_rank_set(precomputed.get("incompleteNameRanks"))
+    else:
+        roster_names: list[str] = []
+        raw_class_names = data.get("classStudentNames")
+        if isinstance(raw_class_names, (list, tuple)):
+            roster_names.extend(str(n).strip() for n in raw_class_names if str(n or "").strip())
+        raw_att = data.get("studentAttendance")
+        if isinstance(raw_att, list):
+            for entry in raw_att[:MAX_LMS_STUDENTS_PER_SLOT]:
+                if not isinstance(entry, Mapping):
+                    continue
+                stu = entry.get("student")
+                if isinstance(stu, Mapping):
+                    fname = str(stu.get("fullName") or "").strip()
+                    if fname:
+                        roster_names.append(fname)
+        analysis = _analyze_lesson_14_ranking_python(data.get("summary"), roster_names)
+        present_ranks = _coerce_rank_set(analysis.get("presentRanks"))
+        full_name_ranks = _coerce_rank_set(analysis.get("fullNameRanks"))
+        incomplete_name_ranks = _coerce_rank_set(analysis.get("incompleteNameRanks"))
+
+    if required_set.issubset(full_name_ranks):
+        return {"has_valid_summary": True, "summary_clean": "", "issue": ""}
+
+    has_incomplete_name = bool(
+        (incomplete_name_ranks & required_set)
+        or ((present_ranks & required_set) - full_name_ranks)
+    )
+    issue_msg = (
+        "[LMS] Thiếu xếp hạng, chưa đủ họ tên"
+        if has_incomplete_name
+        else "[LMS] Thiếu xếp hạng"
+    )
+    return {
+        "has_valid_summary": False,
+        "summary_clean": "",
+        "issue": make_structured_issue(
+            ISSUE_CODE_LMS_SUMMARY_NOTE,
+            issue_msg,
+            severity=SEVERITY_NOTE,
+        ),
+    }
+
+
 def _strip_comment_header_and_student_name(
     raw_comment: str | None,
     *,
@@ -2490,7 +2913,7 @@ def evaluate_lms_spck_quality(
                 class_code=class_code,
                 khoi=khoi,
                 lesson=lesson,
-                lesson_summary=str(slot_data.get("summary") or ""),
+                lesson_summary="" if is_lesson_14(lesson) else str(slot_data.get("summary") or ""),
                 comment_kind="SPCK",
                 known_student_names=spck_known_names,
             )
@@ -2700,6 +3123,13 @@ def evaluate_lms_slot_quality(
                 )
             ],
         }
+
+    if lesson_14_flag:
+        summary_eval = evaluate_lms_lesson_14_ranking(
+            data,
+            attendance_status=str(comments_eval["attendance"].get("status") or ""),
+            attended_count=int(comments_eval["attendance"].get("attended_count") or 0),
+        )
 
     session_fail_issues: list[Any] = []
     session_manual_issues: list[Any] = []
@@ -4551,6 +4981,249 @@ async def fetch_lms_class_slots_via_page(
             }
             return false;
         };
+        const L14_OUTLINE_OR_PLACEHOLDER_PHRASES = [
+            'chua co', 'khong co', 'trong', 'na', 'n a', 'chua xep hang', 'chua chon', 'khong',
+            'on tap', 'thuyet trinh', 'tong ket', 'bai hoc', 'buoi hoc', 'kiem tra',
+            'du an', 'san pham', 'gioi thieu', 'hoan thanh', 'nhan xet',
+            'binh chon', 'danh gia', 'bao cao', 'trao doi', 'chuan bi', 'huong dan',
+            'thuc hanh', 'luyen tap', 'khoa hoc', 'ban giao'
+        ];
+        const L14_HONORIFIC_WORDS = new Set(['ban', 'em', 'be', 'con', 'hs', 'hoc', 'vien']);
+        const L14_NON_NAME_GIVEN_WORDS = new Set([
+            'bai', 'buoi', 'hoc', 'tap', 'trinh', 'ket', 'du', 'pham', 'giai', 'hang', 'top',
+            'lop', 'nhom', 'diem', 'chua', 'khong', 'trong', 'kiem', 'tra', 'spck', 'ban', 'em',
+            'con', 'be', 'hs', 'nhat', 'nhi', 'ba', 'dong', 'web', 'app', 'game', 'robot',
+            'slide', 'video', 'code'
+        ]);
+        const decodeBasicHtmlEntities = (text) => String(text || '')
+            .replace(/&nbsp;/gi, ' ')
+            .replace(/&amp;/gi, '&')
+            .replace(/&lt;/gi, '<')
+            .replace(/&gt;/gi, '>')
+            .replace(/&quot;/gi, '"')
+            .replace(/&apos;|&#0*39;|&#x0*27;/gi, "'")
+            .replace(/&ndash;/gi, '–')
+            .replace(/&mdash;/gi, '—')
+            .replace(/&hellip;/gi, '…')
+            .replace(/&#(\\d+);/g, (_m, dec) => {
+                const cp = Number.parseInt(dec, 10);
+                return (cp > 0 && cp <= 0x10FFFF && (cp < 0xD800 || cp > 0xDFFF)) ? String.fromCodePoint(cp) : _m;
+            })
+            .replace(/&#x([0-9a-f]+);/gi, (_m, hex) => {
+                const cp = Number.parseInt(hex, 16);
+                return (cp > 0 && cp <= 0x10FFFF && (cp < 0xD800 || cp > 0xDFFF)) ? String.fromCodePoint(cp) : _m;
+            })
+            .replace(/\\u00a0/g, ' ');
+        const stripHtmlPreservingOl = (rawHtml) => {
+            if (!rawHtml) return '';
+            let src = String(rawHtml);
+            src = src.replace(/<ol\\b[^>]*>([\\s\\S]*?)<\\/ol>/gi, (_full, inner) => {
+                const items = [];
+                const liRe = /<li\\b[^>]*>([\\s\\S]*?)<\\/li>/gi;
+                let lm;
+                let idx = 0;
+                while ((lm = liRe.exec(inner)) !== null) {
+                    let itemTxt = lm[1]
+                        .replace(/<\\s*(?:br|\\/p|\\/div)\\b[^>]*>/gi, ' ')
+                        .replace(/<[^>]+>/g, ' ');
+                    itemTxt = decodeBasicHtmlEntities(itemTxt).replace(/\\s+/g, ' ').trim();
+                    if (!itemTxt) continue;
+                    const foldedItem = foldVi(itemTxt);
+                    if (idx < 3 && !/^(?:[123]\\s*[.):\\-–—]|giai\\b|hang\\b|top\\b|xep\\s+hang\\b|🥇|🥈|🥉)/.test(foldedItem)) {
+                        items.push(`${idx + 1}. ${itemTxt}`);
+                    } else {
+                        items.push(itemTxt);
+                    }
+                    idx += 1;
+                }
+                return items.length ? ('\\n' + items.join('\\n') + '\\n') : '\\n';
+            });
+            src = src
+                .replace(/<\\s*(?:br|\\/p|\\/div|\\/li|\\/tr|\\/h[1-6])\\b[^>]*>/gi, '\\n')
+                .replace(/<[^>]+>/g, ' ');
+            src = decodeBasicHtmlEntities(src);
+            return src.split('\\n').map((l) => l.replace(/\\s+/g, ' ').trim()).filter(Boolean).join('\\n');
+        };
+        const hasContiguousWords = (haystack, needle) => {
+            if (!needle || needle.length === 0 || needle.length > haystack.length) return false;
+            for (let i = 0; i <= haystack.length - needle.length; i++) {
+                let ok = true;
+                for (let j = 0; j < needle.length; j++) {
+                    if (haystack[i + j] !== needle[j]) { ok = false; break; }
+                }
+                if (ok) return true;
+            }
+            return false;
+        };
+        const analyzeLesson14Ranking = (rawSummary, namesList) => {
+            const plain = stripHtmlPreservingOl(rawSummary);
+            if (!plain) {
+                return { presentRanks: [], fullNameRanks: [], incompleteNameRanks: [], hasExplicitRanking: false, rosterNameCount: 0 };
+            }
+            const folded = plain.split('\\n').map((l) => foldVi(l)).filter(Boolean).join('\\n');
+            if (!folded) {
+                return { presentRanks: [], fullNameRanks: [], incompleteNameRanks: [], hasExplicitRanking: false, rosterNameCount: 0 };
+            }
+            const rosterEntries = [];
+            const seenRoster = new Set();
+            for (const rawName of (Array.isArray(namesList) ? namesList : [])) {
+                const cleanedName = String(rawName || '').replace(/\\([^)]*\\)|\\[[^\\]]*\\]/g, ' ');
+                for (const candidate of [cleanedName, String(rawName || '')]) {
+                    const tokens = foldVi(candidate).match(/[a-z]+/g) || [];
+                    if (tokens.length > 0) {
+                        const key = tokens.join(' ');
+                        if (!seenRoster.has(key)) {
+                            seenRoster.add(key);
+                            rosterEntries.push(tokens);
+                        }
+                    }
+                }
+            }
+            rosterEntries.sort((a, b) => b.length - a.length);
+            const rawMarkers = [];
+            for (const [emoji, rNum] of [['🥇', 1], ['🥈', 2], ['🥉', 3]]) {
+                let pos = 0;
+                while (true) {
+                    const hit = folded.indexOf(emoji, pos);
+                    if (hit === -1) break;
+                    let end = hit + emoji.length;
+                    while (end < folded.length && ' :.-–—\\t'.includes(folded[end])) end += 1;
+                    rawMarkers.push({ start: hit, end, rank: rNum, isExplicit: true });
+                    pos = hit + emoji.length;
+                }
+            }
+            const rankTokenMap = { nhat: 1, '1': 1, i: 1, nhi: 2, '2': 2, ii: 2, ba: 3, '3': 3, iii: 3 };
+            const kwRankRe = /(?:^|(?<![a-z0-9]))(?:dong\\s+)?(?:giai|hang|xep\\s+hang|vi\\s+tri)\\s*(?:thu\\s*)?(nhat|nhi|ba|iii|ii|i|1|2|3)(?![a-z0-9])(?:\\s*[:\\-–—.])?/g;
+            let km;
+            while ((km = kwRankRe.exec(folded)) !== null) {
+                const rNum = rankTokenMap[km[1]] || 0;
+                if (rNum) rawMarkers.push({ start: km.index, end: km.index + km[0].length, rank: rNum, isExplicit: true });
+            }
+            const hasTop1Or2 = /(?:^|(?<![a-z0-9]))(?:(?:top|no\\.?|#)\\s*[12]|1st|2nd)(?![a-z0-9])/.test(folded);
+            const top3NextRankRe = /^(?:[12]\\s*[.):\\-–—]|(?:top|no\\.?|#)\\s*[12](?![a-z0-9])|(?:giai|hang|xep\\s+hang|vi\\s+tri)\\s*(?:nhat|1|i)(?![a-z0-9])|🥇)/;
+            const top3PluralHeaderRe = /^(?:ban|hoc\\s+vien|hs|sinh\\s+vien|xuat\\s+sac|lop|spck|du\\s+an|san\\s+pham|nhom|thi\\s+sinh|guong\\s+mat)\\b/;
+            const topRankRe = /(?:^|(?<![a-z0-9]))(?:(?:top|no\\.?|#)\\s*([123])|(1st|2nd|3rd))(?![a-z0-9])(?:\\s*[:\\-–—.])?/g;
+            let tm;
+            while ((tm = topRankRe.exec(folded)) !== null) {
+                const tok = tm[1] || tm[2] || '';
+                const rNum = (tok === '1' || tok === '1st') ? 1 : ((tok === '2' || tok === '2nd') ? 2 : ((tok === '3' || tok === '3rd') ? 3 : 0));
+                if (tok === '3' && tm[0].trimStart().startsWith('top')) {
+                    const afterTxt = folded.slice(tm.index + tm[0].length).replace(/^[\\s:.–—\\t\\n-]+/, '');
+                    const hasItemSep = /[:\\-–—.]\\s*$/.test(tm[0]);
+                    if (!hasTop1Or2 || top3NextRankRe.test(afterTxt) || (!hasItemSep && top3PluralHeaderRe.test(afterTxt))) continue;
+                }
+                if (rNum) rawMarkers.push({ start: tm.index, end: tm.index + tm[0].length, rank: rNum, isExplicit: true });
+            }
+            const bareRankRe = /(?:^|[\\n,;|\\-–—])\\s*(?:dong\\s+)?(nhat|nhi|ba)\\s*[:\\-–—]\\s*/g;
+            let bm;
+            while ((bm = bareRankRe.exec(folded)) !== null) {
+                const rNum = rankTokenMap[bm[1]] || 0;
+                if (rNum) rawMarkers.push({ start: bm.index, end: bm.index + bm[0].length, rank: rNum, isExplicit: true });
+            }
+            const numRankRe = /(?:^|[\\n,;|:])\\s*[-•*]?\\s*([123])\\s*[.):\\-–—](?:\\s+|(?=[a-z]))/g;
+            let nm;
+            while ((nm = numRankRe.exec(folded)) !== null) {
+                rawMarkers.push({ start: nm.index, end: nm.index + nm[0].length, rank: Number(nm[1]), isExplicit: false });
+            }
+            rawMarkers.sort((a, b) => (a.start - b.start) || ((b.isExplicit ? 1 : 0) - (a.isExplicit ? 1 : 0)) || ((b.end - b.start) - (a.end - a.start)));
+            const markers = [];
+            let lastEnd = -1;
+            for (const mk of rawMarkers) {
+                if (mk.start >= lastEnd) {
+                    markers.push(mk);
+                    lastEnd = mk.end;
+                }
+            }
+            const hasRankingHeader = /(?:xep\\s+hang|trao\\s+giai|vinh\\s+danh|giai\\s+thuong|ket\\s+qua\\s+spck|bang\\s+xep\\s+hang|top\\s*3|thanh\\s+tich\\s+spck)/.test(folded);
+            const hasExplicitRanking = hasRankingHeader || markers.some((mk) => mk.isExplicit);
+            const presentRanks = new Set();
+            const fullNameRanks = new Set();
+            const incompleteNameRanks = new Set();
+            for (let idx = 0; idx < markers.length; idx++) {
+                const mk = markers[idx];
+                const segEnd = (idx + 1 < markers.length) ? markers[idx + 1].start : folded.length;
+                let seg = folded.slice(mk.end, segEnd);
+                if (idx + 1 === markers.length) {
+                    const segLines = seg.split('\\n').map((l) => l.trim()).filter(Boolean);
+                    seg = segLines.length ? segLines[0] : '';
+                }
+                const segWords = seg.match(/[a-z]+/g) || [];
+                if (segWords.length === 0) continue;
+                let matchedFull = false;
+                for (const entryTokens of rosterEntries) {
+                    if (hasContiguousWords(segWords, entryTokens)) {
+                        matchedFull = true;
+                        break;
+                    }
+                }
+                if (matchedFull) {
+                    presentRanks.add(mk.rank);
+                    fullNameRanks.add(mk.rank);
+                    continue;
+                }
+                const strippedWords = segWords.filter((w) => !L14_HONORIFIC_WORDS.has(w));
+                const strippedText = strippedWords.join(' ');
+                const isOutlineOrPlaceholder = L14_OUTLINE_OR_PLACEHOLDER_PHRASES.some(
+                    (ph) => strippedText === ph || strippedText.startsWith(ph + ' ')
+                );
+                if (strippedWords.length === 0 || isOutlineOrPlaceholder) continue;
+                let matchedPartial = false;
+                const isProjectPhrase = hasContiguousWords(segWords, ['du', 'an']);
+                for (const entryTokens of rosterEntries) {
+                    if (entryTokens.length >= 2) {
+                        for (let sk = 1; sk < entryTokens.length; sk++) {
+                            const suffix = entryTokens.slice(sk);
+                            if (suffix.length >= 2 && hasContiguousWords(segWords, suffix)) {
+                                matchedPartial = true;
+                                break;
+                            }
+                            if (suffix.length === 1 && suffix[0].length >= 2 &&
+                                !L14_NON_NAME_GIVEN_WORDS.has(suffix[0]) &&
+                                !(suffix[0] === 'an' && isProjectPhrase) &&
+                                (strippedWords.length <= 2 || mk.isExplicit || hasRankingHeader) &&
+                                segWords.includes(suffix[0])) {
+                                matchedPartial = true;
+                                break;
+                            }
+                        }
+                        if (!matchedPartial && entryTokens.length >= 3 && hasContiguousWords(segWords, entryTokens.slice(0, 2))) {
+                            matchedPartial = true;
+                        }
+                        if (matchedPartial) break;
+                    }
+                }
+                if (matchedPartial) {
+                    presentRanks.add(mk.rank);
+                    incompleteNameRanks.add(mk.rank);
+                    continue;
+                }
+                if (rosterEntries.length > 0) {
+                    if (mk.isExplicit || hasRankingHeader) {
+                        presentRanks.add(mk.rank);
+                        incompleteNameRanks.add(mk.rank);
+                    }
+                } else {
+                    const meaningfulWords = strippedWords.filter((w) => !L14_NON_NAME_GIVEN_WORDS.has(w));
+                    if (meaningfulWords.length >= 2 && (mk.isExplicit || hasRankingHeader || strippedWords.length <= 5)) {
+                        presentRanks.add(mk.rank);
+                        fullNameRanks.add(mk.rank);
+                    } else if (meaningfulWords.length === 1 && (mk.isExplicit || hasRankingHeader)) {
+                        presentRanks.add(mk.rank);
+                        incompleteNameRanks.add(mk.rank);
+                    }
+                }
+            }
+            const sortedPresent = Array.from(presentRanks).sort((a, b) => a - b);
+            const sortedFull = Array.from(fullNameRanks).sort((a, b) => a - b);
+            const sortedIncomplete = Array.from(incompleteNameRanks).filter((r) => !fullNameRanks.has(r)).sort((a, b) => a - b);
+            return {
+                presentRanks: sortedPresent,
+                fullNameRanks: sortedFull,
+                incompleteNameRanks: sortedIncomplete,
+                hasExplicitRanking,
+                rosterNameCount: rosterEntries.length,
+            };
+        };
         const bearerHeader = token.startsWith('Bearer ') ? token : `Bearer ${token}`;
         const rawTokenHeader = token.replace(/^Bearer\\s+/i, '');
         const matchedClassMeta = {};
@@ -4625,6 +5298,10 @@ async def fetch_lms_class_slots_via_page(
                 const attTruncated = Array.isArray(rawAtt) && rawAtt.length > maxStudents;
                 const attendanceIds = Array.isArray(rawAtt) ? rawAtt.slice(0, maxStudents).map((a) => a && a.student && a.student.id) : [];
                 const attendanceAmbiguous = attendanceIds.some((id) => typeof id !== 'string' || !id || id.trim() !== id || id.length > 64) || new Set(attendanceIds).size !== attendanceIds.length;
+                const isLesson14Slot = Boolean(s && (s.index === 13 || s.lesson === 14 || s.lesson === '14'));
+                const lesson14Ranking = isLesson14Slot
+                    ? analyzeLesson14Ranking(s && typeof s.summary === 'string' ? s.summary.slice(0, 6000) : '', classStudentNames)
+                    : null;
                 return {
                     _id: (s && s._id != null) ? String(s._id) : '',
                     index: (s && typeof s.index === 'number' && Number.isFinite(s.index)) ? s.index : null,
@@ -4635,6 +5312,7 @@ async def fetch_lms_class_slots_via_page(
                     ...(s && typeof s.cancelled === 'boolean' ? { cancelled: s.cancelled } : {}),
                     ...(s && typeof s.isCancelled === 'boolean' ? { isCancelled: s.isCancelled } : {}),
                     summary: (s && typeof s.summary === 'string') ? scrubStudentNames(s.summary.slice(0, 6000), classStudentNames) : '',
+                    ...(lesson14Ranking ? { lesson14Ranking } : {}),
                     truncated: Boolean(slotsTruncated || attTruncated || identityAmbiguous || rawClassStudents.length > maxStudents * 2 || (s && typeof s.summary === 'string' && s.summary.length > 6000) || (rawAtt && rawAtt.some((a) => a && typeof a.comment === 'string' && a.comment.length > 15000))),
                     attendanceAmbiguous,
                     activeClassStudentCount,
@@ -5927,7 +6605,11 @@ def inspect_and_attach_quality_issues(
             seen_lms = {issue_text(x) for x in lms_issues if issue_text(x)}
             current_lms_codes = {issue_code(x) for x in lms_issues if issue_code(x)}
             current_has_summary_note = ISSUE_CODE_LMS_SUMMARY_NOTE in current_lms_codes or any(
-                ("dien tom tat bai" in fold_text(issue_text(x)) or "chua co noi dung bai" in fold_text(issue_text(x)))
+                (
+                    "dien tom tat bai" in fold_text(issue_text(x))
+                    or "chua co noi dung bai" in fold_text(issue_text(x))
+                    or "thieu xep hang" in fold_text(issue_text(x))
+                )
                 for x in lms_issues
             )
             dedup_semantic_codes = {

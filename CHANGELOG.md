@@ -4,6 +4,20 @@ Tài liệu này ghi lại toàn bộ quá trình hình thành, phát triển ki
 
 ---
 
+## [2026-11-25] — Kiểm tra xếp hạng Top 1–2–3 đủ họ tên học viên ở ô Nội dung buổi học Buổi 14 LMS (`DEC-057`)
+
+- **Phân loại luồng & Review**: `[FULL GATE]` (`DEC-047`, `DEC-054`) · Review độc lập Read-Only `Neon XHigh` (`gemini-4-neon-xhigh`, `@verifier`: `#2` `NEEDS_FIX` 2 `[P1]` + 3 `[P2]` → `#4` `NEEDS_FIX` 2 `[P1]` → **`#6` `VERDICT: PASS`**, `0` P0/P1/P2, `100%` parity Python–JS).
+- **Thay đổi Logic & Giao diện (`0` PII)**:
+  - `services/lms_quality_service.py`: Bổ sung `analyzeLesson14Ranking` trong JS `formatItemSlots` (chạy cho mọi lớp ở Buổi 14 gồm cả `PTB`/`CSB`/`Robotics`, trước khi `scrubStudentNames` chạy trên `summary`, chỉ xuất payload số nguyên không PII `lesson14Ranking`) và bản đối xứng Python `_analyze_lesson_14_ranking_python` / `evaluate_lms_lesson_14_ranking` trong `evaluate_lms_slot_quality`. Kiểm tra đủ hạng `1..min(3, attended_count)` và đủ họ tên học viên (`[LMS] Thiếu xếp hạng` vs `[LMS] Thiếu xếp hạng, chưa đủ họ tên`) mức `NOTE` (`ISSUE_CODE_LMS_SUMMARY_NOTE`, `SEVERITY_NOTE`), giữ nguyên `MISSING_ATTENDANCE` (`DEC-051`), `EXEMPT`/`UNVERIFIED`, Buổi 1–13 và truyền `lesson_summary=""` cho SPCK AI reviewer ở Buổi 14.
+  - `services/report_status.py`, `services/zalo_bcnb_service.py`, `repositories/report_repository.py`, `services/report_email_service.py`, `static/js/jobs.js`: Mở rộng `_LMS_SUMMARY_NOTE_RE`, `family:lms_summary`, khóa dedup `[lms:lesson14_ranking]`, rút gọn URL Gmail (`Thiếu XH` / `Thiếu XH/họ tên`), và `allowedSegRe` trong `isRowSpckOnlyWarningFail` để không báo đỏ `❌` hoặc chặn tick `NX LMS`.
+- **Kiểm thử & Tài liệu (13 files)**:
+  - `services/{lms_quality_service,report_status,zalo_bcnb_service,report_email_service}.py`, `repositories/report_repository.py`, `static/js/jobs.js`, `tests/{test_lms_quality_service.py,test_report_status.py,test_report_issue_display.py,check_template_js.js}`, `PROJECT_DECISIONS.md` (`DEC-057`), `PROJECT_STATE.md`, `CHANGELOG.md`.
+- **Bằng chứng kiểm chứng (`[FULL GATE]`)**:
+  - `.\CHECK_QUALITY.ps1 -Isolated`: **`QUALITY GATE PASSED`** (`exit 0`, **`793/793`** regression tests `OK` trong `307.912s`, branch coverage **`80.5%`**, Ruff `0`, Mypy `0` trên `80 source files`, `PHASE 9A QUALITY PASS` `secrets=0`, Phase 3–9B `PASS`, `phase3-app-smoke-ok`, `template-js-contract-ok scripts=8 handlers=49 behavior=14`, `compileall` `exit 0`).
+  - Targeted suites (`tests.test_lms_quality_service`, `tests.test_report_status`, `tests.test_report_issue_display`): `51/51 OK` (`2.993s` ở Lead; `3.354s` ở `@verifier` `#6`).
+
+---
+
 ## [2026-11-25] — Tinh gọn Dashboard & Sửa bố cục bảng giám sát (`#tab-dashboard`)
 
 - **Phân loại luồng**: `[FAST-TRACK]` (`DEC-047`) — chỉ thay đổi giao diện HTML/CSS/JS hiển thị trên Dashboard và test contract frontend; không chạm luồng quét/ghi BCNB, LMS, DB schema hay PII.

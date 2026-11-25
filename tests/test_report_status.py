@@ -43,6 +43,7 @@ from services.report_status import (
     CATEGORY_MISSING,
     CATEGORY_NOT_SCANNED,
     CATEGORY_REVIEW,
+    ISSUE_CODE_LMS_SUMMARY_NOTE,
     ISSUE_CODE_LEGACY_UNCLASSIFIED_FAIL,
     ISSUE_CODE_LMS_MANUAL_CHECK,
     ISSUE_CODE_LMS_QUALITY_FAIL,
@@ -2039,6 +2040,47 @@ class ReportStatusSingleSourceTests(unittest.IsolatedAsyncioTestCase):
             }
             self.assertFalse(has_spck_missing_fail(row_att_guard), msg=f"att={att_st}")
             self.assertFalse(has_spck_comment_missing_fail(row_att_guard), msg=f"att={att_st}")
+
+    def test_lesson_14_ranking_notes_classify_as_note_and_preserve_spck_only_warning(self) -> None:
+        from services.report_status import (
+            ISSUE_CODE_LMS_SPCK_MISSING,
+            is_spck_only_warning_row,
+        )
+        from services.zalo_bcnb_service import _deferred_issue_family_keys
+
+        for text in ("[LMS] Thiếu xếp hạng", "[LMS] Thiếu xếp hạng, chưa đủ họ tên"):
+            coerced = coerce_structured_issue(text)
+            self.assertEqual(coerced["code"], ISSUE_CODE_LMS_SUMMARY_NOTE)
+            self.assertEqual(coerced["severity"], SEVERITY_NOTE)
+            self.assertEqual(issue_code(text), ISSUE_CODE_LMS_SUMMARY_NOTE)
+            self.assertEqual(issue_severity(text), SEVERITY_NOTE)
+            self.assertIn("family:lms_summary", _deferred_issue_family_keys(text))
+
+        row_l14_ranking_only = {
+            "lesson": "14",
+            "status": "✅ Miễn báo cáo (Buổi 14)",
+            "evidence_state": LESSON_14_EXEMPTION,
+            "lms_status": "✅ Đã hoàn tất (Buổi 14 miễn NX)",
+            "lms_attendance": {"status": "VERIFIED", "attended_count": 4, "absent_count": 0},
+            "lms_comments": {"status": "EXEMPT", "submitted_count": 0},
+            "lms_spck": {"status": "NOT_REQUIRED"},
+            "lms_quality_issues": [
+                {"code": ISSUE_CODE_LMS_SUMMARY_NOTE, "severity": SEVERITY_NOTE, "text": "[LMS] Thiếu xếp hạng"}
+            ],
+        }
+        self.assertFalse(is_failed(row_l14_ranking_only))
+        self.assertFalse(is_spck_only_warning_row(row_l14_ranking_only))
+
+        row_l14_spck_and_ranking = {
+            **row_l14_ranking_only,
+            "lms_spck": {"status": "MISSING", "submitted_count": 0, "attended_count": 4, "exempt_count": 0},
+            "lms_quality_issues": [
+                {"code": ISSUE_CODE_LMS_SUMMARY_NOTE, "severity": SEVERITY_NOTE, "text": "[LMS] Thiếu xếp hạng, chưa đủ họ tên"},
+                {"code": ISSUE_CODE_LMS_SPCK_MISSING, "severity": SEVERITY_FAIL, "text": "[SPCK] Chưa nộp (0/4)"},
+            ],
+        }
+        self.assertTrue(is_failed(row_l14_spck_and_ranking))
+        self.assertTrue(is_spck_only_warning_row(row_l14_spck_and_ranking))
 
 
 if __name__ == "__main__":

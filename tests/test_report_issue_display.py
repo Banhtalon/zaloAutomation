@@ -622,6 +622,41 @@ class ReportIssueDisplayTests(unittest.TestCase):
             ["[LMS] Chưa điểm danh", "[LMS] Thiếu nhận xét học viên (2/6 HS)"],
         )
 
+        # Lesson 14 ranking note is NOTE (not red ❌) and preserves SPCK-only table placement & dedup
+        l14_ranking_pkg = build_failed_classes_email_package(
+            week=47,
+            year=2026,
+            failed_rows=[
+                {
+                    "class_code": "VT-JSB16",
+                    "teacher": "Giảng viên J",
+                    "lesson": "14",
+                    "class_date": "22/11/2026",
+                    "zalo_status": "✅ Miễn báo cáo (Buổi 14)",
+                    "evidence_state": "LESSON_14_EXEMPTION",
+                    "lms_attendance": {"status": "VERIFIED", "attended_count": 4, "absent_count": 0},
+                    "lms_comments": {"status": "EXEMPT", "submitted_count": 0},
+                    "lms_spck": {"status": "MISSING", "submitted_count": 0, "attended_count": 4, "exempt_count": 0},
+                    "qc_issue_note": "[LMS] Thiếu xếp hạng",
+                    "lms_quality_issues": [
+                        {"code": "LMS_SUMMARY_NOTE", "severity": "NOTE", "text": "[LMS] Thiếu xếp hạng, chưa đủ họ tên"},
+                        {"code": "LMS_SPCK_MISSING", "severity": "FAIL", "text": "[SPCK] Chưa nộp (0/4)"},
+                    ],
+                }
+            ],
+            total_rows_count=10,
+            selected_job_id=583,
+            recipients=["quangda@mindx.net.vn"],
+        )
+        self.assertEqual(l14_ranking_pkg["nx_failed_count"], 0)
+        self.assertEqual(l14_ranking_pkg["spck_only_count"], 1)
+        self.assertIn("[LMS] Thiếu xếp hạng, chưa đủ họ tên", l14_ranking_pkg["html_table"])
+        self.assertNotIn("[LMS] Thiếu xếp hạng; ", l14_ranking_pkg["html_table"])
+        parsed_l14 = IssueListParser()
+        parsed_l14.feed(l14_ranking_pkg["html_table"])
+        red_l14 = [item for item, style in zip(parsed_l14.items, parsed_l14.styles) if "#dc2626" in style]
+        self.assertEqual(red_l14, [])
+
 
 if __name__ == "__main__":
     unittest.main()
